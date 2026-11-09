@@ -87,6 +87,7 @@ function isVocTopic(value: unknown): boolean {
     && typeof value.theme === 'string' && typeof value.boundary === 'string'
     && ['pending', 'confirmed', 'ignored'].includes(String(value.status))
     && hasCounts(value, ['count', 'customers', 'pending_count', 'revision'])
+    && (value.answered_count === undefined || isCount(value.answered_count))
     && Number(value.pending_count) <= Number(value.count)
     && typeof value.first_seen === 'string' && typeof value.last_seen === 'string'
     && isStringArray(value.samples)
@@ -125,6 +126,7 @@ function validateVocResponse(name: string, data: unknown): void {
       valid = typeof data.configured === 'boolean' && typeof data.model === 'string'
         && typeof data.prompt_version === 'string'
         && hasCounts(data, ['total_pairs', 'pending_pairs', 'processed_pairs', 'topic_count', 'pending_topics', 'confirmed_topics', 'ignored_topics'])
+        && (data.answered_pairs === undefined || isCount(data.answered_pairs))
         && (data.latest_job === null || isVocJob(data.latest_job))
       break
     case 'voc/topics':
@@ -350,7 +352,7 @@ export interface LocalStatus {
 export type VocStatus = 'pending' | 'confirmed' | 'ignored'
 export interface VocTopic {
   id: number; question: string; theme: string; boundary: string; status: VocStatus
-  count: number; customers: number; pending_count: number
+  count: number; customers: number; pending_count: number; answered_count?: number
   first_seen: string; last_seen: string; samples: string[]; revision: number
 }
 export interface VocJob {
@@ -360,7 +362,7 @@ export interface VocJob {
 }
 export interface VocSummary {
   configured: boolean; model: string; prompt_version: string
-  total_pairs: number; pending_pairs: number; processed_pairs: number
+  total_pairs: number; pending_pairs: number; processed_pairs: number; answered_pairs?: number
   topic_count: number; pending_topics: number; confirmed_topics: number; ignored_topics: number
   latest_job: VocJob | null
 }

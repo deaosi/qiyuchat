@@ -10,7 +10,7 @@ from typing import Any, Iterator
 
 from . import voc
 from .config import Settings
-from .knowledge_model import PROMPT_VERSION, analyze_knowledge
+from .knowledge_model import PROMPT_VERSION, _staff_answer, analyze_knowledge
 from .local import csv_bytes
 
 SCHEMA = """
@@ -116,7 +116,7 @@ def _selected(conn: sqlite3.Connection, filters: dict, topic_id: int, limit: int
     scope = voc._scope(conn, filters)
     members = voc._members(conn, topic_id, scope)
     # Actual staff replies get priority; include whole sources, never truncate quotes.
-    members.sort(key=lambda row: (not bool(row["answer"].strip()), -row["asked_at"], -row["qa_id"]))
+    members.sort(key=lambda row: (not bool(_staff_answer(row["answer"])), -row["asked_at"], -row["qa_id"]))
     selected: list[dict] = []
     budget = 20_000
     for member in members[:limit]:
@@ -129,6 +129,10 @@ def _selected(conn: sqlite3.Connection, filters: dict, topic_id: int, limit: int
     if not selected:
         raise voc.VocError("当前范围没有可整理的有效证据，或单条回复过长；请缩小范围")
     return topic, selected
+
+def _require_staff_answers(pairs: list[dict]) -> None:
+    if not any(_staff_answer(pair.get("answer")) for pair in pairs):
+        raise voc.VocError("当前范围没有有效客服回复，请补充客服侧会话或导入含回答的记录后再沉淀知识")
 
 def _fingerprint(topic: dict, pairs: list[dict]) -> str:
     import hashlib
@@ -144,6 +148,7 @@ def start_job(cfg: Settings, filters: dict, body: dict, launch: bool = True) -> 
     limit = voc._integer(body.get("limit", 100), "来源条数", 1, 100)
     with _connection(cfg) as conn:
         topic, pairs = _selected(conn, filters, topic_id, limit)
+        _require_staff_answers(pairs)
         fingerprint = _fingerprint(topic, pairs)
         with voc._tx(conn):
             _assert_idle(conn)
@@ -174,6 +179,7 @@ def _worker(cfg: Settings, job_id: int) -> None:
             job = dict(conn.execute("SELECT * FROM knowledge_job WHERE id=?", (job_id,)).fetchone())
             snapshot = json.loads(job["input_json"])
         # No sqlite connection/transaction is alive while the gateway runs.
+        _require_staff_answers(snapshot["pairs"])
         output = analyze_knowledge(cfg.llm, snapshot["topic"], snapshot["pairs"])
         used = output["usage_tokens"]
         proposal = output["knowledge"]

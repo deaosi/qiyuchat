@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import sqlite3
 from dataclasses import replace
 from unittest.mock import patch
@@ -93,13 +94,56 @@ class TestKnowledge(LocalFixture):
         self.assertEqual(knowledge.detail(self.cfg, old["id"])["evidence"], old_detail["evidence"])
         self.assertEqual(knowledge.detail(self.cfg, old["id"])["knowledge"]["status"], "confirmed")
 
-    def test_no_staff_answer_stays_draft_and_cannot_be_confirmed(self):
-        job = self.run_job(filters={"q": "滤芯多久"})
-        record = knowledge.detail(self.cfg, job["knowledge_id"])["knowledge"]
-        self.assertEqual((record["answer"], record["status"], record["reply_patterns"]), ("", "draft", []))
-        with self.assertRaises(voc.VocError):
-            knowledge.save(self.cfg, self.save_body(record, answer="没有来源的新政策", status="confirmed"))
-        self.assertEqual(knowledge.save(self.cfg, self.save_body(record, status="draft"))["knowledge"]["status"], "draft")
+    def test_no_staff_answer_rejected_before_creating_job_or_calling_model(self):
+        before = self.sql("SELECT * FROM qa_pair ORDER BY qa_id")
+        with patch("src.knowledge.analyze_knowledge") as analyze:
+            with self.assertRaises(voc.VocError) as caught:
+                knowledge.start_job(self.cfg, {"q": "滤芯多久"}, {"topic_id": self.topic_id})
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(str(caught.exception), "当前范围没有有效客服回复，请补充客服侧会话或导入含回答的记录后再沉淀知识")
+        analyze.assert_not_called()
+        self.assertEqual(knowledge.jobs(self.cfg)["items"], [])
+        self.assertEqual(knowledge.list_knowledge(self.cfg)["total"], 0)
+        self.assertEqual(self.sql("SELECT * FROM qa_pair ORDER BY qa_id"), before)
+
+    def test_media_and_no_reply_placeholders_are_not_staff_answers(self):
+        attachment = json.dumps({"ext": "jpg", "size": 0, "name": "a.jpg", "url": "https://example.test/a.jpg"})
+        for answer in ("", " \n ", "[图片]\n[视频]", "[无回复]\n未发现客服回复", attachment):
+            with self.subTest(answer=answer):
+                self.sql("UPDATE qa_pair SET answer=?", (answer,))
+                self.voc_job()
+                with patch("src.knowledge.analyze_knowledge") as analyze:
+                    with self.assertRaises(voc.VocError) as caught:
+                        knowledge.start_job(self.cfg, {}, {"topic_id": self.topic_id})
+                self.assertEqual(caught.exception.status, 400)
+                analyze.assert_not_called()
+                self.assertEqual(knowledge.jobs(self.cfg)["items"], [])
+                self.assertEqual(knowledge.list_knowledge(self.cfg)["total"], 0)
+
+    def test_legacy_queued_without_staff_answers_fails_without_model_call(self):
+        job = knowledge.start_job(self.cfg, {}, {"topic_id": self.topic_id}, launch=False)["job"]
+        snapshot = json.loads(self.sql("SELECT input_json FROM knowledge_job WHERE id=?", (job["id"],))[0]["input_json"])
+        for pair in snapshot["pairs"]:
+            pair["answer"] = "[图片]\n暂无客服回复"
+        self.sql("UPDATE knowledge_job SET input_json=? WHERE id=?", (json.dumps(snapshot), job["id"]))
+        with patch("src.knowledge.analyze_knowledge") as analyze:
+            knowledge._worker(self.cfg, job["id"])
+        analyze.assert_not_called()
+        failed = knowledge.jobs(self.cfg)["items"][0]
+        self.assertEqual((failed["status"], failed["processed"], failed["failed"], failed["usage_tokens"]), ("failed", 0, 5, 0))
+        self.assertIn("当前范围没有有效客服回复", failed["error"])
+        self.assertEqual(knowledge.list_knowledge(self.cfg)["total"], 0)
+
+    def test_valid_staff_reply_has_priority_over_media_when_limit_is_one(self):
+        self.sql("UPDATE qa_pair SET answer='[图片]'")
+        self.sql("UPDATE qa_pair SET answer='真实客服提供的答复' WHERE session_id='s3'")
+        self.voc_job()
+        job = knowledge.start_job(self.cfg, {}, {"topic_id": self.topic_id, "limit": 1}, launch=False)["job"]
+        with patch("src.knowledge.analyze_knowledge", side_effect=self.proposal):
+            knowledge._worker(self.cfg, job["id"])
+        completed = knowledge.jobs(self.cfg)["items"][0]
+        self.assertEqual((completed["status"], completed["total"]), ("completed", 1))
+        self.assertEqual(knowledge.detail(self.cfg, completed["knowledge_id"])["evidence"][0]["answer"], "真实客服提供的答复")
 
     def test_empty_answer_and_stale_revision_cannot_be_confirmed(self):
         job = self.run_job()

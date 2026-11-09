@@ -7,8 +7,9 @@ import sqlite3
 import threading
 from dataclasses import replace
 from unittest.mock import patch
+from urllib.parse import quote
 
-from src import voc
+from src import knowledge, voc
 from src.voc_model import VocModelError
 from src.web.server import DashboardServer
 from tests.test_local import LocalFixture
@@ -64,6 +65,21 @@ class TestVoc(LocalFixture):
     def test_distinct_customers_use_stable_anonymous_identity(self):
         self.run_job()
         self.assertEqual(self.topic()["customers"], 4)
+
+    def test_answer_coverage_uses_current_scope_and_cleaned_visible_answers(self):
+        self.run_job()
+        for filters, total, answered in (({}, 5, 2), ({"group": "售前"}, 2, 1), ({"q": "滤芯多久"}, 2, 0)):
+            with self.subTest(filters=filters):
+                summary = voc.summary(self.cfg, filters)
+                topic = voc.topics(self.cfg, filters)["items"][0]
+                self.assertEqual((summary["total_pairs"], summary["answered_pairs"]), (total, answered))
+                self.assertEqual((topic["count"], topic["answered_count"]), (total, answered))
+        attachment = json.dumps({"ext": "jpg", "size": 0, "name": "a.jpg", "url": "https://example.test/a.jpg"})
+        self.sql("UPDATE qa_pair SET answer=? WHERE answer<>''", (attachment,))
+        self.assertEqual(voc.summary(self.cfg, {})["answered_pairs"], 0)
+        self.assertEqual(self.topic()["answered_count"], 0)
+        self.run_job()
+        self.assertEqual((self.topic()["count"], self.topic()["answered_count"]), (5, 0))
 
     def test_failed_model_not_marked_processed_and_retry(self):
         job = self.run_job(lambda *args: (_ for _ in ()).throw(RuntimeError("secret-response customer-original api-key")))
@@ -376,3 +392,32 @@ class TestVocHttp(LocalFixture):
         self.assertEqual(self.call("voc/detail?id=999999")[0], 404)
         self.assertEqual(self.call("voc/run", "POST", {"limit": 5})[0], 400)
         self.assertEqual(self.call("voc/topic", "POST", [body])[0], 400)
+
+    def test_zero_staff_answer_scope_returns_safe_400_without_knowledge_job(self):
+        cfg = replace(self.cfg, llm=replace(self.cfg.llm, dry_run=False,
+                      api_key="test-not-a-real-key", base_url="https://not-called.invalid/v1", model_main="test-voc"))
+        self.server.cfg = cfg
+        job = voc.start_job(cfg, {}, {}, launch=False)["job"]
+        with patch("src.voc.analyze_batch", side_effect=TestVoc.result):
+            voc._worker(cfg, job["id"])
+        topic_id = voc.topics(cfg, {})["items"][0]["id"]
+        query = "q=" + quote("滤芯多久")
+        self.assertEqual(self.call("voc/summary?" + query)[1]["answered_pairs"], 0)
+        self.assertEqual(self.call(f"voc/detail?id={topic_id}&" + query)[1]["topic"]["answered_count"], 0)
+        before = sqlite3.connect(cfg.runtime.db_path)
+        try:
+            original = before.execute("SELECT * FROM qa_pair ORDER BY qa_id").fetchall()
+        finally:
+            before.close()
+        with patch("src.knowledge.analyze_knowledge") as analyze:
+            status, response = self.call("voc/knowledge/run?" + query, "POST", {"topic_id": topic_id})
+        self.assertEqual(status, 400)
+        self.assertIn("当前范围没有有效客服回复", response["error"])
+        analyze.assert_not_called()
+        self.assertEqual(knowledge.jobs(cfg)["items"], [])
+        self.assertEqual(knowledge.list_knowledge(cfg)["total"], 0)
+        conn = sqlite3.connect(cfg.runtime.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT * FROM qa_pair ORDER BY qa_id").fetchall(), original)
+        finally:
+            conn.close()

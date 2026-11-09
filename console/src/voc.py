@@ -269,6 +269,7 @@ def _public_topic(conn: sqlite3.Connection, row: sqlite3.Row, scope: dict[int, d
     stamps = [m["asked_at"] for m in members if m["asked_at"]]
     return {"id": row["id"], "question": row["question"], "theme": row["theme"], "boundary": row["boundary"],
             "status": row["status"], "revision": row["revision"], "count": len(members),
+            "answered_count": sum(bool(m["answer"].strip()) for m in members),
             "customers": len({m["customer_id"] for m in members}),
             "pending_count": sum(m["status"] == "pending" for m in members),
             "first_seen": _asked(min(stamps)) if stamps else "", "last_seen": _asked(max(stamps)) if stamps else "",
@@ -300,6 +301,7 @@ def summary(cfg: Settings, filters: dict[str, Any]) -> dict:
         topics = _topics(conn, scope)
         return {"configured": configured(cfg), "model": cfg.llm.model_main, "prompt_version": PROMPT_VERSION,
                 "total_pairs": len(scope), "pending_pairs": len(scope) - processed, "processed_pairs": processed,
+                "answered_pairs": sum(bool(pair["answer"].strip()) for pair in scope.values()),
                 "topic_count": len(topics), "pending_topics": sum(t["status"] == "pending" for t in topics),
                 "confirmed_topics": sum(t["status"] == "confirmed" for t in topics), "ignored_topics": sum(t["status"] == "ignored" for t in topics),
                 "latest_job": _public_job(conn.execute("SELECT * FROM voc_job ORDER BY id DESC LIMIT 1").fetchone())}
