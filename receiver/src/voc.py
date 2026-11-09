@@ -60,6 +60,14 @@ class VocError(ValueError):
         super().__init__(message)
         self.status = status
 
+
+def _job_error(exc: BaseException, fallback: str, *, allow_local: bool = False) -> str:
+    """Only designated safe errors may cross the worker/API boundary."""
+    safe_types = (VocModelError, VocError) if allow_local else (VocModelError,)
+    if isinstance(exc, safe_types):
+        return str(exc).strip()[:240] or fallback
+    return fallback
+
 _INIT_LOCK = threading.RLock()
 _INITIALIZED: set[str] = set()
 _WORKERS: dict[str, threading.Thread] = {}
@@ -546,10 +554,11 @@ def _worker(cfg: Settings, job_id: int) -> None:
                 output = analyze_batch(cfg.llm, pairs, available)
             except Exception as exc:
                 consumed = max(0, int(getattr(exc, "usage_tokens", 0) or 0))
+                message = _job_error(exc, "模型调用或结果校验失败，可重试")
                 with _connection(cfg) as conn, _tx(conn):
                     conn.execute("UPDATE voc_job SET usage_tokens=usage_tokens+? WHERE id=?", (consumed, job_id))
-                    conn.executemany("UPDATE voc_job_item SET status='failed',error='模型调用或结果校验失败，可重试' WHERE job_id=? AND qa_id=?", [(job_id, p["qa_id"]) for p in pairs])
-                    conn.execute("UPDATE voc_job SET failed=failed+?,error='部分模型批次失败，可重试',updated_at=? WHERE id=?", (len(pairs), time.time(), job_id))
+                    conn.executemany("UPDATE voc_job_item SET status='failed',error=? WHERE job_id=? AND qa_id=?", [(message, job_id, p["qa_id"]) for p in pairs])
+                    conn.execute("UPDATE voc_job SET failed=failed+?,error=?,updated_at=? WHERE id=?", (len(pairs), message, time.time(), job_id))
                 continue
             with _connection(cfg) as conn:
                 with _tx(conn):
@@ -569,13 +578,13 @@ def _worker(cfg: Settings, job_id: int) -> None:
             job = conn.execute("SELECT * FROM voc_job WHERE id=?", (job_id,)).fetchone()
             status = "partial" if job["failed"] and job["processed"] else "failed" if job["failed"] else "completed"
             conn.execute("UPDATE voc_job SET status=?,updated_at=? WHERE id=?", (status, time.time(), job_id))
-    except Exception:
-        # Never include gateway exception/body/key or customer content in errors.
+    except Exception as exc:
+        message = _job_error(exc, "任务执行中断，可重试")
         try:
             with _connection(cfg) as conn, _tx(conn):
-                conn.execute("UPDATE voc_job_item SET status='failed',error='任务执行中断，可重试' WHERE job_id=? AND status IN ('queued','running')", (job_id,))
+                conn.execute("UPDATE voc_job_item SET status='failed',error=? WHERE job_id=? AND status IN ('queued','running')", (message, job_id))
                 failed = conn.execute("SELECT COUNT(*) FROM voc_job_item WHERE job_id=? AND status='failed'", (job_id,)).fetchone()[0]
-                conn.execute("UPDATE voc_job SET status='failed',failed=?,error='任务执行中断，可重试',updated_at=? WHERE id=?", (failed, time.time(), job_id))
+                conn.execute("UPDATE voc_job SET status='failed',failed=?,error=?,updated_at=? WHERE id=?", (failed, message, time.time(), job_id))
         except Exception:
             pass
     finally:

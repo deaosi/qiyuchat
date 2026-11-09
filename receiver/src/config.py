@@ -75,6 +75,13 @@ def _b(key: str, default: bool = False) -> bool:
     return _s(key, "1" if default else "0").lower() in ("1", "true", "yes", "y", "on")
 
 
+def _thinking_mode() -> str:
+    value = _s("LLM_THINKING").lower()
+    if value not in ("", "enabled", "disabled"):
+        raise ValueError("LLM_THINKING 仅支持留空、enabled 或 disabled")
+    return value
+
+
 def _t(key: str) -> tuple[str, ...]:
     """逗号分隔的字符串列表；空值返回空元组。"""
     raw = os.environ.get(key, "")
@@ -116,6 +123,8 @@ class LLMConfig:
     extra_headers: tuple[tuple[str, str], ...] = ()
     # 网关不支持 response_format 时置 0，改由提示词约束 JSON
     json_mode: bool = True
+    # Optional provider extension; VOC/knowledge only. Empty keeps generic gateways compatible.
+    thinking: str = ""
 
 
 @dataclass(frozen=True)
@@ -203,6 +212,7 @@ def load_settings() -> Settings:
             dry_run=_b("LLM_DRY_RUN", True),
             extra_headers=_kv_headers("LLM_EXTRA_HEADERS"),
             json_mode=_b("LLM_JSON_MODE", True),
+            thinking=_thinking_mode(),
         ),
         feishu=FeishuConfig(
             webhook=_s("FEISHU_WEBHOOK"),

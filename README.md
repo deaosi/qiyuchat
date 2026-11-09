@@ -50,12 +50,14 @@ LLM_BASE_URL=https://your-gateway.example/v1
 LLM_API_KEY=your-server-only-key
 LLM_MODEL_MAIN=your-model-id
 LLM_DRY_RUN=0
-LLM_BATCH_SIZE=8
+LLM_BATCH_SIZE=4
 LLM_CONCURRENCY=1
 LLM_TIMEOUT=120
 ```
 
 密钥不通过网页提交或返回，不放入前端构建、仓库及任务日志。演示库禁止真实模型调用。`/api/voc/*` 沿用原管理员 Cookie 和同源写保护。
+
+支持 `thinking` 参数的网关可设置 `LLM_THINKING=disabled`，减少结构化整理的思考耗时及输出截断；默认留空，不向其它网关发送此参数。模型输出不完整、JSON 或证据校验失败时任务保留明确错误，重试只处理未成功的问答。
 
 ## 更新服务
 

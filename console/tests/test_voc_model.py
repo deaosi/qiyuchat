@@ -135,6 +135,27 @@ class TestVocGateway(unittest.TestCase):
                              model_main="configured-model", dry_run=False)
 
     @patch("src.voc_model.request")
+    def test_optional_thinking_object_and_default_omission(self, transport):
+        for mode in ("", "enabled", "disabled", "invalid"):
+            with self.subTest(mode=mode):
+                transport.return_value = gateway()
+                result = analyze_batch(replace(self.cfg, thinking=mode), [pair()], [])
+                self.assertEqual(len(result["results"]), 1)
+                payload = transport.call_args.kwargs["body"]
+                if mode in ("enabled", "disabled"):
+                    self.assertEqual(payload["thinking"], {"type": mode})
+                else:
+                    self.assertNotIn("thinking", payload)
+
+    @patch("src.voc_model.request")
+    def test_disabled_thinking_does_not_bypass_json_validation(self, transport):
+        transport.return_value = gateway(content="not JSON", tokens=29)
+        with self.assertRaises(VocModelError) as caught:
+            analyze_batch(replace(self.cfg, thinking="disabled"), [pair()], [])
+        self.assertEqual(caught.exception.usage_tokens, 29)
+        self.assertEqual(transport.call_args.kwargs["body"]["thinking"], {"type": "disabled"})
+
+    @patch("src.voc_model.request")
     def test_sanitized_data_and_full_task_are_in_user_prompt(self, transport):
         transport.return_value = gateway()
         media = json.dumps({"ext": "jpg", "name": "a.jpg", "size": 0, "url": "https://media.example.test/a.jpg"})

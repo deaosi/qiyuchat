@@ -157,6 +157,22 @@ class TestKnowledgeGateway(unittest.TestCase):
                              model_main="configured-model", dry_run=False)
         self.topic = {"question": "这个型号保修多久？", "theme": "保修", "boundary": "保修咨询。"}
 
+    @patch("src.voc_model.request")
+    def test_thinking_uses_shared_transport_and_preserves_validation(self, transport):
+        for mode in ("", "enabled", "disabled"):
+            with self.subTest(mode=mode):
+                transport.return_value = gateway()
+                analyze_knowledge(replace(self.cfg, thinking=mode), self.topic, [pair()])
+                payload = transport.call_args.kwargs["body"]
+                if mode:
+                    self.assertEqual(payload["thinking"], {"type": mode})
+                else:
+                    self.assertNotIn("thinking", payload)
+        transport.return_value = gateway(content="invalid JSON", tokens=37)
+        with self.assertRaises(VocModelError) as caught:
+            analyze_knowledge(replace(self.cfg, thinking="disabled"), self.topic, [pair()])
+        self.assertEqual(caught.exception.usage_tokens, 37)
+
     @patch("src.knowledge_model._gateway")
     def test_prompt_repeats_full_task_isolated_sanitized_data_and_budget(self, transport):
         transport.return_value = gateway()

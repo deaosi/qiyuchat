@@ -230,6 +230,11 @@ def _parse_output(content: Any) -> Any:
 
 
 def _gateway(cfg: LLMConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    # Both VOC and knowledge use this transport; the legacy cleaning client does not.
+    # Copy the payload so optional provider settings never mutate caller data.
+    payload = dict(payload)
+    if cfg.thinking in ("enabled", "disabled"):
+        payload["thinking"] = {"type": cfg.thinking}
     headers = {str(key): str(value) for key, value in cfg.extra_headers}
     if cfg.api_key:
         headers["Authorization"] = f"Bearer {cfg.api_key}"

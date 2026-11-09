@@ -112,12 +112,27 @@ class TestKnowledge(LocalFixture):
 
     def test_failed_call_retries_and_records_consumed_tokens(self):
         def fail(*args):
-            raise VocModelError("secret-response", usage_tokens=19)
+            raise VocModelError("模型输出未完整结束，请减少来源数量。", usage_tokens=19)
         failed = self.run_job(fail)
         self.assertEqual((failed["status"], failed["failed"], failed["usage_tokens"]), ("failed", 5, 19))
-        self.assertNotIn("secret", failed["error"])
+        self.assertEqual(failed["error"], "模型输出未完整结束，请减少来源数量。")
         self.assertEqual(knowledge.list_knowledge(self.cfg)["total"], 0)
         self.assertEqual(self.run_job()["status"], "completed")
+
+    def test_unknown_exceptions_are_hidden_and_safe_json_errors_are_visible(self):
+        def unsafe(*args):
+            raise RuntimeError("api-key secret-response customer-original")
+        failed = self.run_job(unsafe)
+        self.assertNotIn("api-key", failed["error"])
+        self.assertNotIn("customer-original", failed["error"])
+        def safe(*args):
+            raise VocModelError("模型返回的不是严格 JSON 对象。")
+        self.assertEqual(self.run_job(safe)["error"], "模型返回的不是严格 JSON 对象。")
+
+    def test_safe_worker_diagnostics_are_limited_to_240_characters(self):
+        def fail(*args):
+            raise VocModelError("安全校验说明" * 100)
+        self.assertEqual(len(self.run_job(fail)["error"]), 240)
 
     def test_network_holds_no_sqlite_transaction(self):
         def inspect(cfg, topic, pairs):
@@ -132,7 +147,9 @@ class TestKnowledge(LocalFixture):
         def change(cfg, topic, pairs):
             self.sql("UPDATE qa_pair SET answer='并发修改客服答复' WHERE qa_id=?", (pairs[0]["qa_id"],))
             return self.proposal(cfg, topic, pairs)
-        self.assertEqual(self.run_job(change)["status"], "failed")
+        failed = self.run_job(change)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"], "分析期间来源或主题已变更，请重新整理")
         self.assertEqual(knowledge.list_knowledge(self.cfg)["total"], 0)
 
     def test_manual_exclusion_during_generation_invalidates_source_snapshot(self):

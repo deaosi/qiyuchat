@@ -66,11 +66,25 @@ class TestVoc(LocalFixture):
         self.assertEqual(self.topic()["customers"], 4)
 
     def test_failed_model_not_marked_processed_and_retry(self):
-        job = self.run_job(lambda *args: (_ for _ in ()).throw(VocModelError("secret-response")))
+        job = self.run_job(lambda *args: (_ for _ in ()).throw(RuntimeError("secret-response customer-original api-key")))
         self.assertEqual((job["status"], job["failed"], job["processed"]), ("failed", 5, 0))
         self.assertNotIn("secret-response", job["error"])
+        self.assertNotIn("api-key", str(self.sql("SELECT error FROM voc_job_item")))
         self.assertEqual(voc.summary(self.cfg, self.filters)["pending_pairs"], 5)
         self.assertEqual(self.run_job()["processed"], 5)
+
+    def test_safe_json_and_truncation_errors_visible_and_bounded(self):
+        messages = ["模型返回的不是严格 JSON 对象。", "模型输出未完整结束，请缩小批次或增加输出上限。", "安全校验说明" * 100]
+        for message in messages:
+            with self.subTest(message=message[:20]):
+                def fail(*args):
+                    raise VocModelError(message)
+                job = self.run_job(fail)
+                expected = message[:240]
+                self.assertEqual(job["error"], expected)
+                errors = self.sql("SELECT error FROM voc_job_item WHERE job_id=?", (job["id"],))
+                self.assertTrue(errors)
+                self.assertTrue(all(item["error"] == expected for item in errors))
 
     def test_partial_job_retries_only_failed_rows(self):
         calls = 0

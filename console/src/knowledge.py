@@ -190,9 +190,10 @@ def _worker(cfg: Settings, job_id: int) -> None:
             conn.execute("UPDATE knowledge_job SET status='completed',knowledge_id=?,processed=total,usage_tokens=?,updated_at=? WHERE id=?", (knowledge_id, used, now, job_id))
     except Exception as exc:
         used = max(used, max(0, int(getattr(exc, "usage_tokens", 0) or 0)))
+        message = voc._job_error(exc, "知识整理失败或来源已变更，请缩小范围后重试", allow_local=True)
         try:
             with _connection(cfg) as conn:
-                conn.execute("UPDATE knowledge_job SET status='failed',failed=total,error='知识整理失败或来源已变更，请缩小范围后重试',usage_tokens=?,updated_at=? WHERE id=?", (used, time.time(), job_id))
+                conn.execute("UPDATE knowledge_job SET status='failed',failed=total,error=?,usage_tokens=?,updated_at=? WHERE id=?", (message, used, time.time(), job_id))
         except Exception:
             pass
     finally:
