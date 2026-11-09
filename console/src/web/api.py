@@ -13,7 +13,7 @@ from ..app import get_db
 from ..clean.rules import mask_pii
 from ..config import Settings, settings
 from ..extract.concepts import concept_signature
-from ..extract.identity import HIDDEN_ROLES
+from ..extract.identity import HIDDEN_ROLES, sender_context
 from ..extract.text import clean_visible_text
 from ..local import csv_bytes
 
@@ -210,7 +210,7 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
         return None
     messages = get_db(cfg).get_messages(raw["session_id"])
     visible_messages = []
-    for message in messages:
+    for message in sender_context(messages, raw["session_id"], str(raw.get("customer_id") or "")):
         content = clean_visible_text(message["content"])
         if message["role"] not in HIDDEN_ROLES and content:
             visible_messages.append({"role": message["role"], "content": mask_pii(content),

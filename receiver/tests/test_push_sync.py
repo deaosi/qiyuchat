@@ -311,6 +311,31 @@ class TestPushSync(LocalFixture):
         self.assertEqual([p["customer_id"] for p in pairs], ["qiyu-user:42", f"qiyu-session:{SID}", f"qiyu-session:{SID}"])
         self.assertTrue(all("\n" not in p["question"] for p in pairs))
 
+    def test_detail_returns_only_selected_visitor_context_without_internal_controls(self):
+        self.api.metadata["userId"] = 999
+        self.api.rows = [message(1, 1, "发票应该怎么申请？", externalUserId="visitor-A", userId=11, userName="访客甲"),
+                         message(2, 0, "请在订单页面填写发票抬头。"),
+                         message(3, 1, "退款应该怎么申请？", externalUserId="visitor-B", userId=22, userName="访客乙"),
+                         message(4, 0, "请在订单页面提交退款申请。")]
+        self.assertEqual(self.sync()["completed"], 1)
+        pairs = self.sql("SELECT qa_id,customer_id FROM qa_pair WHERE session_id=? ORDER BY idx", (str(SID),))
+        expected = {"qiyu-external:visitor-A": ["发票应该怎么申请？", "请在订单页面填写发票抬头。"],
+                    "qiyu-external:visitor-B": ["退款应该怎么申请？", "请在订单页面提交退款申请。"]}
+        for pair in pairs:
+            detail = web_api.detail(self.cfg, pair["qa_id"])
+            self.assertEqual([m["content"] for m in detail["messages"]], expected[pair["customer_id"]])
+            self.assertTrue(all(m["role"] in ("user", "staff") for m in detail["messages"]))
+            self.assertNotIn(SOURCE_IDENTITY_ROLE, json.dumps(detail["messages"]))
+            self.assertFalse(detail["archived"])
+        # A selected sender can have no safe contextual segment while original
+        # messages still exist. That is different from raw-message archival.
+        self.sql("UPDATE qa_pair SET customer_id='missing-sender' WHERE qa_id=?", (pairs[0]["qa_id"],))
+        filtered = web_api.detail(self.cfg, pairs[0]["qa_id"])
+        self.assertEqual(filtered["messages"], [])
+        self.assertFalse(filtered["archived"])
+        self.sql("DELETE FROM raw_message WHERE session_id=?", (str(SID),))
+        self.assertTrue(web_api.detail(self.cfg, pairs[0]["qa_id"])["archived"])
+
     def test_control_schema_is_strict_and_user_text_cannot_forge_sender_identity(self):
         control = encode_identity(str(SID), "qiyu-external:sender", "访客")
         source = [{"role": "user", "content": control, "ts": 1}, {"role": "staff", "content": "原始客户文字的答复", "ts": 2}]

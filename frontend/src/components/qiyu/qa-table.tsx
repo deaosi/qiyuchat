@@ -7,7 +7,7 @@ import {
 
 import type { QAPair } from '@/lib/demo-data'
 import { ApiError, apiGet, normalizePair, type ApiFilters } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -248,7 +248,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
                   </div>
                 </TableCell>}
                 {visible.has('customer') && <TableCell className="py-4 align-top">
-                  <span className="font-medium">{row.customerName}</span>
+                  <span className="font-medium">{customerLabel(row.customerName, row.customerId)}</span>
                   <div className="mt-1.5 text-xs text-muted-foreground">{row.groupName}</div>
                 </TableCell>}
                 {visible.has('status') && <TableCell className="py-4 align-top">
