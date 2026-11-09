@@ -15,6 +15,10 @@ export interface ApiFilters {
   offset?: number
   id?: string | number
   top?: number
+  status?: VocStatus | KnowledgeStatus | 'all'
+  topic_q?: string
+  evidence_status?: 'all' | 'pending' | 'confirmed'
+  topic_id?: number
 }
 
 export class ApiError extends Error {
@@ -78,6 +82,91 @@ function isCluster(value: unknown): boolean {
     && hasCounts(value, ['cluster_id', 'count', 'variants', 'customers', 'groups', 'unanswered', 'share'])
 }
 
+function isVocTopic(value: unknown): boolean {
+  return isRecord(value) && isCount(value.id) && typeof value.question === 'string'
+    && typeof value.theme === 'string' && typeof value.boundary === 'string'
+    && ['pending', 'confirmed', 'ignored'].includes(String(value.status))
+    && hasCounts(value, ['count', 'customers', 'pending_count', 'revision'])
+    && Number(value.pending_count) <= Number(value.count)
+    && typeof value.first_seen === 'string' && typeof value.last_seen === 'string'
+    && isStringArray(value.samples)
+}
+
+function isVocJob(value: unknown): boolean {
+  return isRecord(value) && hasCounts(value, ['id', 'total', 'processed', 'failed', 'skipped', 'usage_tokens'])
+    && ['queued', 'running', 'completed', 'partial', 'failed'].includes(String(value.status))
+    && typeof value.model === 'string' && typeof value.error === 'string'
+    && typeof value.created_at === 'string' && typeof value.updated_at === 'string'
+}
+
+function isKnowledge(value: unknown): boolean {
+  return isRecord(value) && hasCounts(value, ['id', 'topic_id', 'revision'])
+    && ['question', 'answer', 'scope', 'model', 'created_at', 'updated_at'].every(key => typeof value[key] === 'string')
+    && ['draft', 'confirmed', 'ignored'].includes(String(value.status))
+    && isStringArray(value.cautions) && isStringArray(value.missing_info)
+    && Array.isArray(value.evidence_ids) && value.evidence_ids.every(isCount)
+    && Array.isArray(value.reply_patterns) && value.reply_patterns.every(item => isRecord(item)
+      && typeof item.label === 'string' && typeof item.text === 'string' && Array.isArray(item.qa_ids) && item.qa_ids.every(isCount))
+    && Array.isArray(value.conflicts) && value.conflicts.every(item => isRecord(item)
+      && typeof item.description === 'string' && Array.isArray(item.qa_ids) && item.qa_ids.every(isCount))
+    && (value.source_quotes === undefined || Array.isArray(value.source_quotes) && value.source_quotes.every(item => isRecord(item) && isCount(item.qa_id) && typeof item.quote === 'string'))
+}
+
+function isKnowledgeJob(value: unknown): boolean {
+  return isVocJob(value) && isRecord(value) && isCount(value.topic_id)
+    && (value.knowledge_id === undefined || value.knowledge_id === null || isCount(value.knowledge_id))
+}
+
+function validateVocResponse(name: string, data: unknown): void {
+  if (!name.startsWith('voc/')) return
+  let valid = isRecord(data)
+  if (valid && isRecord(data)) switch (name) {
+    case 'voc/summary':
+      valid = typeof data.configured === 'boolean' && typeof data.model === 'string'
+        && typeof data.prompt_version === 'string'
+        && hasCounts(data, ['total_pairs', 'pending_pairs', 'processed_pairs', 'topic_count', 'pending_topics', 'confirmed_topics', 'ignored_topics'])
+        && (data.latest_job === null || isVocJob(data.latest_job))
+      break
+    case 'voc/topics':
+      valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(isVocTopic)
+      break
+    case 'voc/detail':
+      valid = isVocTopic(data.topic) && isCount(data.total) && Array.isArray(data.evidence)
+        && data.evidence.every(item => isRecord(item) && isCount(item.qa_id)
+          && ['question', 'answer', 'customer_name', 'customer_id', 'group_name', 'staff_name', 'asked_at_text', 'reason'].every(key => typeof item[key] === 'string')
+          && typeof item.confidence === 'number' && Number.isFinite(item.confidence)
+          && ['pending', 'confirmed'].includes(String(item.status)))
+      break
+    case 'voc/jobs':
+      valid = Array.isArray(data.items) && data.items.every(isVocJob)
+      break
+    case 'voc/run':
+      valid = isVocJob(data.job)
+      break
+    case 'voc/topic':
+    case 'voc/merge':
+    case 'voc/evidence':
+      valid = isVocTopic(data.topic)
+      break
+    case 'voc/knowledge':
+      valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(isKnowledge)
+      break
+    case 'voc/knowledge/detail':
+      valid = isKnowledge(data.knowledge) && Array.isArray(data.evidence) && data.evidence.every(isPair)
+      break
+    case 'voc/knowledge/jobs':
+      valid = Array.isArray(data.items) && data.items.every(isKnowledgeJob)
+      break
+    case 'voc/knowledge/run':
+      valid = isKnowledgeJob(data.job)
+      break
+    case 'voc/knowledge/save':
+      valid = isKnowledge(data.knowledge)
+      break
+  }
+  if (!valid) throw new ApiError('VOC 接口返回的数据格式不完整，请刷新或联系管理员。', 502)
+}
+
 /** Reject an older/incompatible backend instead of rendering missing fields as zero. */
 function validateGetResponse(name: string, data: unknown): void {
   let valid = true
@@ -135,6 +224,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
     credentials: 'same-origin', cache: 'no-store', signal,
   }))
   validateGetResponse(name, data)
+  validateVocResponse(name, data)
   return data as T
 }
 
@@ -142,10 +232,12 @@ export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyI
   const requestHeaders = new Headers(headers)
   if (!requestHeaders.has('Content-Type')) requestHeaders.set('Content-Type', 'application/octet-stream')
   requestHeaders.set('X-Local-Request', '1')
-  return readResponse<T>(await fetch(apiUrl(name, filters), {
+  const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
     method: 'POST', credentials: 'same-origin', headers: requestHeaders,
     body: body ?? new Uint8Array(),
   }))
+  validateVocResponse(name, data)
+  return data as T
 }
 
 export async function downloadExport(filters: ApiFilters): Promise<void> {
@@ -155,6 +247,17 @@ export async function downloadExport(filters: ApiFilters): Promise<void> {
   const link = document.createElement('a')
   link.href = url
   link.download = filters.source === 'demo' ? '七鱼问答-演示数据.csv' : '七鱼问答-脱敏导出.csv'
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+export async function downloadKnowledgeExport(source: ApiFilters['source']): Promise<void> {
+  const response = await fetch(apiUrl('voc/knowledge/export', { source, status: 'confirmed' }), { credentials: 'same-origin', cache: 'no-store' })
+  if (!response.ok) await readResponse<never>(response)
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = source === 'demo' ? '七鱼知识-已确认-演示库.csv' : '七鱼知识-已确认.csv'
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
@@ -243,3 +346,40 @@ export interface LocalStatus {
   tasks: { id?: number; kind: string; status?: string; created_at_text: string; result: Record<string, unknown> }[]
   [key: string]: unknown
 }
+
+export type VocStatus = 'pending' | 'confirmed' | 'ignored'
+export interface VocTopic {
+  id: number; question: string; theme: string; boundary: string; status: VocStatus
+  count: number; customers: number; pending_count: number
+  first_seen: string; last_seen: string; samples: string[]; revision: number
+}
+export interface VocJob {
+  id: number; status: 'queued' | 'running' | 'completed' | 'partial' | 'failed'
+  total: number; processed: number; failed: number; skipped: number
+  model: string; error: string; created_at: string; updated_at: string; usage_tokens: number
+}
+export interface VocSummary {
+  configured: boolean; model: string; prompt_version: string
+  total_pairs: number; pending_pairs: number; processed_pairs: number
+  topic_count: number; pending_topics: number; confirmed_topics: number; ignored_topics: number
+  latest_job: VocJob | null
+}
+export interface VocEvidence extends Record<string, unknown> {
+  qa_id: number; question: string; answer: string
+  customer_name: string; customer_id: string; group_name: string; staff_name: string
+  asked_at_text: string; confidence: number; reason: string; status: 'pending' | 'confirmed'
+}
+export interface VocTopicList { items: VocTopic[]; total: number }
+export interface VocDetail { topic: VocTopic; evidence: VocEvidence[]; total: number }
+
+export type KnowledgeStatus = 'draft' | 'confirmed' | 'ignored'
+export interface Knowledge {
+  id: number; topic_id: number; question: string; answer: string; scope: string; cautions: string[]
+  reply_patterns: { label: string; text: string; qa_ids: number[] }[]
+  conflicts: { description: string; qa_ids: number[] }[]
+  missing_info: string[]; evidence_ids: number[]; status: KnowledgeStatus; revision: number
+  model: string; created_at: string; updated_at: string
+  source_quotes?: { qa_id: number; quote: string }[]
+}
+export interface KnowledgeJob extends VocJob { topic_id: number; knowledge_id?: number | null }
+export interface KnowledgeDetail { knowledge: Knowledge; evidence: Record<string, unknown>[] }

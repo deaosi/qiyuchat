@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ..config import Settings, settings
+from .. import voc, knowledge
 from ..local import MAX_FILE_BYTES, clean_local, demo_settings, import_file, load_demo, parse_import, template_bytes
 from ..log import get
 from . import api
@@ -43,6 +44,8 @@ class DashboardServer(ThreadingHTTPServer):
                  allowed_origins: tuple[str, ...] = (),
                  admin_key: str = ""):
         self.cfg = cfg
+        voc.startup(cfg)
+        knowledge.startup(cfg)
         # 反代部署时额外放行的 Host / Origin；默认空 = 只认本机回环。
         self.allowed_hosts = frozenset(h.lower() for h in allowed_hosts)
         self.allowed_origins = frozenset(o.lower() for o in allowed_origins)
@@ -282,6 +285,25 @@ class Handler(BaseHTTPRequestHandler):
     def _api(self, name: str, qs: dict[str, list[str]]) -> None:
         cfg = self._cfg(qs)
         filters = self._filters(qs)
+        if name == "voc/knowledge" or name.startswith("voc/knowledge/"):
+            try:
+                if name == "voc/knowledge/export":
+                    self._send(knowledge.export_csv(cfg, _str(qs, "status", "confirmed")), "text/csv; charset=utf-8", filename="confirmed-knowledge.csv")
+                else:
+                    self._json(knowledge.handle_get(cfg, name, status=_str(qs, "status", "all"), knowledge_id=_int(qs, "id", 0), topic_id=_int(qs, "topic_id", 0)))
+            except voc.VocError as exc:
+                self._json({"error": str(exc)}, exc.status)
+            return
+        if name.startswith("voc/"):
+            try:
+                result = voc.handle_get(cfg, name, filters, status=_str(qs, "status", "all"),
+                                        topic_q=_str(qs, "topic_q"), topic_id=_int(qs, "id", 0),
+                                        limit=_int(qs, "limit", 100), offset=_int(qs, "offset", 0),
+                                        evidence_status=_str(qs, "evidence_status", "all"))
+                self._json(result)
+            except voc.VocError as exc:
+                self._json({"error": str(exc)}, exc.status)
+            return
         if name == "summary":
             self._json(api.build_summary(cfg, **filters))
         elif name == "trend":
@@ -366,7 +388,20 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise ValueError("上传未完成，请重新选择文件")
-            if u.path in ("/api/import/preview", "/api/import"):
+            if u.path.startswith("/api/voc/"):
+                if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+                    raise ValueError("VOC 请求须使用 application/json")
+                if len(data) > 256 * 1024:
+                    raise ValueError("VOC 请求内容过大")
+                try:
+                    body = json.loads(data.decode("utf-8"))
+                except (ValueError, UnicodeError, RecursionError):
+                    raise ValueError("VOC 请求不是有效 JSON") from None
+                try:
+                    self._json(voc.handle_post(cfg, u.path[5:], self._filters(qs), body))
+                except voc.VocError as exc:
+                    self._json({"error": str(exc)}, exc.status)
+            elif u.path in ("/api/import/preview", "/api/import"):
                 if _str(qs, "source", "local") != "local":
                     raise ValueError("演示库不接收导入，请切换到本地数据")
                 filename = unquote(self.headers.get("X-Filename", ""))
