@@ -13,6 +13,7 @@ from ..app import get_db
 from ..clean.rules import mask_pii
 from ..config import Settings, settings
 from ..extract.concepts import concept_signature
+from ..extract.text import clean_visible_text
 from ..local import csv_bytes
 
 
@@ -49,6 +50,10 @@ def _public(row: dict[str, Any]) -> dict[str, Any]:
     if mask_pii(cid) != cid:
         cid = "customer-" + hashlib.sha256(cid.encode()).hexdigest()[:16]
     item["customer_id"] = cid
+    question = clean_visible_text(str(item.get("question") or ""))
+    item["question"] = question
+    item["answer"] = clean_visible_text(str(item.get("answer") or ""))
+    item["q_norm"] = E.normalize(question)
     for key in ("question", "answer", "q_norm", "customer_name", "group_name", "staff_name", "session_id"):
         item[key] = mask_pii(str(item.get(key) or ""))
     item["group_name"] = item["group_name"] or "未分组"
@@ -70,6 +75,8 @@ def _rows(cfg: Settings, days: int = 0, group: str = "", staff: str = "",
         if (low or high) and (not stamp or (low and stamp < low) or (high and stamp >= high)):
             continue
         r = _public(dict(raw))
+        if not r["question"].strip():
+            continue
         if group and r["group_name"] != group:
             continue
         if staff and r["staff_name"] != staff:
@@ -195,12 +202,17 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
     raw = get_db(cfg).get_pair(qa_id)
     if not raw:
         return None
+    pair = _public(raw)
+    if not pair["question"].strip():
+        return None
     messages = get_db(cfg).get_messages(raw["session_id"])
-    return {"pair": _public(raw), "messages": [
-        {"role": m["role"], "content": mask_pii(m["content"]),
-         "time": _time(int(m.get("ts") or 0))}
-        for m in messages if m["role"] != "boundary"
-    ], "archived": not bool(messages)}
+    visible_messages = []
+    for message in messages:
+        content = clean_visible_text(message["content"])
+        if message["role"] != "boundary" and content:
+            visible_messages.append({"role": message["role"], "content": mask_pii(content),
+                                     "time": _time(int(message.get("ts") or 0))})
+    return {"pair": pair, "messages": visible_messages, "archived": not bool(messages)}
 
 
 def meta(cfg: Settings | None = None) -> dict[str, Any]:
@@ -220,7 +232,7 @@ def status(cfg: Settings) -> dict[str, Any]:
         if "filename" in task["result"]:
             task["result"]["filename"] = mask_pii(task["result"]["filename"])
     return {**get_db(cfg).local_status(), "tasks": tasks,
-            "total_pairs": get_db(cfg).stats()["qa_pair"]}
+            "total_pairs": len(_rows(cfg)), "stored_pairs": get_db(cfg).stats()["qa_pair"]}
 
 
 def export_pairs(cfg: Settings, **filters: Any) -> bytes:

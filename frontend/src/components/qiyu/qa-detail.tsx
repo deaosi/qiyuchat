@@ -86,7 +86,7 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
           <SheetTitle className="text-lg">问答与会话上下文</SheetTitle>
           <SheetDescription>回到客户原话，核对客服回复与咨询背景。</SheetDescription>
         </SheetHeader>
-        {pair && <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-8">
+        {pair && <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-8 [overflow-wrap:anywhere]">
           <div className="flex flex-wrap gap-2 py-5">
             <Badge variant="secondary" className="rounded-md">{pair.id}</Badge>
             <Badge variant="outline" className="gap-1.5 font-normal">
@@ -96,7 +96,7 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
             <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground"><ShieldCheck className="size-3.5" />{source === 'local' ? '已脱敏' : source === 'demo' ? '演示数据' : '脱敏样例'}</Badge>
           </div>
 
-          <dl className="grid grid-cols-2 gap-x-5 gap-y-5 pb-6 text-sm">
+          <dl className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-5 pb-6 text-sm [&>div]:min-w-0">
             <div><dt className="mb-1.5 text-xs text-muted-foreground">咨询客户</dt><dd className="font-medium">{pair.customerName}</dd><dd className="mt-1 text-xs text-muted-foreground">{pair.customerId}</dd></div>
             <div><dt className="mb-1.5 text-xs text-muted-foreground">客户群 / 接待客服</dt><dd>{pair.groupName}</dd><dd className="mt-1 text-xs text-muted-foreground">{pair.staffName}</dd></div>
             <div><dt className="mb-1.5 text-xs text-muted-foreground">提问时间</dt><dd className="tabular-nums">{fullTime(pair.askedAt)}</dd></div>
@@ -106,15 +106,15 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
 
           <section className="py-6">
             <h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><ArrowDownLeft className="size-3.5" />客户原问题</h3>
-            <p className="text-xl font-semibold leading-relaxed tracking-tight">{pair.question}</p>
+            <p className="min-w-0 whitespace-pre-wrap text-xl font-semibold leading-relaxed tracking-tight [overflow-wrap:anywhere]">{pair.question}</p>
           </section>
           <div className="rounded-lg border bg-muted/30 p-4">
             <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground"><span className="inline-flex items-center gap-1.5"><Layers2 className="size-3.5" />归一化问题</span><span>{pair.clusterId ? `问题簇 ${pair.clusterId}` : '未归类'}</span></div>
-            <p className="text-sm font-medium">{normalizedQuestion}</p>
+            <p className="whitespace-pre-wrap text-sm font-medium [overflow-wrap:anywhere]">{normalizedQuestion}</p>
           </div>
           <section className="py-6">
             <h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><ArrowUpRight className="size-3.5" />客服回复</h3>
-            <p className="text-sm leading-7">{pair.answer.trim() ? pair.answer : '当前抽取片段中未发现客服回复。这不代表已经确认该问题未解决。'}</p>
+            <p className="whitespace-pre-wrap text-sm leading-7 [overflow-wrap:anywhere]">{pair.answer.trim() ? pair.answer : '当前抽取片段中未发现客服回复。这不代表已经确认该问题未解决。'}</p>
           </section>
           <Separator />
           <section className="pt-6">
@@ -122,7 +122,7 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
             {loading ? <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-5 text-sm text-muted-foreground" role="status"><Loader2 className="size-4 animate-spin" />正在读取脱敏会话上下文…</div>
               : error ? <div className="rounded-lg border p-4" role="alert"><div className="flex items-center gap-2 text-sm font-medium"><AlertCircle className="size-4" />暂时无法读取会话详情</div><p className="mt-2 text-sm leading-6 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-3" onClick={() => setRetry(value => value + 1)}><RefreshCw className="size-3.5" />重新加载</Button></div>
                 : archived ? <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><Archive className="mt-1 size-4 shrink-0" /><p>原始上下文已归档，问答资产仍保留。可查看上方问题与回复。</p></div>
-                  : messages.length ? <div className="space-y-5">{messages.map((message, index) => <div key={`${index}-${message.role}`} className={`max-w-[90%] ${message.role === 'staff' ? 'ml-auto' : ''}`}><div className="mb-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>{messageRole(message, pair)}</span><time>{message.time}</time></div><div className={message.role === 'staff' ? 'whitespace-pre-wrap break-words rounded-2xl rounded-tr-sm bg-foreground px-4 py-3 text-sm leading-7 text-background' : 'whitespace-pre-wrap break-words rounded-2xl rounded-tl-sm border bg-muted/35 px-4 py-3 text-sm leading-7'}>{message.content}</div></div>)}</div>
+                  : messages.length ? <div className="space-y-5">{messages.map((message, index) => <div key={`${index}-${message.role}`} className={`min-w-0 max-w-[90%] ${message.role === 'staff' ? 'ml-auto' : ''}`}><div className="mb-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>{messageRole(message, pair)}</span><time>{message.time}</time></div><div className={message.role === 'staff' ? 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tr-sm bg-foreground px-4 py-3 text-sm leading-7 text-background' : 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tl-sm border bg-muted/35 px-4 py-3 text-sm leading-7'}>{message.content}</div></div>)}</div>
                     : <p className="rounded-lg border bg-muted/20 p-4 text-sm leading-6 text-muted-foreground">当前问答没有可展示的上下文消息。</p>}
           </section>
           <p className="mt-7 text-xs leading-6 text-muted-foreground">{source === 'local' ? '问答与上下文由服务器返回，并按现有规则脱敏。' : source === 'demo' ? '当前查看演示数据源的问答与上下文。' : '以上为固定虚构样例，仅用于预览界面；未连接生产数据。'}</p>

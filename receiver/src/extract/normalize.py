@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from .text import clean_visible_text
 
 # 开头寒暄/客套，按长度倒序匹配，先长后短
 _PREFIXES = sorted([
@@ -65,7 +66,7 @@ def normalize(text: str) -> str:
     """归一化后的字符串，用于聚类比较。空串表示无有效内容。"""
     if not text:
         return ""
-    s = unicodedata.normalize("NFKC", text)
+    s = unicodedata.normalize("NFKC", clean_visible_text(text))
     s = to_halfwidth(s)
     s = _EMOJI.sub("", s)
     s = s.lower()

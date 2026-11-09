@@ -129,7 +129,9 @@ class InspectExporter:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
         ts_re = re.compile(r"^\[?(\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?)\]?\s*")
-        speak_re = re.compile(r"^([^:：]{1,24})[:：]\s*(.*)$")
+        # JSON field separators are not speaker separators. Keep the full payload
+        # until extract_pairs projects it to text, preserving the speaker turn.
+        speak_re = re.compile(r"^([^:：{}\[\]\"]{1,24})[:：]\s*(.*)$")
 
         out: list[dict[str, Any]] = []
         for ln in lines:

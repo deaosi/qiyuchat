@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from .normalize import is_info_not_question, is_noise_question, normalize
+from .text import clean_visible_text
 
 # 消息无时间时可用已知会话时间；显式 0 表示时间未知，不估算时间间隔。
 
@@ -36,11 +37,13 @@ def extract_pairs(
     a_buf: list[str] = []
     q_ts: int = 0
     idx = 0
+    staff_turn_seen = False
 
     def flush(answer: str = "") -> None:
-        nonlocal q_buf, a_buf, q_ts, idx
+        nonlocal q_buf, a_buf, q_ts, idx, staff_turn_seen
         if not q_buf:
             a_buf = []
+            staff_turn_seen = False
             return
         question = "\n".join(q_buf).strip()
         ok = (question
@@ -63,19 +66,23 @@ def extract_pairs(
             })
         q_buf = []
         a_buf = []
+        staff_turn_seen = False
 
     for m in messages:
         role = m.get("role", "")
         if role == "boundary":
             flush()
             continue
-        content = (m.get("content") or "").strip()
+        raw_content = (m.get("content") or "").strip()
+        if role == "staff" and raw_content and q_buf:
+            staff_turn_seen = True
+        content = clean_visible_text(raw_content)
         if not content:
             continue
         ts = int(m.get("ts", base_ts) or 0)
 
         if role == "user":
-            if a_buf:                     # 上一轮客服已说完，开始新问题
+            if a_buf or staff_turn_seen:  # A media-only staff turn still closes Q1.
                 flush()
             if is_noise_question(content) or is_info_not_question(content):
                 continue
