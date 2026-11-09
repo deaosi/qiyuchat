@@ -1,7 +1,7 @@
 """Readable conversation text, without transport metadata from media attachments.
 
-Raw messages stay intact in storage. Only explicitly recognized attachment objects
-and rich-text message blocks are projected to text; ordinary JSON and links survive.
+Raw messages stay intact in storage. Only recognized attachment objects, forwarded
+chat cards and rich-text blocks are projected to text; ordinary JSON and links survive.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ _ATTACHMENT_FIELDS = _METADATA | set(_TEXT_FIELDS) | {
     "fileid", "noskey", "bucket", "scene", "filetype", "dur", "expire", "tt",
 }
 _NON_TEXT_PLACEHOLDER = re.compile(r"\[非文本消息\s+mType=\d+\]", re.IGNORECASE)
+_MERGED_FIELDS = {"type", "preview", "cmd", "sessionid", "title"}
+_MERGED_MEDIA_PLACEHOLDERS = {"[图片]", "[视频]", "[语音]", "[文件]", "[表情]"}
 
 
 def _attachment(value: dict[str, Any]) -> bool:
@@ -52,6 +54,15 @@ def _structured(value: Any, depth: int = 0) -> tuple[bool, str]:
         return False, ""
     if isinstance(value, dict):
         keys = {str(key).lower(): val for key, val in value.items()}
+        # Qiyu forwarded-chat cards contain readable lines in preview. The card
+        # title, command and session ID describe transport, not conversation.
+        preview = keys.get("preview")
+        if (keys.get("type") == "merge" and keys.get("cmd") == 123
+                and "sessionid" in keys and set(keys).issubset(_MERGED_FIELDS)
+                and isinstance(preview, list) and all(isinstance(line, str) for line in preview)):
+            lines = [clean_visible_text(line) for line in preview
+                     if line.strip() not in _MERGED_MEDIA_PLACEHOLDERS]
+            return True, "\n".join(line for line in lines if line)
         if _attachment(value):
             captions = [clean_visible_text(keys[key]) for key in _TEXT_FIELDS if isinstance(keys.get(key), str)]
             return True, "\n".join(part for part in captions if part)

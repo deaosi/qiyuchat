@@ -39,6 +39,25 @@ class TestVisibleText(unittest.TestCase):
         blocks = [{"type": "text", "text": "这个型号能用吗？"}, json.loads(media())]
         self.assertEqual(clean_visible_text(json.dumps(blocks, ensure_ascii=False)), '这个型号能用吗？')
 
+    def test_forwarded_chat_keeps_preview_words_without_transport_fields(self):
+        card = {"type": "merge", "cmd": 123, "sessionid": 12345, "title": "客户的聊天记录",
+                "preview": ['这个型号能用吗？', '请看[图片]位置' + media(), '[图片]']}
+        text = '请查看聊天记录：' + json.dumps(card, ensure_ascii=False)
+        cleaned = clean_visible_text(text)
+        self.assertEqual(cleaned, '请查看聊天记录：这个型号能用吗？\n请看[图片]位置')
+        self.assertEqual(clean_visible_text(cleaned), cleaned)
+        card['preview'] = ['[图片]', media()]
+        self.assertEqual(clean_visible_text(json.dumps(card)), '')
+
+    def test_unknown_or_business_merge_objects_are_preserved(self):
+        cards = [{"type": "merge", "preview": ['字段合并失败怎么办？']},
+                 {"type": "merge", "cmd": 123, "sessionid": 12345, "preview": ['正文'], "error": "合并失败"},
+                 {"type": "merge", "cmd": 123, "sessionid": 12345, "preview": [{"message": "正文"}]},
+                 {"type": "merge", "cmd": 124, "sessionid": 12345, "preview": ['正文']}]
+        for card in cards:
+            text = json.dumps(card, ensure_ascii=False)
+            self.assertEqual(clean_visible_text(text), text)
+
     def test_ordinary_json_links_braces_and_emoji_survive(self):
         examples = ['参数是 {"size":"M","color":"blue"}，哪个合适？',
                     '{"url":"https://example.test/product","name":"型号A","size":"M"}',
