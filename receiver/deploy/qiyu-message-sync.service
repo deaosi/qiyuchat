@@ -15,4 +15,3 @@ TimeoutStartSec=900
 Nice=5
 UMask=0077
 NoNewPrivileges=true
-
