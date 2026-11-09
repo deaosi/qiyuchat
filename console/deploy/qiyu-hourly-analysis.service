@@ -1,0 +1,17 @@
+[Unit]
+Description=Generate incremental Qiyu VOC and reviewable knowledge drafts
+After=network-online.target qiyu-console.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=qiyu
+Group=qiyu
+WorkingDirectory=/opt/qiyu-console
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/qiyu-console/.env
+ExecStart=/usr/bin/python3 -m src.hourly_analysis --voc-limit 100 --knowledge-limit 10
+TimeoutStartSec=0
+Nice=10
+UMask=0077
+NoNewPrivileges=true

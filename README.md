@@ -45,6 +45,22 @@ npm run build
 
 当前范围或标准问题没有有效客服回复时，界面显示来源覆盖提示，后端拒绝创建知识任务，不调用模型。应先补采客服侧消息，或导入包含明确客户问题、客服回答的完整记录。访客方向、机器人或联调样例不能靠猜测充当真实客服回复。
 
+### 每小时自动整理
+
+`console/deploy/qiyu-hourly-analysis.timer` 按北京时间每个整点启动增量整理，使用看板服务已有的模型配置。每轮先处理最多 100 条新增或有变更的问答，再为最多 10 个有有效客服回复的主题生成待审核知识草稿。问答内容、模型及提示词版本均未变化时不重复分析；相同来源的知识草稿、已确认或已忽略记录也不重复生成。
+
+任一手动或自动模型任务仍在运行时，本轮跳过，不中断任务或重复启动。一次任务超过一小时也不会并行执行下一轮。没有待处理内容时不调用模型；新证据生成新的知识草稿，不覆盖人工修订，也不会自动确认或发布知识。会话消息同步仍每分钟检查，与模型整理分别调度。
+
+```sh
+sudo install -m 644 console/deploy/qiyu-hourly-analysis.service /etc/systemd/system/
+sudo install -m 644 console/deploy/qiyu-hourly-analysis.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now qiyu-hourly-analysis.timer
+systemctl list-timers qiyu-hourly-analysis.timer
+```
+
+在服务器 `/opt/qiyu-console` 目录运行 `python3 -m src.hourly_analysis --check` 可只读检查待处理内容，不创建任务或调用模型。自动任务在独立进程运行，不需重启看板或消息接收服务；运行记录可用 `journalctl -u qiyu-hourly-analysis.service` 查看。
+
 仅在看板服务的环境文件中配置网关，重启看板服务生效：
 
 ```dotenv

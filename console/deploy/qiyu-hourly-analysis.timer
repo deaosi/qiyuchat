@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Qiyu incremental AI analysis every hour in Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* *:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=qiyu-hourly-analysis.service
+
+[Install]
+WantedBy=timers.target
