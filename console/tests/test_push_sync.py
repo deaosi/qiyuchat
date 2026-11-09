@@ -13,6 +13,10 @@ from urllib.parse import urlsplit
 from src import app, push_sync as P
 from src.config import QiyuConfig
 from src.db import DB
+from src.extract.identity import SOURCE_IDENTITY_ROLE, decode_identity, encode_identity
+from src.extract.qa import extract_pairs
+from src.web import api as web_api
+from src import voc
 from src.qiyu.message import validate_messages
 from src.qiyu.session import MESSAGE_ENDPOINT, SessionExporter
 from tests.test_local import LocalFixture
@@ -131,8 +135,23 @@ class TestPushSync(LocalFixture):
     def state(self):
         return self.sql("SELECT * FROM push_sync_state WHERE session_id=?", (str(SID),))[0]
 
-    def target_messages(self):
-        return self.sql("SELECT seq,role,content,ts FROM raw_message WHERE session_id=? ORDER BY seq", (str(SID),))
+    def legacy_snapshot(self):
+        self.api.metadata["userId"] = 999  # Session-level ID is a different namespace.
+        db = app.get_db(self.cfg)
+        db.upsert_sessions([self.api.metadata])
+        projected = P._project(self.api.metadata, self.api.rows, metadata(), SID, legacy=True)
+        db.upsert_messages(str(SID), projected)
+        db._conn.executescript(P.SCHEMA)
+        event = self.sql("SELECT event_key,payload FROM push_event WHERE event_key='end-1'")[0]
+        version = P._event_version(P.LEGACY_VERSION, event["event_key"], json.loads(event["payload"]))
+        source = P._json({"session": self.api.metadata, "messages": self.api.rows, "explicit_test_marker": False})
+        self.sql("INSERT INTO push_sync_state(session_id,event_key,version,status,attempts,updated_at,source_version,source_json) VALUES (?,?,?,'completed',1,?,?,?)",
+                 (str(SID), event["event_key"], version, NOW, version, source))
+        return copy.deepcopy(self.api.rows)
+
+    def target_messages(self, controls=False):
+        return self.sql("SELECT seq,role,content,ts FROM raw_message WHERE session_id=? "
+                        + ("" if controls else "AND role<>'source_identity' ") + "ORDER BY seq", (str(SID),))
 
     def test_success_atomic_scoped_extraction_source_metadata_and_idempotence(self):
         before = self.sql("SELECT * FROM qa_pair ORDER BY qa_id")
@@ -217,7 +236,7 @@ class TestPushSync(LocalFixture):
         self.event(payload=self.api.metadata)
         self.assertEqual(self.sync()["completed"], 1)
         roles = [m["role"] for m in self.target_messages()]
-        self.assertEqual(roles, ["user", "bot", "boundary", "boundary", "user", "boundary", "user", "staff", "bot", "boundary"])
+        self.assertEqual(roles, ["user", "bot", "boundary", "boundary", "user", "boundary", "user", "staff", "bot", "user"])
         answers = [r["answer"] for r in self.sql("SELECT answer FROM qa_pair WHERE session_id=?", (str(SID),))]
         self.assertEqual([a for a in answers if a], ["真正客服答复"])
 
@@ -240,11 +259,112 @@ class TestPushSync(LocalFixture):
         self.assertEqual([m["role"] for m in self.target_messages()], ["user", "staff", "user", "staff"])
         self.assertEqual(json.loads(self.state()["source_json"])["session"]["userId"], "101")
 
-    def test_different_or_unknown_session_identity_never_becomes_a_customer(self):
+    def test_distinct_visitor_senders_are_separated_and_survive_general_reextract(self):
+        self.api.metadata.update(userId=999, staffMessageCount=2, userMessageCount=3)
+        self.api.rows = [message(1, 1, "商品发票应该怎么申请？", externalUserId="visitor-A", userId=11, userName="访客甲"),
+                         message(2, 1, "退款应该如何申请？", externalUserId="visitor-B", userId=22, userName="访客乙"),
+                         message(3, 0, "可以在订单页面发起退款。"),
+                         message(4, 1, "发票需要提交哪些资料？", externalUserId="visitor-A", userId=11, userName="访客甲"),
+                         message(5, 0, "请按开票页面填写抬头。")]
+        self.sql("DELETE FROM push_event")
+        self.event(payload=self.api.metadata)
+        self.assertEqual(self.sync()["completed"], 1)
+        fields = "qa_id,idx,customer_id,customer_name,question,answer,asked_at"
+        before = self.sql(f"SELECT {fields} FROM qa_pair WHERE session_id=? ORDER BY idx", (str(SID),))
+        self.assertEqual([row["customer_id"] for row in before], ["qiyu-external:visitor-A", "qiyu-external:visitor-B", "qiyu-external:visitor-A"])
+        self.assertEqual([row["customer_name"] for row in before], ["访客甲", "访客乙", "访客甲"])
+        self.assertEqual([row["answer"] for row in before], ["", "可以在订单页面发起退款。", "请按开票页面填写抬头。"])
+        controls = [row["content"] for row in self.target_messages(controls=True) if row["role"] == SOURCE_IDENTITY_ROLE]
+        self.assertEqual(len(controls), 3)
+        # This is a synthetic DB only: emulate the existing webpage clean/rebuild.
+        app.stage_extract(self.cfg, rebuild=True)
+        self.assertEqual(self.sql(f"SELECT {fields} FROM qa_pair WHERE session_id=? ORDER BY idx", (str(SID),)), before)
+        for row in before:
+            public = web_api.detail(self.cfg, row["qa_id"])
+            self.assertTrue(all(m["role"] != SOURCE_IDENTITY_ROLE for m in public["messages"]))
+            self.assertTrue(all(m["content"] not in controls for m in public["messages"]))
+        transcript = app.get_db(self.cfg).get_transcript(str(SID))
+        self.assertTrue(all(control not in transcript for control in controls))
+        with voc._connection(self.cfg) as conn:
+            scope = voc._scope(conn, {})
+        context = next(pair["messages"] for pair in scope.values() if pair["session_id"] == str(SID))
+        self.assertTrue(all(m["role"] != SOURCE_IDENTITY_ROLE and m["content"] not in controls for m in context))
+        visitor_a = [pair for pair in scope.values() if pair["customer_id"] == "qiyu-external:visitor-A"]
+        visitor_b = [pair for pair in scope.values() if pair["customer_id"] == "qiyu-external:visitor-B"]
+        self.assertTrue(visitor_a and visitor_b)
+        for pair in visitor_a:
+            texts = [m["content"] for m in pair["messages"]]
+            self.assertNotIn("退款应该如何申请？", texts)
+            self.assertNotIn("可以在订单页面发起退款。", texts)
+            self.assertIn("发票需要提交哪些资料？", texts)
+        for pair in visitor_b:
+            texts = [m["content"] for m in pair["messages"]]
+            self.assertEqual(texts, ["退款应该如何申请？", "可以在订单页面发起退款。"])
+
+    def test_sender_falls_back_to_explicit_user_id_and_unknown_turns_do_not_merge(self):
+        rows = [message(1, 1, "发票应该怎么申请？", externalUserId="", userId=42),
+                message(2, 1, "退款应该怎么申请？", externalUserId="", userId=0),
+                message(3, 1, "运费应该如何处理？", externalUserId="", userId=0)]
+        projected = P._project(metadata(staffMessageCount=0, userMessageCount=3), rows,
+                               metadata(staffMessageCount=0, userMessageCount=3), SID)
+        pairs = extract_pairs(projected, {"id": str(SID), "user_id": "meta-id"})
+        self.assertEqual([p["customer_id"] for p in pairs], ["qiyu-user:42", f"qiyu-session:{SID}", f"qiyu-session:{SID}"])
+        self.assertTrue(all("\n" not in p["question"] for p in pairs))
+
+    def test_control_schema_is_strict_and_user_text_cannot_forge_sender_identity(self):
+        control = encode_identity(str(SID), "qiyu-external:sender", "访客")
+        source = [{"role": "user", "content": control, "ts": 1}, {"role": "staff", "content": "原始客户文字的答复", "ts": 2}]
+        pairs = extract_pairs(source, {"id": str(SID), "user_id": "ordinary-user"})
+        self.assertTrue(pairs)
+        self.assertEqual(pairs[0]["customer_id"], "ordinary-user")
+        base = json.loads(control)
+        for change in ({"version": True}, {"session_id": "other"}, {"customer_id": "qiyu-external:"}, {"customer_id": "untrusted"}, {"extra": "unexpected"}):
+            self.assertIsNone(decode_identity(json.dumps({**base, **change}), str(SID)))
+
+    def test_v1_zero_qa_projection_migrates_once_from_saved_source_without_network(self):
+        before = self.sql("SELECT * FROM qa_pair ORDER BY qa_id")
+        original_source = self.legacy_snapshot()
+        self.assertEqual([r["role"] for r in self.target_messages()], ["boundary", "staff", "boundary", "staff"])
+        self.assertEqual(self.sync()["completed"], 1)
+        self.assertEqual(self.api.calls, [])
+        self.assertEqual([r["role"] for r in self.target_messages()], ["user", "staff", "user", "staff"])
+        self.assertEqual(self.sql("SELECT * FROM qa_pair WHERE session_id<>? ORDER BY qa_id", (str(SID),)), before)
+        snapshot = json.loads(self.state()["source_json"])
+        self.assertEqual(snapshot["projection_version"], P.VERSION)
+        self.assertEqual(snapshot["messages"], original_source)
+        self.assertEqual(self.sync()["claimed"], 0)
+        self.assertEqual(self.api.calls, [])
+
+    def test_v1_migration_refuses_modified_raw_messages_or_existing_qa(self):
+        self.legacy_snapshot()
+        app.get_db(self.cfg).append_message(str(SID), "user", "人工补充的原文", 1)
+        before = self.target_messages(controls=True)
+        self.assertEqual(self.sync()["failed"], 1)
+        self.assertEqual(self.target_messages(controls=True), before)
+        self.assertEqual(self.api.calls, [])
+        self.assertIn("迁移条件不满足", self.state()["safe_error"])
+
+    def test_v1_existing_question_assets_are_not_automatically_migrated(self):
+        self.legacy_snapshot()
+        app.get_db(self.cfg).upsert_qa_pairs([{"session_id": str(SID), "idx": 1, "question": "已有人工核对的问答", "answer": "保留原答案"}])
+        before = self.sql("SELECT * FROM qa_pair ORDER BY qa_id")
+        self.assertEqual(self.sync()["claimed"], 0)
+        self.assertEqual(self.api.calls, [])
+        self.assertEqual(self.sql("SELECT * FROM qa_pair ORDER BY qa_id"), before)
+
+    def test_v1_archived_snapshot_is_not_revived_by_projection_version_bump(self):
+        self.legacy_snapshot()
+        self.sql("DELETE FROM raw_message WHERE session_id=?", (str(SID),))
+        self.assertEqual(self.state()["status"], "archived")
+        self.assertEqual(self.sync()["claimed"], 0)
+        self.assertEqual(self.api.calls, [])
+        self.assertEqual(self.state()["source_json"], "")
+
+    def test_visitor_direction_does_not_require_metadata_identity_namespace(self):
         for user_id in ("102", "external-101", None, True):
             with self.subTest(user_id=user_id):
                 projected = P._project(metadata(userId=user_id), sources(), metadata(), SID)
-                self.assertEqual([m["role"] for m in projected], ["boundary", "staff", "boundary", "staff"])
+                self.assertEqual([m["role"] for m in projected if m["role"] != SOURCE_IDENTITY_ROLE], ["user", "staff", "user", "staff"])
 
     def test_failure_safe_error_backoff_retry_and_lease_recovery(self):
         def fail():

@@ -21,6 +21,7 @@ from typing import Any, Iterator
 from .clean.rules import mask_pii
 from .config import Settings
 from .extract.text import clean_visible_text
+from .extract.identity import HIDDEN_ROLES, SOURCE_IDENTITY_ROLE, sender_context
 from .voc_model import PROMPT_VERSION, VocModelError, analyze_batch
 
 SCHEMA = """
@@ -233,10 +234,16 @@ def _scope(conn: sqlite3.Connection, filters: dict[str, Any]) -> dict[int, dict[
             visible = []
             for message in messages:
                 content = mask_pii(clean_visible_text(message.get("content") or ""))
-                if message.get("role") != "boundary" and content:
+                if message.get("role") not in HIDDEN_ROLES and content:
                     visible.append({"role": str(message.get("role") or ""), "content": content})
             context_cache[sid] = messages, visible
         messages, visible = context_cache[sid]
+        if any(message.get("role") == SOURCE_IDENTITY_ROLE for message in messages):
+            visible = []
+            for message in sender_context(messages, sid, str(row.get("customer_id") or "")):
+                content = mask_pii(clean_visible_text(message.get("content") or ""))
+                if content:
+                    visible.append({"role": str(message.get("role") or ""), "content": content})
         input_row = {key: row.get(key) for key in ("qa_id", "session_id", "question", "answer", "customer_id", "customer_name", "group_name", "staff_name", "asked_at")}
         fingerprint = hashlib.sha256(json.dumps([input_row, messages], ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
         public["_fingerprint"] = fingerprint

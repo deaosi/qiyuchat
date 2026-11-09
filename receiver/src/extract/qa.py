@@ -13,6 +13,7 @@ from typing import Any
 
 from .normalize import is_info_not_question, is_noise_question, normalize
 from .text import clean_visible_text
+from .identity import SOURCE_IDENTITY_ROLE, decode_identity
 
 # 消息无时间时可用已知会话时间；显式 0 表示时间未知，不估算时间间隔。
 
@@ -70,6 +71,12 @@ def extract_pairs(
 
     for m in messages:
         role = m.get("role", "")
+        if role == SOURCE_IDENTITY_ROLE:
+            flush()
+            identity = decode_identity(m.get("content"), str(session.get("session_id") or session.get("id") or ""))
+            customer_id = identity["customer_id"] if identity else ""
+            customer_name = identity["customer_name"] if identity else "身份未知访客"
+            continue
         if role == "boundary":
             flush()
             continue

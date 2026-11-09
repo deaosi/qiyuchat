@@ -13,6 +13,7 @@ from ..app import get_db
 from ..clean.rules import mask_pii
 from ..config import Settings, settings
 from ..extract.concepts import concept_signature
+from ..extract.identity import HIDDEN_ROLES
 from ..extract.text import clean_visible_text
 from ..local import csv_bytes
 
@@ -209,7 +210,7 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
     visible_messages = []
     for message in messages:
         content = clean_visible_text(message["content"])
-        if message["role"] != "boundary" and content:
+        if message["role"] not in HIDDEN_ROLES and content:
             visible_messages.append({"role": message["role"], "content": mask_pii(content),
                                      "time": _time(int(message.get("ts") or 0))})
     return {"pair": pair, "messages": visible_messages, "archived": not bool(messages)}

@@ -22,12 +22,14 @@ from typing import Any, Iterator
 from .config import Settings, load_settings
 from .db import DB
 from .extract import extract_pairs
+from .extract.identity import SOURCE_IDENTITY_ROLE, encode_identity
 from .qiyu.common import QiyuError
 from .qiyu.message import source_integer, validate_messages
 from .qiyu.session import SessionExporter
 
 EVENT_TYPE = "DATA_ONLINE_SESSION_END"
-VERSION = "push-session-v1"
+VERSION = "push-session-v2"
+LEGACY_VERSION = "push-session-v1"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS push_sync_state (
  session_id TEXT PRIMARY KEY, event_key TEXT NOT NULL, version TEXT NOT NULL,
@@ -71,6 +73,10 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _event_version(tag: str, key: str, payload: dict) -> str:
+    return hashlib.sha256(_json([tag, key, payload]).encode()).hexdigest()
+
+
 def _latest(conn: sqlite3.Connection) -> tuple[list[dict], int]:
     result: dict[str, dict] = {}
     invalid = 0
@@ -86,7 +92,7 @@ def _latest(conn: sqlite3.Connection) -> tuple[list[dict], int]:
         sid = str(payload["id"])
         if sid in result:
             continue
-        version = hashlib.sha256(_json([VERSION, row["event_key"], payload]).encode()).hexdigest()
+        version = _event_version(VERSION, row["event_key"], payload)
         result[sid] = {"sid": sid, "payload": payload, "event_key": row["event_key"], "version": version}
     return list(result.values()), invalid
 
@@ -117,7 +123,25 @@ def _expired(payload: dict, cfg: Settings, now: float) -> bool:
     return stamp < int(cutoff.timestamp() * 1000)
 
 
-def _project(metadata: dict, rows: list[dict], event: dict, sid: int) -> list[dict]:
+def _sender(row: dict, sid: int) -> tuple[str, str, bool]:
+    external = row.get("externalUserId")
+    if isinstance(external, str) and external.strip():
+        if len(external) > 900 or any(ord(char) < 32 for char in external):
+            cid = "qiyu-external-sha256:" + hashlib.sha256(external.encode()).hexdigest()
+        else:
+            cid = "qiyu-external:" + external
+        unknown = False
+    elif type(row.get("userId")) is int and row["userId"] != 0:
+        cid, unknown = "qiyu-user:" + str(row["userId"]), False
+    else:
+        # Direction still proves a visitor. Separate each unidentified turn
+        # rather than inventing equality between anonymous senders.
+        cid, unknown = "qiyu-session:" + str(sid), True
+    name = row.get("userName")
+    return cid, name.strip()[:300] if isinstance(name, str) and name.strip() else "来源访客", unknown
+
+
+def _project(metadata: dict, rows: list[dict], event: dict, sid: int, *, legacy: bool = False) -> list[dict]:
     if type(metadata.get("id")) is not int or metadata["id"] != sid:
         raise PushSyncError("来源会话详情与结束事件的会话 ID 不一致")
     if not source_integer(metadata.get("endTime"), positive=True):
@@ -134,6 +158,7 @@ def _project(metadata: dict, rows: list[dict], event: dict, sid: int) -> list[di
     if returned[0] < actual[0] or returned[1] < actual[1]:
         raise PushSyncError("来源消息响应不完整，未覆盖会话客服及访客消息总数")
     result = []
+    current_sender = None
     for row in sorted(rows, key=lambda r: (r["time"], r["id"])):
         role = "boundary"
         # 1=text, 2=image are verified source types; 110 is the documented bot
@@ -144,14 +169,47 @@ def _project(metadata: dict, rows: list[dict], event: dict, sid: int) -> list[di
             if row["from"] == 0:
                 role = "staff" if row["staffId"] > 0 else "bot"
             elif row["from"] == 1:
-                visitor = _numeric_identity(row.get("userId"))
-                if visitor is not None and visitor == _numeric_identity(metadata.get("userId")):
+                if not legacy:
                     role = "user"
+                else:
+                    visitor = _numeric_identity(row.get("userId"))
+                    if visitor is not None and visitor == _numeric_identity(metadata.get("userId")):
+                        role = "user"
+        if role == "user" and not legacy:
+            cid, name, unknown = _sender(row, sid)
+            if cid != current_sender or unknown:
+                result.append({"role": SOURCE_IDENTITY_ROLE,
+                               "content": encode_identity(str(sid), cid, name), "ts": row["time"]})
+                current_sender = cid
+        elif role == "boundary" and not legacy:
+            current_sender = None
         result.append({"role": role, "content": row["msg"], "ts": row["time"]})
     return result
 
 
-def _protect_existing(db: DB, sid: str, source_json: str, source: list[dict], projected: list[dict]) -> None:
+def _legacy_origin(conn: sqlite3.Connection, old: sqlite3.Row | None) -> dict | None:
+    """Prove that a retained snapshot was completed by the known v1 projector."""
+    if not old or not old["source_json"] or not old["source_version"]:
+        return None
+    try:
+        snapshot = json.loads(old["source_json"])
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not isinstance(snapshot, dict) or snapshot.get("projection_version", LEGACY_VERSION) != LEGACY_VERSION:
+        return None
+    for row in conn.execute("SELECT event_key,payload FROM push_event WHERE event_type=?", (EVENT_TYPE,)):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError, RecursionError):
+            continue
+        if not isinstance(payload, dict) or str(payload.get("id")) != old["session_id"]:
+            continue
+        if _event_version(LEGACY_VERSION, row["event_key"], payload) == old["source_version"]:
+            return {"snapshot": snapshot, "event_key": row["event_key"], "payload": payload}
+    return None
+
+
+def _protect_existing(db: DB, sid: str, source_json: str, source: list[dict], projected: list[dict], *, migrate_legacy: bool = False) -> None:
     old = db.get_messages(sid)
     if source_json:
         try:
@@ -165,6 +223,13 @@ def _protect_existing(db: DB, sid: str, source_json: str, source: list[dict], pr
             match = current.get(row["id"])
             if match is None or any(match.get(k) != row.get(k) for k in fields):
                 raise PushSyncError("来源响应缺失或改变了已存消息，暂停覆盖")
+        if migrate_legacy:
+            snapshot = json.loads(source_json)
+            known_old = _project(snapshot["session"], previous, snapshot["session"], int(sid), legacy=True)
+            has_qa = db._conn.execute("SELECT 1 FROM qa_pair WHERE session_id=? LIMIT 1", (sid,)).fetchone()
+            if not has_qa and old == known_old:
+                return
+            raise PushSyncError("旧版身份投影迁移条件不满足，暂停覆盖")
     # Without source IDs, every old role/content/timestamp must match in order.
     # A mismatch is not permission to infer a role or discard original content.
     cursor = 0
@@ -243,6 +308,9 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                 if old and old["status"] == "running" and old["claim_until"] > clock():
                     result["skipped"] += 1
                     continue
+                if old and old["status"] == "archived":
+                    result["skipped"] += 1
+                    continue
                 if old and old["version"] == event["version"] and (old["status"] in ("completed", "archived") or old["retry_after"] > clock()):
                     result["skipped"] += 1
                     continue
@@ -250,6 +318,14 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                     db._conn.execute("INSERT INTO push_sync_state(session_id,event_key,version,status,updated_at,safe_error) VALUES (?,?,?,'archived',?,?) ON CONFLICT(session_id) DO UPDATE SET event_key=excluded.event_key,version=excluded.version,status='archived',source_json='',source_version='',updated_at=excluded.updated_at,safe_error=excluded.safe_error", (sid, event["event_key"], event["version"], clock(), "来源已超过原文保留期，未补采"))
                     result["archived"] += 1
                     continue
+                legacy_origin = _legacy_origin(db._conn, old)
+                if legacy_origin and db._conn.execute("SELECT 1 FROM qa_pair WHERE session_id=? LIMIT 1", (sid,)).fetchone():
+                    # Automatic migration is bounded to v1 snapshots that
+                    # produced no QA. Existing question assets need review.
+                    result["skipped"] += 1
+                    continue
+                replay = (legacy_origin is not None and legacy_origin["event_key"] == event["event_key"]
+                          and legacy_origin["payload"] == event["payload"])
                 attempts = old["attempts"] + 1 if old and old["version"] == event["version"] else 1
                 previous_source = old["source_json"] if old else ""
                 lease = clock() + max(600, cfg.qiyu.timeout * 8 + 30)
@@ -259,11 +335,16 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                 _counts(event["payload"])
                 if not source_integer(event["payload"].get("endTime"), positive=True):
                     raise PushSyncError("结束事件缺少有效会话结束时间，暂停同步")
-                metadata = call(api.export_one, int(sid))
-                rows = call(api.export_messages, int(sid))
+                if replay:
+                    metadata = legacy_origin["snapshot"]["session"]
+                    rows = legacy_origin["snapshot"]["messages"]
+                else:
+                    metadata = call(api.export_one, int(sid))
+                    rows = call(api.export_messages, int(sid))
                 projected = _project(metadata, rows, event["payload"], int(sid))
                 test_marker = any(re.search(r"测试|\btest\b|联调|回调验证|接口验证", row["msg"], re.I) for row in rows)
-                source = _json({"session": metadata, "messages": sorted(rows, key=lambda r: (r["time"], r["id"])), "explicit_test_marker": test_marker})
+                source = _json({"projection_version": VERSION, "session": metadata,
+                                "messages": sorted(rows, key=lambda r: (r["time"], r["id"])), "explicit_test_marker": test_marker})
                 if len(source.encode()) > 20_000_000:
                     raise PushSyncError("单会话来源快照过大，暂停自动同步")
                 with _transaction(db._conn):
@@ -277,7 +358,7 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                         raise PushSyncError("同步期间收到更新的结束事件，请稍后重试")
                     if _expired(metadata, cfg, clock()) or _expired(event["payload"], cfg, clock()):
                         raise PushSyncError("来源会话已超过原文保留期，暂停同步")
-                    _protect_existing(db, sid, previous_source, rows, projected)
+                    _protect_existing(db, sid, previous_source, rows, projected, migrate_legacy=legacy_origin is not None)
                     db.upsert_sessions([metadata])
                     db.upsert_messages(sid, projected)
                     count = _extract_one(db, sid)

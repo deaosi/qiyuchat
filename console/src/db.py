@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .log import get
+from .extract.identity import HIDDEN_ROLES
 
 log = get("db")
 
@@ -383,6 +384,8 @@ class DB:
             return ""
         lines = []
         for r in rows:
+            if r["role"] in HIDDEN_ROLES:
+                continue
             who = {"user": "客户", "staff": "客服", "bot": "机器人", "system": "系统"}.get(r["role"], r["role"])
             lines.append(f"{who}: {r['content']}")
         return "\n".join(lines)
