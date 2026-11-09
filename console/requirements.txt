@@ -1,0 +1,7 @@
+# 本项目零第三方依赖，只用 Python 3.10+ 标准库。
+#
+# 用到的标准库模块：
+#   sqlite3, urllib.request, json, hashlib, hmac, base64, csv, zipfile,
+#   xml.etree.ElementTree, concurrent.futures, threading, argparse, logging
+#
+# 如果之后要换成 requests / openpyxl，在这里加即可。
