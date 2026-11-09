@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -540,6 +541,19 @@ def _apply_result(conn: sqlite3.Connection, cfg: Settings, job_id: int, result: 
     conn.execute("INSERT INTO voc_processed VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(qa_id,prompt_version,model) DO UPDATE SET fingerprint=excluded.fingerprint,disposition=excluded.disposition,reason=excluded.reason,job_id=excluded.job_id,updated_at=excluded.updated_at", (qa_id, fingerprint, PROMPT_VERSION, cfg.llm.model_main, "excluded" if result["excluded"] else "processed", result["reason"], job_id, time.time()))
     conn.execute("UPDATE voc_job_item SET status='completed',error='' WHERE job_id=? AND qa_id=?", (job_id, qa_id))
 
+def _can_split_batch(exc: BaseException) -> bool:
+    """Only safe model failures can improve with a smaller input batch."""
+    if not isinstance(exc, VocModelError) or exc.retryable is not True:
+        return False
+    # The adapter already exposes only a safe, fixed HTTP status message. In
+    # particular, retryable 429 must not fan out into more rate-limited calls.
+    status = getattr(exc, "status", None)
+    match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc))
+    if match:
+        status = int(match.group(1))
+    return not (type(status) is int and 400 <= status < 500 and status != 408)
+
+
 def _worker(cfg: Settings, job_id: int) -> None:
     try:
         with _connection(cfg) as conn:
@@ -548,38 +562,49 @@ def _worker(cfg: Settings, job_id: int) -> None:
         batch_size = max(1, min(20, cfg.llm.batch_size))
         for start in range(0, len(pending), batch_size):
             chunk = pending[start:start + batch_size]
-            pairs = [json.loads(item["input_json"]) for item in chunk]
-            with _connection(cfg) as conn:
-                available = [dict(r) for r in conn.execute("SELECT id,question,theme,boundary,status FROM voc_topic WHERE status IN ('pending','confirmed') ORDER BY id")]
-            # No live sqlite connection or transaction is held during this call.
-            try:
-                output = analyze_batch(cfg.llm, pairs, available)
-            except Exception as exc:
-                consumed = max(0, int(getattr(exc, "usage_tokens", 0) or 0))
-                message = _job_error(exc, "模型调用或结果校验失败，可重试")
-                with _connection(cfg) as conn, _tx(conn):
-                    conn.execute("UPDATE voc_job SET usage_tokens=usage_tokens+? WHERE id=?", (consumed, job_id))
-                    conn.executemany("UPDATE voc_job_item SET status='failed',error=? WHERE job_id=? AND qa_id=?", [(message, job_id, p["qa_id"]) for p in pairs])
-                    conn.execute("UPDATE voc_job SET failed=failed+?,error=?,updated_at=? WHERE id=?", (len(pairs), message, time.time(), job_id))
-                continue
-            with _connection(cfg) as conn:
-                with _tx(conn):
-                    current = _scope(conn, {})
-                    conn.execute("UPDATE voc_job SET usage_tokens=usage_tokens+? WHERE id=?", (output["usage_tokens"], job_id))
-                    for result, pair in zip(output["results"], pairs):
-                        # Bridge guarantees coverage but may reorder results.
-                        pair = next(p for p in pairs if p["qa_id"] == result["qa_id"])
-                        live = current.get(pair["qa_id"])
-                        if not live or live["_fingerprint"] != pair["_fingerprint"]:
-                            conn.execute("UPDATE voc_job_item SET status='failed',error='分析期间原问答已变更，请重试' WHERE job_id=? AND qa_id=?", (job_id, pair["qa_id"]))
-                            conn.execute("UPDATE voc_job SET failed=failed+1,error='分析期间有原问答变更，请重试' WHERE id=?", (job_id,))
-                            continue
-                        _apply_result(conn, cfg, job_id, result, pair)
-                        conn.execute("UPDATE voc_job SET processed=processed+1,updated_at=? WHERE id=?", (time.time(), job_id))
+            batches = [[json.loads(item["input_json"]) for item in chunk]]
+            # Each failed parent is replaced by two disjoint, smaller children.
+            # Leaves are attempted once; a chunk of N rows makes at most 2N-1
+            # serial calls. A failed leaf never prevents its sibling from running.
+            while batches:
+                pairs = batches.pop()
+                with _connection(cfg) as conn:
+                    available = [dict(r) for r in conn.execute("SELECT id,question,theme,boundary,status FROM voc_topic WHERE status IN ('pending','confirmed') ORDER BY id")]
+                # No live sqlite connection or transaction is held during a call.
+                try:
+                    output = analyze_batch(cfg.llm, pairs, available)
+                except Exception as exc:
+                    usage = exc.usage_tokens if isinstance(exc, VocModelError) else 0
+                    consumed = usage if type(usage) is int and usage >= 0 else 0
+                    split = len(pairs) > 1 and _can_split_batch(exc)
+                    message = _job_error(exc, "模型调用或结果校验失败，可重试")
+                    with _connection(cfg) as conn, _tx(conn):
+                        conn.execute("UPDATE voc_job SET usage_tokens=usage_tokens+?,updated_at=? WHERE id=?", (consumed, time.time(), job_id))
+                        if not split:
+                            conn.executemany("UPDATE voc_job_item SET status='failed',error=? WHERE job_id=? AND qa_id=?", [(message, job_id, p["qa_id"]) for p in pairs])
+                            conn.execute("UPDATE voc_job SET failed=failed+?,error=? WHERE id=?", (len(pairs), message, job_id))
+                    if split:
+                        middle = len(pairs) // 2
+                        batches.extend((pairs[middle:], pairs[:middle]))
+                    continue
+                with _connection(cfg) as conn:
+                    with _tx(conn):
+                        current = _scope(conn, {})
+                        conn.execute("UPDATE voc_job SET usage_tokens=usage_tokens+? WHERE id=?", (output["usage_tokens"], job_id))
+                        for result in output["results"]:
+                            # Bridge guarantees coverage but may reorder results.
+                            pair = next(p for p in pairs if p["qa_id"] == result["qa_id"])
+                            live = current.get(pair["qa_id"])
+                            if not live or live["_fingerprint"] != pair["_fingerprint"]:
+                                conn.execute("UPDATE voc_job_item SET status='failed',error='分析期间原问答已变更，请重试' WHERE job_id=? AND qa_id=?", (job_id, pair["qa_id"]))
+                                conn.execute("UPDATE voc_job SET failed=failed+1,error='分析期间有原问答变更，请重试' WHERE id=?", (job_id,))
+                                continue
+                            _apply_result(conn, cfg, job_id, result, pair)
+                            conn.execute("UPDATE voc_job SET processed=processed+1,updated_at=? WHERE id=?", (time.time(), job_id))
         with _connection(cfg) as conn, _tx(conn):
             job = conn.execute("SELECT * FROM voc_job WHERE id=?", (job_id,)).fetchone()
             status = "partial" if job["failed"] and job["processed"] else "failed" if job["failed"] else "completed"
-            conn.execute("UPDATE voc_job SET status=?,updated_at=? WHERE id=?", (status, time.time(), job_id))
+            conn.execute("UPDATE voc_job SET status=?,error=CASE WHEN ?='completed' THEN '' ELSE error END,updated_at=? WHERE id=?", (status, status, time.time(), job_id))
     except Exception as exc:
         message = _job_error(exc, "任务执行中断，可重试")
         try:

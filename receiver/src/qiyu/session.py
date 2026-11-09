@@ -32,6 +32,7 @@ from ..config import QiyuConfig
 from ..http import request
 from ..log import get
 from .common import QiyuError, ensure_ok
+from .message import source_integer, validate_messages
 from .sign import signed_query
 
 log = get("qiyu.session")
@@ -39,6 +40,7 @@ log = get("qiyu.session")
 ENDPOINT = "/openapi/export/session"
 CHECK_ENDPOINT = "/openapi/export/session/check"
 ONE_ENDPOINT = "/openapi/export/session/one"
+MESSAGE_ENDPOINT = "/openapi/export/session/one/message"
 
 # 判定「哪个 txt 是会话表」用的表头特征
 _SESSION_MARKERS = ("starttime", "endtime", "会话开始时间", "会话id", "stype")
@@ -230,6 +232,16 @@ class SessionExporter:
         url = f"{self.cfg.base_url}{ONE_ENDPOINT}?{qs}"
         data = ensure_ok(request("POST", url, body=raw, timeout=self.cfg.timeout), ONE_ENDPOINT)
         return data if isinstance(data, dict) else {}
+
+
+    def export_messages(self, session_id: int) -> list[dict[str, Any]]:
+        """Read source messages; caller limits rate. Only official data:list is accepted."""
+        if not source_integer(session_id, positive=True):
+            raise ValueError("会话 ID 须为正整数")
+        qs, raw = signed_query(self.cfg.app_key, self.cfg.app_secret, {"sessionId": session_id})
+        data = ensure_ok(request("POST", f"{self.cfg.base_url}{MESSAGE_ENDPOINT}?{qs}",
+                                 body=raw, timeout=self.cfg.timeout), MESSAGE_ENDPOINT)
+        return validate_messages(data, session_id)
 
 
 def _code_of(resp: Any) -> int:

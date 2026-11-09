@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep verified Qiyu data-session message backfill up to date
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=qiyu-message-sync.service
+
+[Install]
+WantedBy=timers.target

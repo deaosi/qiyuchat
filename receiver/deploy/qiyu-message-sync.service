@@ -1,0 +1,18 @@
+[Unit]
+Description=Backfill ended Qiyu data sessions and their verified messages
+After=network-online.target qiyu-receiver.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=qiyu
+Group=qiyu
+WorkingDirectory=/opt/qiyu-receiver
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/qiyu-receiver/.env
+ExecStart=/usr/bin/python3 -m src.push_sync --limit 20
+TimeoutStartSec=900
+Nice=5
+UMask=0077
+NoNewPrivileges=true
+

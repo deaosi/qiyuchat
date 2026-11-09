@@ -12,11 +12,14 @@ from ..config import QiyuConfig
 from ..http import request
 from ..log import get
 from .common import ensure_ok
+from .message import source_integer, validate_messages
 from .sign import signed_query
 
 log = get("qiyu.session")
 
 ENDPOINT = "/openapi/export/session"
+ONE_ENDPOINT = "/openapi/export/session/one"
+MESSAGE_ENDPOINT = "/openapi/export/session/one/message"
 
 
 class SessionExporter:
@@ -41,6 +44,26 @@ class SessionExporter:
         rows = self._extract_rows(data)
         log.info("本次返回 %d 条会话", len(rows))
         return rows
+
+    def export_one(self, session_id: int) -> dict[str, Any]:
+        """Read official metadata for exactly one session."""
+        if not source_integer(session_id, positive=True):
+            raise ValueError("会话 ID 须为正整数")
+        qs, raw = signed_query(self.cfg.app_key, self.cfg.app_secret, {"sessionId": session_id})
+        data = ensure_ok(request("POST", f"{self.cfg.base_url}{ONE_ENDPOINT}?{qs}",
+                                 body=raw, timeout=self.cfg.timeout), ONE_ENDPOINT)
+        if not isinstance(data, dict) or type(data.get("id")) is not int or data["id"] != session_id:
+            raise ValueError("单会话详情的来源会话不一致")
+        return data
+
+    def export_messages(self, session_id: int) -> list[dict[str, Any]]:
+        """Read source messages; caller limits rate. Only official data:list is accepted."""
+        if not source_integer(session_id, positive=True):
+            raise ValueError("会话 ID 须为正整数")
+        qs, raw = signed_query(self.cfg.app_key, self.cfg.app_secret, {"sessionId": session_id})
+        data = ensure_ok(request("POST", f"{self.cfg.base_url}{MESSAGE_ENDPOINT}?{qs}",
+                                 body=raw, timeout=self.cfg.timeout), MESSAGE_ENDPOINT)
+        return validate_messages(data, session_id)
 
     @staticmethod
     def _extract_rows(data: Any) -> list[dict[str, Any]]:

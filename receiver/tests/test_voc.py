@@ -5,6 +5,7 @@ import json
 import http.client
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import replace
 from unittest.mock import patch
 from urllib.parse import quote
@@ -42,8 +43,9 @@ class TestVoc(LocalFixture):
                  "question": "如何查询商品信息？", "theme": "商品咨询", "boundary": "仅商品信息咨询",
                  "confidence": 0.9, "reason": "问题表达商品咨询意图"}]} for p in pairs], "usage_tokens": 11}
 
-    def run_job(self, side_effect=None, filters=None):
-        job = voc.start_job(self.cfg, filters or self.filters, {}, launch=False)["job"]
+    def run_job(self, side_effect=None, filters=None, limit=None):
+        body = {"limit": limit} if limit is not None else {}
+        job = voc.start_job(self.cfg, filters or self.filters, body, launch=False)["job"]
         if job["total"]:
             with patch("src.voc.analyze_batch", side_effect=side_effect or self.result):
                 voc._worker(self.cfg, job["id"])
@@ -108,7 +110,7 @@ class TestVoc(LocalFixture):
             nonlocal calls
             calls += 1
             if calls == 2:
-                raise VocModelError("failure")
+                raise VocModelError("failure", retryable=False)
             return self.result(cfg, pairs, topics)
         job = self.run_job(flaky)
         self.assertEqual((job["status"], job["processed"], job["failed"]), ("partial", 3, 2))
@@ -172,7 +174,131 @@ class TestVoc(LocalFixture):
         def fail(*args):
             raise VocModelError("bad schema", usage_tokens=17)
         job = self.run_job(fail)
-        self.assertEqual(job["usage_tokens"], 51)
+        # Two batches of 2 each attempt a parent and 2 leaves; final batch is 1.
+        self.assertEqual(job["usage_tokens"], 7 * 17)
+        self.assertEqual((job["status"], job["failed"], job["processed"]), ("failed", 5, 0))
+
+    def test_retryable_four_splits_into_two_successful_serial_batches(self):
+        self.cfg = replace(self.cfg, llm=replace(self.cfg.llm, batch_size=4))
+        before = self.sql("SELECT * FROM qa_pair ORDER BY qa_id")
+        calls, live_connections, active_calls, peak_calls = [], 0, 0, 0
+        original_connection = voc._connection
+
+        @contextmanager
+        def tracked_connection(cfg):
+            nonlocal live_connections
+            with original_connection(cfg) as conn:
+                live_connections += 1
+                try:
+                    yield conn
+                finally:
+                    live_connections -= 1
+
+        def flaky(cfg, pairs, topics):
+            nonlocal active_calls, peak_calls
+            self.assertEqual(live_connections, 0)
+            active_calls += 1
+            peak_calls = max(peak_calls, active_calls)
+            try:
+                calls.append([p["qa_id"] for p in pairs])
+                if len(pairs) == 4:
+                    # A recoverable parent must not prematurely fail its rows.
+                    self.assertEqual(self.sql("SELECT failed,error FROM voc_job ORDER BY id DESC LIMIT 1"), [{"failed": 0, "error": ""}])
+                    raise VocModelError("模型输出未完整结束，请重试或减小批量。", usage_tokens=7)
+                self.assertEqual(self.sql("SELECT failed,error FROM voc_job ORDER BY id DESC LIMIT 1"), [{"failed": 0, "error": ""}])
+                return self.result(cfg, pairs, topics)
+            finally:
+                active_calls -= 1
+
+        with patch("src.voc._connection", side_effect=tracked_connection):
+            job = self.run_job(flaky, limit=4)
+        self.assertEqual([len(ids) for ids in calls], [4, 2, 2])
+        self.assertEqual(calls[1] + calls[2], calls[0])
+        self.assertEqual(peak_calls, 1)
+        self.assertEqual((job["status"], job["total"], job["processed"], job["failed"], job["skipped"], job["error"]), ("completed", 4, 4, 0, 0, ""))
+        self.assertEqual(job["usage_tokens"], 7 + 11 + 11)
+        self.assertEqual(self.sql("SELECT status,count(*) n FROM voc_job_item WHERE job_id=? GROUP BY status", (job["id"],)), [{"status": "completed", "n": 4}])
+        self.assertEqual(len(self.sql("SELECT * FROM voc_processed")), 4)
+        self.assertEqual(len(self.sql("SELECT * FROM voc_assignment")), 4)
+        self.assertEqual(self.run_job()["total"], 1)
+        self.assertEqual(self.run_job()["total"], 0)
+        self.assertEqual(len(self.sql("SELECT * FROM voc_assignment")), 5)
+        self.assertEqual(self.sql("SELECT * FROM qa_pair ORDER BY qa_id"), before)
+
+    def test_retryable_two_splits_leaf_failure_and_continues_other_batches(self):
+        calls, bad_id = [], None
+
+        def flaky(cfg, pairs, topics):
+            nonlocal bad_id
+            ids = [p["qa_id"] for p in pairs]
+            calls.append(ids)
+            if bad_id is None:
+                bad_id = ids[0]
+                raise VocModelError("模型网关连接失败，请检查配置或稍后重试。", usage_tokens=5)
+            if ids == [bad_id]:
+                raise VocModelError("模型网关连接失败，请检查配置或稍后重试。", usage_tokens=3)
+            return self.result(cfg, pairs, topics)
+
+        job = self.run_job(flaky)
+        self.assertEqual([len(ids) for ids in calls], [2, 1, 1, 2, 1])
+        self.assertEqual(sum(ids == [bad_id] for ids in calls), 1)
+        self.assertEqual((job["status"], job["total"], job["processed"], job["failed"], job["skipped"]), ("partial", 5, 4, 1, 0))
+        self.assertEqual(job["usage_tokens"], 5 + 3 + 3 * 11)
+        items = self.sql("SELECT qa_id,status FROM voc_job_item WHERE job_id=? ORDER BY qa_id", (job["id"],))
+        self.assertEqual([row["qa_id"] for row in items if row["status"] == "failed"], [bad_id])
+        self.assertEqual(len(self.sql("SELECT * FROM voc_processed")), 4)
+        self.assertEqual(self.run_job()["total"], 1)
+        self.assertEqual(self.run_job()["total"], 0)
+        self.assertEqual(len(self.sql("SELECT * FROM voc_assignment")), 5)
+
+    def test_nonretryable_and_http_client_errors_never_split(self):
+        failures = [(VocModelError("模型配置不可用", retryable=False), "模型配置不可用")]
+        failures += [(VocModelError(f"模型网关请求失败（HTTP {status}），请检查配置或稍后重试。", usage_tokens=2), str(status)) for status in (400, 401, 403, 404, 422, 429)]
+        for error, expected in failures:
+            with self.subTest(expected=expected):
+                calls = []
+
+                def fail(cfg, pairs, topics):
+                    calls.append(len(pairs))
+                    raise error
+
+                job = self.run_job(fail)
+                self.assertEqual(calls, [2, 2, 1])
+                self.assertEqual((job["status"], job["processed"], job["failed"]), ("failed", 0, 5))
+                self.assertIn(expected, job["error"])
+                self.assertEqual(job["usage_tokens"], 3 * error.usage_tokens)
+
+    def test_unknown_sensitive_exception_is_safe_and_never_split(self):
+        calls = []
+
+        def fail(cfg, pairs, topics):
+            calls.append(len(pairs))
+            raise RuntimeError("api-key secret-response customer-original")
+
+        job = self.run_job(fail)
+        self.assertEqual(calls, [2, 2, 1])
+        self.assertEqual(job["error"], "模型调用或结果校验失败，可重试")
+        self.assertTrue(all(row["error"] == job["error"] for row in self.sql("SELECT error FROM voc_job_item WHERE job_id=?", (job["id"],))))
+        self.assertNotIn("secret-response", json.dumps(voc.jobs(self.cfg)))
+
+    def test_split_retries_keep_input_fingerprint_and_manual_topic_protection(self):
+        self.cfg = replace(self.cfg, llm=replace(self.cfg.llm, batch_size=4))
+        manual = voc.save_topic(self.cfg, {}, {"question": "人工审核保留的标准问题", "theme": "人工分类", "boundary": "人工边界", "status": "confirmed"})["topic"]
+        changed_id = None
+
+        def flaky(cfg, pairs, topics):
+            nonlocal changed_id
+            if len(pairs) == 4:
+                changed_id = pairs[0]["qa_id"]
+                self.sql("UPDATE qa_pair SET answer='并发更新的真实答复' WHERE qa_id=?", (changed_id,))
+                raise VocModelError("模型网关连接失败，请检查配置或稍后重试。")
+            return self.result(cfg, pairs, topics)
+
+        job = self.run_job(flaky, limit=4)
+        self.assertEqual((job["status"], job["processed"], job["failed"]), ("partial", 3, 1))
+        self.assertEqual(self.sql("SELECT count(*) n FROM voc_processed WHERE qa_id=?", (changed_id,))[0]["n"], 0)
+        current = voc.detail(self.cfg, {}, manual["id"])["topic"]
+        self.assertEqual((current["question"], current["theme"], current["boundary"], current["status"]), (manual["question"], manual["theme"], manual["boundary"], "confirmed"))
 
     def test_manual_topic_cannot_be_empty_after_visible_text_cleanup(self):
         attachment = json.dumps({"ext": "jpg", "size": 2, "name": "photo.jpg", "url": "https://example.test/photo.jpg"})
