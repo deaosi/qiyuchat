@@ -341,13 +341,13 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
   return data as T
 }
 
-export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyInit, headers?: HeadersInit): Promise<T> {
+export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyInit, headers?: HeadersInit, signal?: AbortSignal): Promise<T> {
   const requestHeaders = new Headers(headers)
   if (!requestHeaders.has('Content-Type')) requestHeaders.set('Content-Type', 'application/octet-stream')
   requestHeaders.set('X-Local-Request', '1')
   const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
     method: 'POST', credentials: 'same-origin', headers: requestHeaders,
-    body: body ?? new Uint8Array(),
+    body: body ?? new Uint8Array(), signal,
   }))
   validateVocResponse(name, data)
   validateVoc2Response(name, data)
@@ -372,7 +372,7 @@ export async function downloadExport(filters: ApiFilters): Promise<void> {
   const url = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = url
-  link.download = '七鱼问答-脱敏导出.csv'
+  link.download = '语海Voc-脱敏问答.csv'
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
@@ -383,7 +383,7 @@ export async function downloadKnowledgeExport(source: ApiFilters['source']): Pro
   const url = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = url
-  link.download = '七鱼知识-已确认.csv'
+  link.download = '语海Voc-知识导出.csv'
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

@@ -215,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
         return (
             '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            "<title>会话看板 · 登录</title><style>"
+            "<title>语海Voc · 登录</title><style>"
             ":root{color-scheme:light}"
             "body{margin:0;min-height:100vh;display:flex;align-items:center;"
             "justify-content:center;background:#f5f6f8;"
@@ -232,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
             "button:hover{background:#245bdb}"
             ".err{margin:12px 0 0;color:#d83931;font-size:13px}"
             "</style></head><body><main class=\"card\">"
-            "<h1>会话看板</h1><p class=\"sub\">请输入管理员密钥</p>"
+            "<h1>语海Voc</h1><p class=\"sub\">请输入管理员密钥</p>"
             '<form method="post" action="/login">'
             '<input type="password" name="key" autofocus required '
             'autocomplete="current-password" placeholder="管理员密钥">'

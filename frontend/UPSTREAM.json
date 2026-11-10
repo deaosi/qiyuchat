@@ -2,6 +2,10 @@
   "block": "dashboard-01",
   "source": "https://ui.shadcn.com/r/styles/new-york-v4/dashboard-01.json",
   "license": "MIT",
+  "design_references": [
+    { "repository": "https://github.com/line/abc-user-feedback", "purpose": "VOC feedback and evidence organization", "code_copied": false },
+    { "repository": "https://github.com/assistant-ui/assistant-ui", "purpose": "Dedicated conversation layout and composer interaction", "code_copied": false }
+  ],
   "components": [
     "alert-dialog",
     "avatar",
