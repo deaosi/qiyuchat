@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from src import voc_assistant as assistant
 
 
@@ -27,6 +29,17 @@ class ConversationCertificateRendering(unittest.TestCase):
         material=assistant._selection_material(self.row('accepted','understood',True))
         self.assertEqual(material['conversation_verification']['auto_reusable'],True)
         self.assertEqual(material['conversation_verification']['effect'],'not_established')
+
+    def test_coverage_reports_processed_pending_and_verified_separately(self):
+        cfg=SimpleNamespace(runtime=SimpleNamespace(voc_domain='zhihuige'),llm=SimpleNamespace(model_main='test-model'))
+        plan={'intent':'coverage','query':'','days':None,'limit':5,'support_intent':None,'diagnosis_status':None}
+        data={'source_pairs':100,'total_events':8,'consultation_count':6,'ready_knowledge':3,
+              'auto_reusable_knowledge':1,'exception_count':2,'coverage':{'processed_pairs':17,'pending_pairs':83}}
+        engine=SimpleNamespace(summary=lambda cfg,filters:data)
+        with patch.object(assistant,'_plan',return_value=(plan,0)),patch.object(assistant,'_engine',return_value=engine):
+            answer=assistant.answer(cfg,{}, {'message':'整理了多少，多少可复用？'})['answer']
+        for expected in ('来源共 100 条','已整理 17 条、待整理 83 条','有来源的软件知识 3 条','可直接复用 1 条'):
+            self.assertIn(expected,answer)
 
 
 if __name__=='__main__':unittest.main()

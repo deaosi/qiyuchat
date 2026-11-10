@@ -205,9 +205,10 @@ def answer(cfg: Settings, filters: dict, body: object) -> dict:
                           f"含客服回答的事件 {data.get('answered_events',0)} 条，可用知识 {data.get('ready_knowledge',0)} 条，"
                           f"异常或知识缺口 {data.get('exception_count',0)} 项。\n答案缺失只表示当前来源或抽取尚未提供有效回答，不能据此判断客服没有回复。")
         if cfg.runtime.voc_domain=='zhihuige':
+            coverage=data.get('coverage',{})
             result['answer']=(f"{scope['label']}：当前分类有 {data.get('consultation_count',0)} 次去重咨询、{data.get('total_events',0)} 个咨询片段，"
                               f"有来源的软件知识 {data.get('ready_knowledge',0)} 条，其中会话验证通过、可直接复用 {data.get('auto_reusable_knowledge',0)} 条，异常或知识缺口 {data.get('exception_count',0)} 项。\n"
-                              f"所选时间及客户范围的原始来源共 {data.get('source_pairs',0)} 条，包含尚未分类的记录；分类统计只覆盖已整理来源。")
+                              f"所选时间及客户范围的原始来源共 {data.get('source_pairs',0)} 条，已整理 {coverage.get('processed_pairs',0)} 条、待整理 {coverage.get('pending_pairs',0)} 条；分类统计只覆盖已整理来源。")
         return result
     if intent=='defects':
         rows=_list(engine.defects(cfg,scoped))
