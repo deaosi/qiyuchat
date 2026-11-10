@@ -164,7 +164,7 @@ export function VocNextWorkspace({ filters, refreshKey = 0, onOpenPair }: { filt
   const job = summary.data?.latest_job
   const refreshResults = useCallback(() => setRevision(value => value + 1), [])
   const fetching = [summary, topics, knowledge, exceptions, defects].some(query => query.loading || query.refreshing)
-  useBackgroundRefresh(refreshResults, active(job), fetching)
+  useBackgroundRefresh(refreshResults, active(job), fetching, key)
   useEffect(() => { setSelectedId(null); setSelectedEvent(null); setSelectedKnowledge(null); setDetailFilters(null); setMessages([]); setChatError(''); setQuestion('') }, [scopeKey])
 
   async function run() {

@@ -11,6 +11,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('VOC background refresh scheduling', () => {
+  it('re-arms after a fast request cycle without an intermediate loading render', () => {
+    const refresh = vi.fn()
+    const view = renderHook(({ cycle }) => useBackgroundRefresh(refresh, true, false, cycle), { initialProps: { cycle: 0 } })
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      act(() => { vi.advanceTimersByTime(5000) })
+      expect(refresh).toHaveBeenCalledTimes(cycle)
+      view.rerender({ cycle })
+    }
+  })
+
   it('waits for slow requests to settle before scheduling the next update', () => {
     const refresh = vi.fn()
     const view = renderHook(({ fetching }) => useBackgroundRefresh(refresh, true, fetching), { initialProps: { fetching: true } })

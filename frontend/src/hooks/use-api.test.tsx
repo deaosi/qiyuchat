@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, apiGet } from '@/lib/api'
 import { useApi } from './use-api'
+import { useBackgroundRefresh } from './use-background-refresh'
 
 vi.mock('@/lib/api', async importOriginal => ({ ...await importOriginal<typeof import('@/lib/api')>(), apiGet: vi.fn() }))
 
@@ -13,9 +14,24 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-afterEach(() => { cleanup(); vi.resetAllMocks() })
+afterEach(() => { cleanup(); vi.resetAllMocks(); vi.useRealTimers() })
 
 describe('same-scope background updates', () => {
+  it('continues polling when fast responses batch away intermediate loading states', async () => {
+    vi.useFakeTimers()
+    vi.mocked(apiGet).mockResolvedValue({ count: 12 })
+    renderHook(() => {
+      const [revision, setRevision] = useState(0)
+      const query = useApi<{ count: number }>('voc2/summary', { source: 'local' }, revision)
+      const refresh = useCallback(() => setRevision(value => value + 1), [])
+      useBackgroundRefresh(refresh, true, query.loading || query.refreshing, revision)
+      return query
+    })
+    await act(async () => { await Promise.resolve() })
+    for (let cycle = 0; cycle < 3; cycle++) await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(apiGet).toHaveBeenCalledTimes(4)
+  })
+
   it('keeps the mounted reading content and input while results are refreshed', async () => {
     const first = deferred<{ title: string }>()
     const second = deferred<{ title: string }>()
