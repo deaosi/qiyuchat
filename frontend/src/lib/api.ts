@@ -221,12 +221,30 @@ function validateGetResponse(name: string, data: unknown): void {
   if (!valid) throw new ApiError('服务接口版本不匹配，请刷新或联系管理员', 502)
 }
 
+function validateGatewayResponse(name: string, data: unknown): void {
+  if (!name.startsWith('gateway/')) return
+  let valid = isRecord(data)
+  if (valid && isRecord(data)) {
+    if (name === 'gateway/config') {
+      valid = typeof data.base_url === 'string' && typeof data.model === 'string'
+        && typeof data.key_configured === 'boolean' && typeof data.configured === 'boolean'
+        && Number.isInteger(data.timeout) && Number(data.timeout) > 0
+        && Number.isInteger(data.batch_size) && Number(data.batch_size) > 0
+    } else if (name === 'gateway/models') {
+      valid = isCount(data.total) && Array.isArray(data.items)
+        && data.items.every(item => isRecord(item) && typeof item.id === 'string' && item.id.length > 0)
+    }
+  }
+  if (!valid) throw new ApiError('模型网关设置返回的数据不完整，请刷新后重试。', 502)
+}
+
 export async function apiGet<T>(name: string, filters: ApiFilters, signal?: AbortSignal): Promise<T> {
   const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
     credentials: 'same-origin', cache: 'no-store', signal,
   }))
   validateGetResponse(name, data)
   validateVocResponse(name, data)
+  validateGatewayResponse(name, data)
   return data as T
 }
 
@@ -239,8 +257,20 @@ export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyI
     body: body ?? new Uint8Array(),
   }))
   validateVocResponse(name, data)
+  validateGatewayResponse(name, data)
   return data as T
 }
+
+export interface GatewayConfig {
+  base_url: string
+  model: string
+  key_configured: boolean
+  configured: boolean
+  timeout: number
+  batch_size: number
+}
+
+export interface GatewayModels { items: { id: string }[]; total: number }
 
 export async function downloadExport(filters: ApiFilters): Promise<void> {
   const response = await fetch(apiUrl('export', filters), { credentials: 'same-origin', cache: 'no-store' })

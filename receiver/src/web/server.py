@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ..config import Settings, settings
-from .. import voc, knowledge
+from .. import voc, knowledge, gateway
 from ..local import MAX_FILE_BYTES, clean_local, demo_settings, import_file, load_demo, parse_import, template_bytes
 from ..log import get
 from . import api
@@ -42,8 +42,9 @@ class DashboardServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], cfg: Settings,
                  allowed_hosts: tuple[str, ...] = (),
                  allowed_origins: tuple[str, ...] = (),
-                 admin_key: str = ""):
+                 admin_key: str = "", gateway_env_path: str | Path | None = None):
         self.cfg = cfg
+        self.gateway_env_path = gateway_env_path
         voc.startup(cfg)
         knowledge.startup(cfg)
         # 反代部署时额外放行的 Host / Origin；默认空 = 只认本机回环。
@@ -283,6 +284,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "本地查询失败，请重试并查看服务日志"}, 500)
 
     def _api(self, name: str, qs: dict[str, list[str]]) -> None:
+        if name == "gateway/config":
+            self._json(gateway.public_config(self.server.cfg))
+            return
         cfg = self._cfg(qs)
         filters = self._filters(qs)
         if name == "voc/knowledge" or name.startswith("voc/knowledge/"):
@@ -388,7 +392,29 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise ValueError("上传未完成，请重新选择文件")
-            if u.path.startswith("/api/voc/"):
+            if path in ("/api/gateway/config", "/api/gateway/models"):
+                try:
+                    if _str(qs, "source", "local") != "local":
+                        raise gateway.GatewayError("网关设置仅用于业务服务，请切换到业务数据")
+                    if not self.headers.get("Content-Type", "").lower().startswith("application/json") or len(data) > 32 * 1024:
+                        raise gateway.GatewayError("网关请求须为最多 32 KB 的 JSON")
+                    try:
+                        body = json.loads(data.decode("utf-8"))
+                    except (ValueError, UnicodeError, RecursionError):
+                        raise gateway.GatewayError("网关请求不是有效 JSON") from None
+                    if path.endswith("/config"):
+                        with gateway.CONFIG_LOCK:
+                            updated = gateway.save(self.server.cfg, body, self.server.gateway_env_path)
+                            self.server.cfg = updated
+                            self._json(gateway.public_config(updated))
+                    else:
+                        self._json(gateway.models(self.server.cfg, body))
+                except gateway.GatewayError as exc:
+                    self._json({"error": str(exc)}, exc.status)
+                except Exception:
+                    log.warning("网关设置操作失败")
+                    self._json({"error": "网关设置操作失败，请稍后重试"}, 500)
+            elif u.path.startswith("/api/voc/"):
                 if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
                     raise ValueError("VOC 请求须使用 application/json")
                 if len(data) > 256 * 1024:

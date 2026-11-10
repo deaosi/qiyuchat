@@ -61,7 +61,13 @@ systemctl list-timers qiyu-hourly-analysis.timer
 
 在服务器 `/opt/qiyu-console` 目录运行 `python3 -m src.hourly_analysis --check` 可只读检查待处理内容，不创建任务或调用模型。自动任务在独立进程运行，不需重启看板或消息接收服务；运行记录可用 `journalctl -u qiyu-hourly-analysis.service` 查看。
 
-仅在看板服务的环境文件中配置网关，重启看板服务生效：
+### 模型网关设置
+
+管理员可从侧栏“系统设置 → 模型网关”修改公共 HTTPS 网关的 OpenAI 兼容接口基础地址、API Key 和模型 ID，并读取模型列表验证连接。模型列表不是必需条件，不支持该接口的网关仍可手动填写模型 ID。保存后，后续 VOC、知识草稿和每小时自动任务使用新配置；已经启动的任务保留启动时的配置。
+
+现有密钥只显示是否已配置，不返回浏览器。地址不变时，密钥留空表示保留；更换地址必须重新填写密钥，避免将原密钥发送给新地址。设置沿用原管理员 Cookie 与同源写保护，配置只保存在服务端，不放入浏览器存储或仓库。
+
+也可以直接修改看板服务的环境文件；手动修改后需重启看板服务，使网页发起的任务加载配置：
 
 ```dotenv
 LLM_BASE_URL=https://your-gateway.example/v1

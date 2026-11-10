@@ -27,7 +27,15 @@ def _load_env_file(path: Path) -> None:
             continue
         key, _, val = line.partition("=")
         key = key.strip()
-        val = val.strip().strip('"').strip("'")
+        val = val.strip()
+        if val.startswith('"') and val.endswith('"'):
+            try:
+                decoded = json.loads(val)
+                val = decoded if isinstance(decoded, str) else val.strip('"')
+            except ValueError:
+                val = val.strip('"')
+        else:
+            val = val.strip("'")
         if key and key not in os.environ:
             os.environ[key] = val
 
@@ -125,6 +133,9 @@ class LLMConfig:
     json_mode: bool = True
     # Optional provider extension; VOC/knowledge only. Empty keeps generic gateways compatible.
     thinking: str = ""
+    # Admin UI profiles use public HTTPS with pinned DNS and no redirects.
+    # Legacy local/Ollama configurations retain their existing transport.
+    public_gateway: bool = False
 
 
 @dataclass(frozen=True)
@@ -213,6 +224,7 @@ def load_settings() -> Settings:
             extra_headers=_kv_headers("LLM_EXTRA_HEADERS"),
             json_mode=_b("LLM_JSON_MODE", True),
             thinking=_thinking_mode(),
+            public_gateway=_b("LLM_PUBLIC_GATEWAY", False),
         ),
         feishu=FeishuConfig(
             webhook=_s("FEISHU_WEBHOOK"),

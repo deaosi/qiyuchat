@@ -12,6 +12,7 @@ from .clean.rules import mask_pii
 from .config import LLMConfig
 from .extract.text import clean_visible_text
 from .http import HttpError, request
+from .gateway import GatewayError, model_request as public_request
 
 PROMPT_VERSION = "voc-v2"
 MAX_BATCH_SIZE = 20
@@ -239,19 +240,22 @@ def _gateway(cfg: LLMConfig, payload: dict[str, Any]) -> dict[str, Any]:
     if cfg.api_key:
         headers["Authorization"] = f"Bearer {cfg.api_key}"
     url = cfg.base_url.rstrip("/") + "/chat/completions"
+    transport = public_request if cfg.public_gateway else request
     try:
         try:
             # One transport attempt: shared HTTP retries would log unsafe bodies.
-            response = request("POST", url, body=payload, headers=headers,
+            response = transport("POST", url, body=payload, headers=headers,
                                timeout=cfg.timeout, retries=1)
         except HttpError as error:
             if ("response_format" in payload and error.status in (400, 422)
                     and "response_format" in str(error.body)):
                 fallback = {key: value for key, value in payload.items() if key != "response_format"}
-                response = request("POST", url, body=fallback, headers=headers,
+                response = transport("POST", url, body=fallback, headers=headers,
                                    timeout=cfg.timeout, retries=1)
             else:
                 raise
+    except GatewayError as error:
+        raise VocModelError(str(error), retryable=error.status in (408, 429) or error.status >= 500) from None
     except HttpError as error:
         raise VocModelError(f"模型网关请求失败（HTTP {error.status}），请检查配置或稍后重试。",
                             retryable=error.status in (408, 429) or error.status >= 500) from None
