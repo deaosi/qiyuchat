@@ -2,9 +2,10 @@ import * as React from 'react'
 import {
   ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight,
   ChevronsLeft, ChevronsRight, CircleCheck, CircleDashed,
-  AlertCircle, Columns3, Loader2, RefreshCw, Search, SearchX, X,
+  AlertCircle, Columns3, RefreshCw, Search, SearchX, X,
 } from 'lucide-react'
 
+import { LoadingState } from './loading-state'
 import type { QAPair } from '@/lib/demo-data'
 import { ApiError, apiGet, normalizePair, type ApiFilters } from '@/lib/api'
 import { cn, customerLabel } from '@/lib/utils'
@@ -172,7 +173,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
   }
 
   return (
-    <section className="flex min-w-0 flex-col gap-4" aria-label="问答明细">
+    <section className="flex min-w-0 flex-col gap-4" aria-label="问答明细" aria-busy={pending}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Tabs value={reply} onValueChange={value => changeReply(value as ReplyTab)}>
           <TabsList>
@@ -228,8 +229,8 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
               <TableHead className="w-12"><span className="sr-only">查看详情</span></TableHead>
             </TableRow>
           </TableHeader>
-          <TableBody>
-            {pending ? <TableRow><TableCell colSpan={visible.size + 2} className="h-60 text-center"><div className="flex flex-col items-center gap-3" role="status"><Loader2 className="size-5 animate-spin text-muted-foreground" /><span className="text-sm text-muted-foreground">正在读取问答记录…</span></div></TableCell></TableRow> : failed ? <TableRow><TableCell colSpan={visible.size + 2} className="h-60 text-center"><div className="mx-auto flex max-w-md flex-col items-center gap-3" role="alert"><AlertCircle className="size-6 text-muted-foreground" /><div className="font-medium">暂时无法读取问答</div><p className="text-sm text-muted-foreground">{server.error}</p><Button variant="outline" size="sm" onClick={() => setRetry(value => value + 1)}><RefreshCw className="size-3.5" />重新加载</Button></div></TableCell></TableRow> : pageRows.length ? pageRows.map(row => (
+          <TableBody className={pending ? undefined : 'qiyu-page-enter'}>
+            {pending ? <TableRow><TableCell colSpan={visible.size + 2} className="h-60 text-center"><LoadingState label="正在读取问答记录…" rows={5} className="px-4" /></TableCell></TableRow> : failed ? <TableRow><TableCell colSpan={visible.size + 2} className="h-60 text-center"><div className="mx-auto flex max-w-md flex-col items-center gap-3" role="alert"><AlertCircle className="size-6 text-muted-foreground" /><div className="font-medium">暂时无法读取问答</div><p className="text-sm text-muted-foreground">{server.error}</p><Button variant="outline" size="sm" onClick={() => setRetry(value => value + 1)}><RefreshCw className="size-3.5" />重新加载</Button></div></TableCell></TableRow> : pageRows.length ? pageRows.map(row => (
               <TableRow key={row.id} data-state={selected.has(row.id) ? 'selected' : undefined}>
                 <TableCell className="pl-4 align-top pt-5">
                   <Checkbox checked={selected.has(row.id)} onCheckedChange={checked => selectRow(row.id, Boolean(checked))}

@@ -1,5 +1,6 @@
 import * as React from 'react'
-import { AlertCircle, Archive, ArrowDownLeft, ArrowUpRight, CircleCheck, CircleDashed, Layers2, Loader2, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
+import { AlertCircle, Archive, ArrowDownLeft, ArrowUpRight, CircleCheck, CircleDashed, Layers2, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
+import { LoadingState } from './loading-state'
 import type { QAPair } from '@/lib/demo-data'
 import { ApiError, apiGet, normalizePair } from '@/lib/api'
 import { customerLabel } from '@/lib/utils'
@@ -114,7 +115,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local' }: QAD
           <Separator />
           <section className="pt-6">
             <h3 className="mb-5 flex items-center gap-2 text-sm font-medium"><MessagesSquare className="size-4" />相关会话上下文</h3>
-            {loading ? <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-5 text-sm text-muted-foreground" role="status"><Loader2 className="size-4 animate-spin" />正在读取相关会话上下文…</div>
+            {loading ? <LoadingState label="正在读取相关会话上下文…" rows={4} />
               : error ? <div className="rounded-lg border p-4" role="alert"><div className="flex items-center gap-2 text-sm font-medium"><AlertCircle className="size-4" />暂时无法读取会话详情</div><p className="mt-2 text-sm leading-6 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-3" onClick={() => setRetry(value => value + 1)}><RefreshCw className="size-3.5" />重新加载</Button></div>
                 : archived ? <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><Archive className="mt-1 size-4 shrink-0" /><p>原始上下文已归档，问答资产仍保留。可查看上方问题与回复。</p></div>
                   : messages.length ? <div className="space-y-5">{messages.map((message, index) => <div key={`${index}-${message.role}`} className={`min-w-0 max-w-[90%] ${message.role === 'staff' ? 'ml-auto' : ''}`}><div className="mb-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>{messageRole(message, pair)}</span><time>{message.time}</time></div><div className={message.role === 'staff' ? 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tr-sm bg-foreground px-4 py-3 text-sm leading-7 text-background' : 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tl-sm border bg-muted/35 px-4 py-3 text-sm leading-7'}>{message.content}</div></div>)}</div>

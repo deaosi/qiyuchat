@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, History, LoaderCircle, MoreHorizontal, Plus, Square, SquarePen, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, History, MoreHorizontal, Plus, Square, SquarePen, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { type ApiFilters, type GatewayConfig } from '@/lib/api'
@@ -10,6 +10,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { EvidenceList, KnowledgeContent, QueryPanel, type Evidence, type Knowledge, type TopicDetail } from './voc-next-workspace'
+import { LoadingMark, LoadingState, LoadingValue } from './loading-state'
 
 type Selection = { threadId: string; citation: ChatCitation; message: ChatMessage; filters: ApiFilters }
 type Coverage = { source_pairs: number; ready_knowledge: number; auto_reusable_knowledge: number; coverage: { processed_pairs: number; pending_pairs: number } }
@@ -109,7 +110,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, onOpe
     <div className="p-4"><Button variant="outline" className="w-full justify-start gap-2 bg-background shadow-none" onClick={newThread}><SquarePen className="size-4" />新建对话</Button></div>
     <div className="px-4 pb-2 text-[11px] font-medium tracking-wide text-muted-foreground">本窗口的对话</div>
     <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-4">{state.threads.map(item => <div key={item.id} className={`group flex items-center rounded-lg ${item.id === current?.id ? 'bg-muted' : 'hover:bg-muted/60'}`}>
-      <button className="min-w-0 flex-1 px-3 py-3 text-left" onClick={() => selectThread(item.id)}><span className="flex items-center gap-2 text-sm"><span className="truncate">{item.title}</span>{state.pending[item.id] && <LoaderCircle className="size-3 shrink-0 animate-spin text-muted-foreground" />}</span><span className="mt-1.5 block text-[11px] text-muted-foreground">{timestamp(item.updatedAt)}</span></button>
+      <button className="min-w-0 flex-1 px-3 py-3 text-left" onClick={() => selectThread(item.id)}><span className="flex items-center gap-2 text-sm"><span className="truncate">{item.title}</span>{state.pending[item.id] && <LoadingMark className="size-3 text-muted-foreground" />}</span><span className="mt-1.5 block text-[11px] text-muted-foreground">{timestamp(item.updatedAt)}</span></button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={`管理对话：${item.title}`} className="mr-1 shrink-0 opacity-50 group-hover:opacity-100 focus:opacity-100"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setDeleting(item)}><Trash2 />删除本窗口对话</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
     </div>)}</div>
     <p className="border-t px-4 py-3 text-[11px] leading-5 text-muted-foreground">最近 20 个对话保存在此标签页中，刷新后可继续。</p>
@@ -134,7 +135,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, onOpe
         const panel = scroll.current
         if (panel) { const next = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 100; nearBottom.current = next; setAtBottom(next) }
       }} aria-label="聊天消息">
-        {!current ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground"><LoaderCircle className="mr-2 size-4 animate-spin" />正在打开对话…</div> : current.messages.length === 0 ? <div key={current.id} className="qiyu-page-enter mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-6 py-10 md:px-10">
+        {!current ? <LoadingState label="正在打开对话…" className="mx-auto h-full max-w-3xl px-6 md:px-10" /> : current.messages.length === 0 ? <div key={current.id} className="qiyu-page-enter mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-6 py-10 md:px-10">
           <p className="mb-3 text-xs text-muted-foreground">知汇鸽使用支持</p>
           <h3 className="text-xl font-semibold tracking-tight">查询会话数据</h3>
           <p className="mt-3 max-w-lg text-sm leading-7 text-muted-foreground">查看高频咨询、接待回复和知识依据。</p>
@@ -148,7 +149,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, onOpe
               <div className="flex items-start justify-between gap-3"><p className="text-[11px] leading-5 text-muted-foreground">{[message.scope, message.tools?.map(t => t.label).join('、')].filter(Boolean).join(' · ')}</p><Button size="icon-sm" variant="ghost" aria-label="复制回答" onClick={() => void copy(message)}>{copied === message.id ? <Check className="size-3.5" /> : <Copy className="size-3.5 text-muted-foreground" />}</Button></div>
             </>}
           </article>)}
-          {pending && <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在查询…</div>}
+          {pending && <LoadingState label="正在查询会话与知识依据…" rows={2} className="min-h-28 py-2" />}
         </div>}
       </div>
       {!atBottom && current?.messages.length ? <Button variant="outline" size="icon-sm" className="absolute bottom-40 right-6 rounded-full bg-background shadow-sm" aria-label="回到最新消息" onClick={() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; nearBottom.current = true; setAtBottom(true) }}><ArrowDown /></Button> : null}
@@ -166,7 +167,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, onOpe
       </div></div>
     </div>
 
-    {sourcesWide && <aside className="flex w-[340px] shrink-0 flex-col border-l bg-muted/10" aria-label="回答来源面板"><div className="flex h-16 shrink-0 items-center justify-between border-b px-5"><h2 className="text-sm font-medium">回答依据</h2>{selection && <Button variant="ghost" size="icon-sm" aria-label="关闭来源" onClick={() => setSelection(null)}><X className="size-4" /></Button>}</div><div className="min-h-0 flex-1 overflow-y-auto p-5">{selection ? <SourceInspector selection={selection} onOpenPair={onOpenPair} /> : <div className="space-y-6"><div><h3 className="text-sm font-medium">查看引用来源</h3><p className="mt-2 text-xs leading-6 text-muted-foreground">点击回答下的来源，查看对应会话、适用条件和后续反馈。</p></div><div className="space-y-3 border-t pt-5 text-xs"><p className="font-medium">当前范围</p><p className="leading-6 text-muted-foreground">{chatScopeLabel(current?.filters || filters)}</p>{[['来源问答', coverage.data?.source_pairs], ['已整理来源', coverage.data?.coverage.processed_pairs], ['来源知识', coverage.data?.ready_knowledge], ['会话验证答案', coverage.data?.auto_reusable_knowledge]].map(([label, value]) => <div key={String(label)} className="flex justify-between gap-3"><span className="text-muted-foreground">{label}</span><span className="tabular-nums">{amount(value as number | undefined)}</span></div>)}</div></div>}</div></aside>}
+    {sourcesWide && <aside className="flex w-[340px] shrink-0 flex-col border-l bg-muted/10" aria-label="回答来源面板"><div className="flex h-16 shrink-0 items-center justify-between border-b px-5"><h2 className="text-sm font-medium">回答依据</h2>{selection && <Button variant="ghost" size="icon-sm" aria-label="关闭来源" onClick={() => setSelection(null)}><X className="size-4" /></Button>}</div><div className="min-h-0 flex-1 overflow-y-auto p-5">{selection ? <SourceInspector selection={selection} onOpenPair={onOpenPair} /> : <div className="space-y-6"><div><h3 className="text-sm font-medium">查看引用来源</h3><p className="mt-2 text-xs leading-6 text-muted-foreground">点击回答下的来源，查看对应会话、适用条件和后续反馈。</p></div><div className="space-y-3 border-t pt-5 text-xs"><p className="font-medium">当前范围</p><p className="leading-6 text-muted-foreground">{chatScopeLabel(current?.filters || filters)}</p>{[['来源问答', coverage.data?.source_pairs], ['已整理来源', coverage.data?.coverage.processed_pairs], ['来源知识', coverage.data?.ready_knowledge], ['会话验证答案', coverage.data?.auto_reusable_knowledge]].map(([label, value]) => <div key={String(label)} className="flex justify-between gap-3"><span className="text-muted-foreground">{label}</span><span className="tabular-nums">{coverage.loading ? <LoadingValue className="h-3 w-8 rounded-sm" /> : amount(value as number | undefined)}</span></div>)}</div></div>}</div></aside>}
 
     <Sheet open={historyOpen && !historyWide} onOpenChange={setHistoryOpen}><SheetContent side="left" className="w-72 gap-0 p-0"><SheetHeader className="border-b p-4"><SheetTitle>对话记录</SheetTitle><SheetDescription>本窗口保留的最近对话</SheetDescription></SheetHeader>{history}</SheetContent></Sheet>
     <Sheet open={!!selection && !sourcesWide} onOpenChange={open => { if (!open) setSelection(null) }}><SheetContent className="w-full overflow-y-auto sm:max-w-2xl"><SheetHeader><SheetTitle>回答依据</SheetTitle><SheetDescription>按这条回答的实际查询范围读取原始依据。</SheetDescription></SheetHeader><div className="px-4 pb-6">{selection && !sourcesWide && <SourceInspector selection={selection} onOpenPair={onOpenPair} />}</div></SheetContent></Sheet>

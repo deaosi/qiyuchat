@@ -155,9 +155,24 @@
 
 @keyframes qiyu-enter { from { opacity: .35; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 .qiyu-page-enter { animation: qiyu-enter .18s ease-out; }
+@keyframes qiyu-skeleton { to { background-position: -200% 0; } }
+@keyframes qiyu-loading-turn { to { transform: rotate(360deg); } }
+@keyframes qiyu-request-travel { from { transform: translateX(-105%); } to { transform: translateX(405%); } }
+.qiyu-skeleton {
+  background-color: var(--muted);
+  background-image: linear-gradient(105deg, transparent 25%, color-mix(in oklch, var(--foreground) 6%, transparent) 45%, transparent 65%);
+  background-size: 200% 100%;
+  animation: qiyu-skeleton 1.6s ease-in-out infinite;
+}
+.qiyu-loading-mark { border: 1.5px solid color-mix(in oklch, var(--foreground) 15%, transparent); border-top-color: var(--foreground); border-radius: 50%; animation: qiyu-loading-turn .8s linear infinite; }
+.qiyu-request-progress { opacity: 0; background: color-mix(in oklch, var(--foreground) 5%, transparent); transition: opacity .15s ease; }
+.qiyu-request-progress[data-visible="true"] { opacity: 1; }
+.qiyu-request-progress-line { background: linear-gradient(90deg, transparent, var(--foreground), transparent); animation: qiyu-request-travel 1.15s ease-in-out infinite; animation-play-state: paused; }
+.qiyu-request-progress[data-visible="true"] .qiyu-request-progress-line { animation-play-state: running; }
+[data-slot="tabs-content"][data-state="active"] { animation: qiyu-enter .18s ease-out; }
 [data-density="compact"] [data-slot="table-cell"] { padding-top: .5rem; padding-bottom: .5rem; }
-[data-motion="off"] * { transition-duration: 0s !important; animation-duration: 0s !important; }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+[data-motion="off"] *, [data-motion="off"] *::before, [data-motion="off"] *::after { transition-duration: 0s !important; animation-duration: 0s !important; animation-iteration-count: 1 !important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 
 /* Restrained neutral depth; all stops follow the light/dark theme tokens. */
 [data-slot="sidebar-inset"] {

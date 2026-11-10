@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, CheckCheck, ChevronDown, CircleCheck, CircleDashed, Clock3, KeyRound, Layers3, LoaderCircle, RefreshCw, Save, ServerCog, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
+import { LoadingState } from './loading-state'
 import { useApi } from '@/hooks/use-api'
 import { ApiError, apiPost, type ApiFilters, type GatewayConfig, type GatewayModels } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
@@ -80,7 +81,7 @@ export function GatewaySettings({ onSaved }: { onSaved: () => void }) {
     finally { if (mounted.current) setBusy(null) }
   }
 
-  if (config.loading || (!saved && config.data)) return <Card><CardContent className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-5 animate-spin" />正在读取模型网关配置…</CardContent></Card>
+  if (config.loading || (!saved && config.data)) return <Card><CardContent><LoadingState label="正在读取模型网关配置…" rows={5} className="min-h-64" /></CardContent></Card>
   if (config.error || !saved) return <Card><CardContent className="flex min-h-64 flex-col items-center justify-center gap-3 p-6 text-center" role="alert"><TriangleAlert className="size-6 text-muted-foreground" /><p className="max-w-lg text-sm text-muted-foreground">{config.error || '暂时无法读取模型网关配置。'}</p><Button size="sm" variant="outline" onClick={config.retry}><RefreshCw />重试</Button></CardContent></Card>
 
   return <div className="mx-auto w-full max-w-6xl space-y-5">

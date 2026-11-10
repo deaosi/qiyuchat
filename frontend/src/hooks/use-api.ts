@@ -7,6 +7,8 @@ export function useApi<T>(name: string, filters: ApiFilters, refreshKey = 0, ena
   const [state, setState] = useState<{ key: string; data: T | null; loading: boolean; error: string | null }>({ key: '', data: null, loading: enabled, error: null })
   const [retryKey, setRetryKey] = useState(0)
   const revision = useRef(0)
+  const latest = useRef(state)
+  latest.current = state
   const scopeKey = `${name}:${key}`
   const queryKey = `${scopeKey}:${refreshKey}:${retryKey}`
   useEffect(() => {
@@ -16,7 +18,7 @@ export function useApi<T>(name: string, filters: ApiFilters, refreshKey = 0, ena
     // Revalidation keeps the mounted view. A different endpoint/filter scope
     // still hides the previous rows immediately, before the effect runs.
     setState(previous => ({ key: scopeKey, data: previous.key === scopeKey ? previous.data : null, loading: true, error: null }))
-    apiGet<T>(name, JSON.parse(key) as ApiFilters, controller.signal)
+    apiGet<T>(name, JSON.parse(key) as ApiFilters, controller.signal, { background: latest.current.key === scopeKey && latest.current.data !== null })
       .then(data => {
         if (current === revision.current && !controller.signal.aborted) setState({ key: scopeKey, data, loading: false, error: null })
       })

@@ -2,6 +2,7 @@ import { ArrowUpRight, Files, Layers3, MessageSquareText, UsersRound } from 'luc
 import { Badge } from '@/components/ui/badge'
 import { Card, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import type { SummaryData } from '@/lib/api'
+import { LoadingValue } from './loading-state'
 
 export function QiyuSectionCards({ summary, rangeLabel, loading = false, onNavigate }: {
   summary: SummaryData | null; rangeLabel: string; loading?: boolean; onNavigate: (page: string) => void
@@ -14,7 +15,7 @@ export function QiyuSectionCards({ summary, rangeLabel, loading = false, onNavig
   ]
   return <div className="grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4" aria-busy={loading}>
     {items.map(({ title, value, icon: Icon, badge, footer, note, page }) => <Card key={title} role="button" tabIndex={0} className="@container/card cursor-pointer transition-shadow hover:shadow-md focus-visible:outline-2 focus-visible:outline-ring" onClick={() => onNavigate(page)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onNavigate(page) } }}>
-      <CardHeader><CardDescription>{title}</CardDescription><CardTitle className={`text-2xl font-semibold tabular-nums @[250px]/card:text-3xl ${loading ? 'animate-pulse' : ''}`}>{value === undefined ? '—' : value.toLocaleString('zh-CN')}</CardTitle><CardAction><Badge variant="outline"><Icon className="size-3.5" />{badge}</Badge></CardAction></CardHeader>
+      <CardHeader><CardDescription>{title}</CardDescription><CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">{loading ? <LoadingValue /> : value === undefined ? '—' : value.toLocaleString('zh-CN')}</CardTitle><CardAction><Badge variant="outline"><Icon className="size-3.5" />{badge}</Badge></CardAction></CardHeader>
       <CardFooter className="flex-col items-start gap-1.5 text-sm"><div className="flex w-full items-center justify-between gap-2 font-medium"><span className="line-clamp-1" title={footer}>{footer}</span><ArrowUpRight className="size-4 shrink-0" /></div><div className="text-muted-foreground text-[13px]">{note}</div></CardFooter>
     </Card>)}
   </div>

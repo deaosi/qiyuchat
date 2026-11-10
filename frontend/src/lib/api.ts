@@ -1,4 +1,5 @@
 import type { QAPair } from '@/lib/demo-data'
+import { withRequestActivity } from '@/lib/request-activity'
 
 export interface ApiFilters {
   source: 'local'
@@ -330,29 +331,34 @@ function validateGatewayResponse(name: string, data: unknown): void {
   if (!valid) throw new ApiError('模型网关设置返回的数据不完整，请刷新后重试。', 502)
 }
 
-export async function apiGet<T>(name: string, filters: ApiFilters, signal?: AbortSignal): Promise<T> {
-  const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
-    credentials: 'same-origin', cache: 'no-store', signal,
-  }))
-  validateGetResponse(name, data)
-  validateVocResponse(name, data)
-  validateVoc2Response(name, data)
-  validateGatewayResponse(name, data)
-  return data as T
+export async function apiGet<T>(name: string, filters: ApiFilters, signal?: AbortSignal, activity: { background?: boolean } = {}): Promise<T> {
+  return withRequestActivity('正在读取数据…', async () => {
+    const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
+      credentials: 'same-origin', cache: 'no-store', signal,
+    }))
+    validateGetResponse(name, data)
+    validateVocResponse(name, data)
+    validateVoc2Response(name, data)
+    validateGatewayResponse(name, data)
+    return data as T
+  }, activity.background)
 }
 
 export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyInit, headers?: HeadersInit, signal?: AbortSignal): Promise<T> {
-  const requestHeaders = new Headers(headers)
-  if (!requestHeaders.has('Content-Type')) requestHeaders.set('Content-Type', 'application/octet-stream')
-  requestHeaders.set('X-Local-Request', '1')
-  const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
-    method: 'POST', credentials: 'same-origin', headers: requestHeaders,
-    body: body ?? new Uint8Array(), signal,
-  }))
-  validateVocResponse(name, data)
-  validateVoc2Response(name, data)
-  validateGatewayResponse(name, data)
-  return data as T
+  const label = name === 'voc2/assistant' ? '正在查询会话数据…' : name === 'clean' ? '正在清洗会话…' : name.startsWith('import') ? '正在处理导入文件…' : name === 'gateway/models' ? '正在读取模型列表…' : name.includes('run') ? '正在提交整理任务…' : '正在保存…'
+  return withRequestActivity(label, async () => {
+    const requestHeaders = new Headers(headers)
+    if (!requestHeaders.has('Content-Type')) requestHeaders.set('Content-Type', 'application/octet-stream')
+    requestHeaders.set('X-Local-Request', '1')
+    const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
+      method: 'POST', credentials: 'same-origin', headers: requestHeaders,
+      body: body ?? new Uint8Array(), signal,
+    }))
+    validateVocResponse(name, data)
+    validateVoc2Response(name, data)
+    validateGatewayResponse(name, data)
+    return data as T
+  })
 }
 
 export interface GatewayConfig {
@@ -366,26 +372,29 @@ export interface GatewayConfig {
 
 export interface GatewayModels { items: { id: string }[]; total: number }
 
-export async function downloadExport(filters: ApiFilters): Promise<void> {
-  const response = await fetch(apiUrl('export', filters), { credentials: 'same-origin', cache: 'no-store' })
-  if (!response.ok) await readResponse<never>(response)
-  const url = URL.createObjectURL(await response.blob())
-  const link = document.createElement('a')
-  link.href = url
-  link.download = '语海Voc-脱敏问答.csv'
-  link.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+async function downloadFile(name: string, filters: ApiFilters, filename: string, label: string): Promise<void> {
+  return withRequestActivity(label, async () => {
+    const response = await fetch(apiUrl(name, filters), { credentials: 'same-origin', cache: 'no-store' })
+    if (!response.ok) await readResponse<never>(response)
+    const url = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  })
 }
 
-export async function downloadKnowledgeExport(source: ApiFilters['source']): Promise<void> {
-  const response = await fetch(apiUrl('voc/knowledge/export', { source, status: 'confirmed' }), { credentials: 'same-origin', cache: 'no-store' })
-  if (!response.ok) await readResponse<never>(response)
-  const url = URL.createObjectURL(await response.blob())
-  const link = document.createElement('a')
-  link.href = url
-  link.download = '语海Voc-知识导出.csv'
-  link.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+export function downloadExport(filters: ApiFilters): Promise<void> {
+  return downloadFile('export', filters, '语海Voc-脱敏问答.csv', '正在导出问答…')
+}
+
+export function downloadKnowledgeExport(source: ApiFilters['source']): Promise<void> {
+  return downloadFile('voc/knowledge/export', { source, status: 'confirmed' }, '语海Voc-知识导出.csv', '正在导出知识…')
+}
+
+export function downloadTemplate(): Promise<void> {
+  return downloadFile('template', { source: 'local' }, '语海Voc-会话导入模板.csv', '正在下载导入模板…')
 }
 
 export function normalizePair(raw: Record<string, unknown>): QAPair {

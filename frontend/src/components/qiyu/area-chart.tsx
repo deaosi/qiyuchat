@@ -1,6 +1,6 @@
 import { useId } from 'react'
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts'
-import { LoaderCircle } from 'lucide-react'
+import { LoadingState } from './loading-state'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -22,7 +22,7 @@ export function QiyuAreaChart({ data, days, onDaysChange, onDaySelect, animate, 
       <ToggleGroup type="single" value={String(days)} onValueChange={value => value && onDaysChange(Number(value))} variant="outline" className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"><ToggleGroupItem value="7">近 7 天</ToggleGroupItem><ToggleGroupItem value="30">近 30 天</ToggleGroupItem><ToggleGroupItem value="90">近 90 天</ToggleGroupItem><ToggleGroupItem value="0">全部</ToggleGroupItem></ToggleGroup>
       <Select value={String(days)} onValueChange={value => onDaysChange(Number(value))}><SelectTrigger size="sm" className="w-36 @[767px]/card:hidden" aria-label="图表时间范围"><SelectValue placeholder="自定义日期" /></SelectTrigger><SelectContent><SelectItem value="7">最近 7 天</SelectItem><SelectItem value="30">最近 30 天</SelectItem><SelectItem value="90">最近 90 天</SelectItem><SelectItem value="0">全部时间</SelectItem></SelectContent></Select>
     </CardAction></CardHeader>
-    <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">{loading ? <div className="flex h-[260px] items-center justify-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取趋势…</div> : !points.length || total === 0 ? <div className="flex h-[260px] items-center justify-center px-6 text-center text-sm text-muted-foreground">当前范围没有可绘制的问答。可调整日期、客户群或客服筛选。</div> : <ChartContainer config={config} className="aspect-auto h-[260px] w-full"><AreaChart data={points} margin={{ left: 5, right: 5 }} onClick={state => { if (state?.activeLabel) onDaySelect(String(state.activeLabel)) }}>
+    <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">{loading ? <LoadingState label="正在读取趋势…" rows={4} className="h-[260px] px-4 sm:px-0" /> : !points.length || total === 0 ? <div className="flex h-[260px] items-center justify-center px-6 text-center text-sm text-muted-foreground">当前范围没有可绘制的问答。可调整日期、客户群或客服筛选。</div> : <ChartContainer config={config} className="aspect-auto h-[260px] w-full"><AreaChart data={points} margin={{ left: 5, right: 5 }} onClick={state => { if (state?.activeLabel) onDaySelect(String(state.activeLabel)) }}>
       <defs><linearGradient id={`${id}-questions`} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="var(--color-questions)" stopOpacity={0.7} /><stop offset="95%" stopColor="var(--color-questions)" stopOpacity={0.04} /></linearGradient></defs>
       <CartesianGrid vertical={false} /><YAxis hide domain={[0, ceiling]} /><XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={9} minTickGap={32} tickFormatter={value => dateText(String(value))} />
       <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" labelFormatter={value => dateText(String(value))} />} />
