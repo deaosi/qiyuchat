@@ -156,6 +156,7 @@ def stage_extract(cfg: Settings | None = None, limit: int = 0,
         sd = dict(s)
         sd["session_id"] = sd.get("session_id") or sd.get("id")
         sid = str(sd["session_id"])
+        db.restore_verified_source(sid)
         msgs = db.get_messages(sid)
         input_data = {k: sd.get(k) for k in
                       ("session_id", "user_id", "user_name", "from_group", "staff_name", "start_ts")}

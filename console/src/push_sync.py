@@ -17,10 +17,11 @@ import uuid
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Iterator
 
 from .config import Settings, load_settings
-from .db import DB
+from .db import DB, SOURCE_ARCHIVE_TRIGGERS
 from .extract import extract_pairs
 from .extract.identity import SOURCE_IDENTITY_ROLE, encode_identity
 from .qiyu.common import QiyuError
@@ -37,21 +38,9 @@ CREATE TABLE IF NOT EXISTS push_sync_state (
  updated_at REAL NOT NULL, retry_after REAL NOT NULL DEFAULT 0,
  safe_error TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT '',
  claim_until REAL NOT NULL DEFAULT 0, source_version TEXT NOT NULL DEFAULT '',
- source_json TEXT NOT NULL DEFAULT '');
+ source_json TEXT NOT NULL DEFAULT '',archive_reason TEXT NOT NULL DEFAULT '',archived_at REAL NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS push_sync_retry ON push_sync_state(status,retry_after);
-CREATE TRIGGER IF NOT EXISTS push_sync_forget_message_source
-AFTER DELETE ON raw_message BEGIN
- UPDATE push_sync_state SET source_json='', source_version='',
- status=CASE WHEN status IN ('completed','failed') THEN 'archived' ELSE status END
- WHERE session_id=OLD.session_id;
-END;
-CREATE TRIGGER IF NOT EXISTS push_sync_forget_session_source
-AFTER DELETE ON raw_session BEGIN
- UPDATE push_sync_state SET source_json='', source_version='',
- status=CASE WHEN status IN ('completed','failed') THEN 'archived' ELSE status END
- WHERE session_id=OLD.session_id;
-END;
-"""
+""" + SOURCE_ARCHIVE_TRIGGERS
 
 
 class PushSyncError(RuntimeError):
@@ -183,7 +172,8 @@ def _project(metadata: dict, rows: list[dict], event: dict, sid: int, *, legacy:
                 current_sender = cid
         elif role == "boundary" and not legacy:
             current_sender = None
-        result.append({"role": role, "content": row["msg"], "ts": row["time"]})
+        result.append({"role": role, "content": row["msg"], "ts": row["time"],
+                       **({"source_message_id": f"source:{sid}:{row['id']}"} if not legacy else {})})
     return result
 
 
@@ -209,8 +199,19 @@ def _legacy_origin(conn: sqlite3.Connection, old: sqlite3.Row | None) -> dict | 
     return None
 
 
-def _protect_existing(db: DB, sid: str, source_json: str, source: list[dict], projected: list[dict], *, migrate_legacy: bool = False) -> None:
+def _protect_existing(db: DB, sid: str, source_json: str, source: list[dict], projected: list[dict], *, migrate_legacy: bool = False, repair_roles: bool = False) -> None:
     old = db.get_messages(sid)
+    if repair_roles:
+        if db._conn.execute("SELECT 1 FROM qa_pair WHERE session_id=? LIMIT 1", (sid,)).fetchone():
+            raise PushSyncError("修复目标已有问答资产，须先核对稳定映射，未覆盖")
+        cursor = 0
+        for message in old:
+            while cursor < len(source) and (str(source[cursor]["msg"]).strip() != str(message["content"]).strip() or source[cursor]["time"] != message["ts"]):
+                cursor += 1
+            if cursor == len(source):
+                raise PushSyncError("已存原文无法逐条匹配官方完整来源，未修复")
+            cursor += 1
+        return
     if source_json:
         try:
             previous = json.loads(source_json)["messages"]
@@ -230,11 +231,19 @@ def _protect_existing(db: DB, sid: str, source_json: str, source: list[dict], pr
             if not has_qa and old == known_old:
                 return
             raise PushSyncError("旧版身份投影迁移条件不满足，暂停覆盖")
+        # Identity controls and sequence numbers are derived, not source
+        # messages: inserting an earlier real message can move a control.
+        # Accept that only after proving both immutable source-ID coverage
+        # above and exact reproduction of the previous stored projection.
+        snapshot = json.loads(source_json)
+        known_old = _project(snapshot["session"], previous, snapshot["session"], int(sid))
+        if len(old) == len(known_old) and all(all(expected.get(k) == v for k,v in stored.items()) for stored,expected in zip(old,known_old)):
+            return
     # Without source IDs, every old role/content/timestamp must match in order.
     # A mismatch is not permission to infer a role or discard original content.
     cursor = 0
     for message in old:
-        while cursor < len(projected) and projected[cursor] != message:
+        while cursor < len(projected) and any(projected[cursor].get(key) != value for key,value in message.items()):
             cursor += 1
         if cursor == len(projected):
             raise PushSyncError("新来源无法完整匹配已存会话原文，暂停覆盖")
@@ -269,8 +278,64 @@ def _safe_error(exc: Exception) -> str:
     return "源会话同步失败，请检查服务连接或来源格式后重试"
 
 
+def _repair_eligibility(conn: sqlite3.Connection, cfg: Settings, event: dict, now: float) -> str:
+    row = conn.execute("SELECT * FROM push_sync_state WHERE session_id=?", (event["sid"],)).fetchone()
+    if not row:
+        return "no_previous_sync"
+    state = dict(row)
+    reason = state.get("archive_reason", "")
+    retry_candidate = reason == "legacy_overwrite_candidate"
+    if retry_candidate and state["status"] == "running" and state["claim_until"] > now:
+        return "repair_already_running"
+    statuses = ("archived","failed","running") if retry_candidate else ("archived",)
+    if state["status"] not in statuses or reason not in ("", "legacy_overwrite_candidate") or state["source_json"] or state["source_version"] or (state["safe_error"] and not reason):
+        return "not_legacy_overwrite"
+    if state["event_key"] != event["event_key"] or state["version"] not in (_event_version(VERSION,event["event_key"],event["payload"]),_event_version(LEGACY_VERSION,event["event_key"],event["payload"])):
+        return "event_version_unproven"
+    if not source_integer(event["payload"].get("endTime"),positive=True) or _expired(event["payload"],cfg,now):
+        return "outside_retention"
+    session = conn.execute("SELECT * FROM raw_session WHERE session_id=?", (event["sid"],)).fetchone()
+    extracted = conn.execute("SELECT processed_at FROM extract_state WHERE session_id=?", (event["sid"],)).fetchone()
+    count = conn.execute("SELECT COUNT(*) FROM raw_message WHERE session_id=?", (event["sid"],)).fetchone()[0]
+    origin_time = state.get("archived_at", 0) if reason else state["updated_at"]
+    if not origin_time or not session or not count or not extracted or type(session["fetched_at"]) is not int or type(extracted[0]) is not int or session["fetched_at"] < origin_time*1000 or extracted[0] < origin_time*1000:
+        return "replacement_timeline_unproven"
+    if not source_integer(session["end_ts"],positive=True) or _expired({"endTime":session["end_ts"]},cfg,now):
+        return "outside_retention"
+    if conn.execute("SELECT 1 FROM raw_message WHERE session_id=? AND role='source_identity' LIMIT 1", (event["sid"],)).fetchone():
+        return "identity_not_lost"
+    if conn.execute("SELECT 1 FROM qa_pair WHERE session_id=? LIMIT 1", (event["sid"],)).fetchone():
+        return "existing_question_assets"
+    return "eligible_with_operator_confirmation"
+
+
+def check_repairs(cfg: Settings, *, session_id: int | None = None, now: float | None = None) -> dict:
+    if session_id is not None and not source_integer(session_id, positive=True):
+        raise PushSyncError("会话 ID 须为正整数")
+    path = Path(cfg.runtime.db_path).resolve()
+    if not path.is_file():
+        return {"eligible":0,"reasons":{},"read_only":True}
+    conn = sqlite3.connect(path.as_uri()+"?mode=ro",uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state'").fetchone():
+            return {"eligible":0,"reasons":{},"read_only":True}
+        reasons: dict[str,int] = {}
+        for event in _latest(conn)[0]:
+            if session_id is not None and event["sid"] != str(session_id):
+                continue
+            reason = _repair_eligibility(conn,cfg,event,time.time() if now is None else now)
+            reasons[reason] = reasons.get(reason,0)+1
+        return {"eligible":reasons.get("eligible_with_operator_confirmation",0),"reasons":reasons,"read_only":True}
+    finally:
+        conn.close()
+
+
 def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = None,
-                 exporter: SessionExporter | None = None, now: float | None = None) -> dict:
+                 exporter: SessionExporter | None = None, now: float | None = None,
+                 repair_overwritten: bool = False, confirm_overwrite: bool = False) -> dict:
+    if repair_overwritten and not confirm_overwrite:
+        raise PushSyncError("旧误归档修复须先检查日志并明确 --confirm-overwrite，未执行")
     if cfg.runtime.mock:
         raise PushSyncError("演示库禁止调用真实七鱼接口")
     if not cfg.qiyu.app_key or not cfg.qiyu.app_secret:
@@ -283,7 +348,7 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
     db = DB(cfg.runtime.db_path)
     owner = uuid.uuid4().hex
     result = {"scanned": 0, "invalid_events": 0, "claimed": 0, "completed": 0, "failed": 0,
-              "skipped": 0, "archived": 0, "qa_pairs": 0, "test_marked_sessions": 0}
+              "skipped": 0, "archived": 0, "qa_pairs": 0, "test_marked_sessions": 0,"repaired":0}
     api = exporter or SessionExporter(cfg.qiyu)
     last_call = 0.0
     def call(method, sid):
@@ -303,19 +368,28 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
             if result["claimed"] >= limit:
                 break
             sid = event["sid"]
+            repairing = False
             with _transaction(db._conn):
                 old = db._conn.execute("SELECT * FROM push_sync_state WHERE session_id=?", (sid,)).fetchone()
+                if old and old["archive_reason"] == "legacy_overwrite_candidate" and not repair_overwritten:
+                    result["skipped"] += 1
+                    continue
+                if repair_overwritten:
+                    if _repair_eligibility(db._conn,cfg,event,clock()) != "eligible_with_operator_confirmation":
+                        result["skipped"] += 1
+                        continue
+                    repairing = True
                 if old and old["status"] == "running" and old["claim_until"] > clock():
                     result["skipped"] += 1
                     continue
-                if old and old["status"] == "archived":
+                if old and old["status"] == "archived" and not repairing:
                     result["skipped"] += 1
                     continue
-                if old and old["version"] == event["version"] and (old["status"] in ("completed", "archived") or old["retry_after"] > clock()):
+                if not repairing and old and old["version"] == event["version"] and (old["status"] in ("completed", "archived") or old["retry_after"] > clock()):
                     result["skipped"] += 1
                     continue
                 if _expired(event["payload"], cfg, clock()):
-                    db._conn.execute("INSERT INTO push_sync_state(session_id,event_key,version,status,updated_at,safe_error) VALUES (?,?,?,'archived',?,?) ON CONFLICT(session_id) DO UPDATE SET event_key=excluded.event_key,version=excluded.version,status='archived',source_json='',source_version='',updated_at=excluded.updated_at,safe_error=excluded.safe_error", (sid, event["event_key"], event["version"], clock(), "来源已超过原文保留期，未补采"))
+                    db._conn.execute("INSERT INTO push_sync_state(session_id,event_key,version,status,updated_at,safe_error,archive_reason,archived_at) VALUES (?,?,?,'archived',?,?,'retention',?) ON CONFLICT(session_id) DO UPDATE SET event_key=excluded.event_key,version=excluded.version,status='archived',source_json='',source_version='',updated_at=excluded.updated_at,safe_error=excluded.safe_error,archive_reason='retention',archived_at=excluded.archived_at", (sid, event["event_key"], event["version"], clock(), "来源已超过原文保留期，未补采",clock()))
                     result["archived"] += 1
                     continue
                 legacy_origin = _legacy_origin(db._conn, old)
@@ -330,6 +404,8 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                 previous_source = old["source_json"] if old else ""
                 lease = clock() + max(600, cfg.qiyu.timeout * 8 + 30)
                 db._conn.execute("INSERT INTO push_sync_state(session_id,event_key,version,status,attempts,updated_at,owner,claim_until) VALUES (?,?,?,'running',?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET event_key=excluded.event_key,version=excluded.version,status='running',attempts=excluded.attempts,updated_at=excluded.updated_at,owner=excluded.owner,claim_until=excluded.claim_until,retry_after=0,safe_error=''", (sid, event["event_key"], event["version"], attempts, clock(), owner, lease))
+                if repairing and not old["archive_reason"]:
+                    db._conn.execute("UPDATE push_sync_state SET archive_reason='legacy_overwrite_candidate',archived_at=? WHERE session_id=?", (old["updated_at"],sid))
                 result["claimed"] += 1
             try:
                 _counts(event["payload"])
@@ -358,17 +434,20 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                         raise PushSyncError("同步期间收到更新的结束事件，请稍后重试")
                     if _expired(metadata, cfg, clock()) or _expired(event["payload"], cfg, clock()):
                         raise PushSyncError("来源会话已超过原文保留期，暂停同步")
-                    _protect_existing(db, sid, previous_source, rows, projected, migrate_legacy=legacy_origin is not None)
-                    db.upsert_sessions([metadata])
-                    db.upsert_messages(sid, projected)
+                    _protect_existing(db, sid, previous_source, sorted(rows,key=lambda r:(r["time"],r["id"])), projected, migrate_legacy=legacy_origin is not None,repair_roles=repairing)
+                    db.upsert_sessions([metadata], verified_source=True)
+                    db.upsert_messages(sid, projected, verified_source=True)
                     count = _extract_one(db, sid)
-                    db._conn.execute("UPDATE push_sync_state SET status='completed',updated_at=?,retry_after=0,safe_error='',owner='',claim_until=0,source_version=version,source_json=? WHERE session_id=?", (clock(), source, sid))
+                    db._conn.execute("UPDATE push_sync_state SET status='completed',updated_at=?,retry_after=0,safe_error='',owner='',claim_until=0,source_version=version,source_json=?,archive_reason='',archived_at=0 WHERE session_id=?", (clock(), source, sid))
+                    if repairing:
+                        db._conn.execute("INSERT INTO source_write_audit(session_id,operation,reason,incoming_count,retained_count,created_at) VALUES (?,'repair','operator_confirmed_legacy_overwrite',?,?,?)", (sid,len(rows),len(projected),int(clock()*1000)))
                 result["completed"] += 1
+                result["repaired"] += repairing
                 result["qa_pairs"] += count
                 result["test_marked_sessions"] += bool(test_marker)
             except Exception as exc:
                 with _transaction(db._conn):
-                    db._conn.execute("UPDATE push_sync_state SET status='failed',updated_at=?,retry_after=?,safe_error=?,owner='',claim_until=0 WHERE session_id=? AND owner=? AND version=?", (clock(), clock() + min(3600, 60 * 2 ** min(attempts - 1, 6)), _safe_error(exc), sid, owner, event["version"]))
+                    db._conn.execute("UPDATE push_sync_state SET status=?,updated_at=?,retry_after=?,safe_error=?,owner='',claim_until=0 WHERE session_id=? AND owner=? AND version=?", ("archived" if repairing else "failed",clock(), clock() + min(3600, 60 * 2 ** min(attempts - 1, 6)), _safe_error(exc), sid, owner, event["version"]))
                 result["failed"] += 1
         return result
     finally:
@@ -379,12 +458,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="补采已验签的七鱼结束会话，不调用大模型或飞书")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--session-id", type=int, default=None)
+    parser.add_argument("--check-repair", action="store_true", help="只读检查旧误归档候选，不联网或写库")
+    parser.add_argument("--repair-overwritten", action="store_true", help="仅修复已核对的旧快照覆盖目标")
+    parser.add_argument("--confirm-overwrite", action="store_true", help="操作员已核对来源日志并确认普通覆盖")
     args = parser.parse_args(argv)
     # The existing HTTP helper may include signed URLs in diagnostics. This
     # dedicated process prints counts/safe errors only, never transport logs.
     logging.disable(logging.CRITICAL)
     try:
-        result = sync_pending(load_settings(), args.limit, session_id=args.session_id)
+        cfg=load_settings()
+        if args.check_repair:
+            print(_json(check_repairs(cfg,session_id=args.session_id)))
+            return 0
+        result = sync_pending(cfg, args.limit, session_id=args.session_id,
+                              repair_overwritten=args.repair_overwritten,confirm_overwrite=args.confirm_overwrite)
         print(_json(result))
         return 1 if result["failed"] else 0
     except Exception as exc:

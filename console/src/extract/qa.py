@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
+import json
 
 from .normalize import is_info_not_question, is_noise_question, normalize
 from .text import clean_visible_text
@@ -39,12 +41,15 @@ def extract_pairs(
     q_ts: int = 0
     idx = 0
     staff_turn_seen = False
+    question_ids: list[str] = []
+    answer_ids: list[str] = []
 
     def flush(answer: str = "") -> None:
-        nonlocal q_buf, a_buf, q_ts, idx, staff_turn_seen
+        nonlocal q_buf, a_buf, q_ts, idx, staff_turn_seen, question_ids, answer_ids
         if not q_buf:
             a_buf = []
             staff_turn_seen = False
+            question_ids, answer_ids = [], []
             return
         question = "\n".join(q_buf).strip()
         ok = (question
@@ -64,10 +69,13 @@ def extract_pairs(
                 "question": question,
                 "answer": (answer or "\n".join(a_buf)).strip(),
                 "q_norm": normalize(question),
+                **({"evidence_key": "issue:" + hashlib.sha256(json.dumps([str(session.get("session_id") or session.get("id") or ""),customer_id,question_ids[0]],ensure_ascii=False).encode()).hexdigest(),
+                    "question_message_ids": list(question_ids), "answer_message_ids": list(answer_ids)} if question_ids else {}),
             })
         q_buf = []
         a_buf = []
         staff_turn_seen = False
+        question_ids, answer_ids = [], []
 
     for m in messages:
         role = m.get("role", "")
@@ -96,9 +104,13 @@ def extract_pairs(
             if not q_buf:
                 q_ts = ts
             q_buf.append(content)
+            if m.get("source_message_id"):
+                question_ids.append(str(m["source_message_id"]))
         elif role == "staff":
             if q_buf:
                 a_buf.append(content)
+                if m.get("source_message_id"):
+                    answer_ids.append(str(m["source_message_id"]))
         # bot / system 消息忽略，不影响配对
 
     flush()                               # 最后一问可能没被回答

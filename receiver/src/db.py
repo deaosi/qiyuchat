@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -22,6 +23,26 @@ from .extract.identity import HIDDEN_ROLES
 log = get("db")
 
 EXTRACT_VERSION = "local-rules-v2"
+
+SOURCE_ARCHIVE_TRIGGERS = """
+DROP TRIGGER IF EXISTS push_sync_forget_message_source;
+DROP TRIGGER IF EXISTS push_sync_forget_session_source;
+CREATE TRIGGER push_sync_forget_message_source AFTER DELETE ON raw_message
+WHEN NOT EXISTS(SELECT 1 FROM source_write_guard WHERE session_id=OLD.session_id) BEGIN
+ UPDATE push_sync_state SET source_json='',source_version='',
+ status=CASE WHEN status IN ('completed','failed') THEN 'archived' ELSE status END,
+ archive_reason=CASE WHEN archive_reason='retention' THEN archive_reason ELSE 'raw_message_deleted' END,
+ archived_at=CAST(strftime('%s','now') AS REAL),updated_at=CAST(strftime('%s','now') AS REAL)
+ WHERE session_id=OLD.session_id;
+END;
+CREATE TRIGGER push_sync_forget_session_source AFTER DELETE ON raw_session BEGIN
+ UPDATE push_sync_state SET source_json='',source_version='',
+ status=CASE WHEN status IN ('completed','failed') THEN 'archived' ELSE status END,
+ archive_reason=CASE WHEN archive_reason='retention' THEN archive_reason ELSE 'raw_session_deleted' END,
+ archived_at=CAST(strftime('%s','now') AS REAL),updated_at=CAST(strftime('%s','now') AS REAL)
+ WHERE session_id=OLD.session_id;
+END;
+"""
 
 # 滑动窗口裁剪时「这条消息该删了」的判定。
 # 两条路：自己有可信时间戳且过期；或者所属会话已经过期（连带清理，覆盖 ts 缺失的旧数据）。
@@ -67,10 +88,20 @@ CREATE TABLE IF NOT EXISTS raw_message (
     role       TEXT,
     content    TEXT,
     ts         INTEGER,
+    source_message_id TEXT,
     PRIMARY KEY (session_id, seq));
 
 -- 给 prune 用：按时间删历史消息，没索引会全表扫
 CREATE INDEX IF NOT EXISTS idx_raw_message_ts ON raw_message(ts);
+
+CREATE TABLE IF NOT EXISTS source_write_guard(session_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS source_write_audit(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,operation TEXT NOT NULL,
+ reason TEXT NOT NULL,incoming_count INTEGER NOT NULL,retained_count INTEGER NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS qa_origin(
+ qa_id INTEGER PRIMARY KEY,evidence_key TEXT NOT NULL UNIQUE,session_id TEXT NOT NULL,
+ question_message_ids TEXT NOT NULL,answer_message_ids TEXT NOT NULL,
+ fingerprint TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,active INTEGER NOT NULL DEFAULT 1);
 
 CREATE TABLE IF NOT EXISTS clean_result (
     session_id     TEXT NOT NULL,
@@ -192,6 +223,14 @@ class DB:
         self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        if "source_message_id" not in {r[1] for r in self._conn.execute("PRAGMA table_info(raw_message)")}:
+            self._conn.execute("ALTER TABLE raw_message ADD COLUMN source_message_id TEXT")
+        if self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state' AND type='table'").fetchone():
+            columns = {r[1] for r in self._conn.execute("PRAGMA table_info(push_sync_state)")}
+            for name, definition in (("archive_reason", "TEXT NOT NULL DEFAULT ''"), ("archived_at", "REAL NOT NULL DEFAULT 0")):
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE push_sync_state ADD COLUMN {name} {definition}")
+            self._conn.executescript(SOURCE_ARCHIVE_TRIGGERS)
         self._conn.commit()
 
     # ---------- 基础 ----------
@@ -221,7 +260,16 @@ class DB:
 
     # ---------- 原始会话 ----------
 
-    def upsert_sessions(self, rows: Iterable[dict[str, Any]]) -> int:
+    def _protected_source(self, session_id: str, *, include_archived: bool = False) -> bool:
+        if not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state' AND type='table'").fetchone():
+            return False
+        return self._conn.execute("SELECT 1 FROM push_sync_state WHERE session_id=? AND ((source_json<>'' AND status<>'archived') OR (? AND (status='archived' OR archive_reason<>'')))", (session_id,int(include_archived))).fetchone() is not None
+
+    def _reject_source_write(self, session_id: str, operation: str, incoming: int, retained: int) -> None:
+        self._conn.execute("INSERT INTO source_write_audit(session_id,operation,reason,incoming_count,retained_count,created_at) VALUES (?,?,?,?,?,?)",
+                           (session_id, operation, "verified_source_preserved", incoming, retained, int(time.time()*1000)))
+
+    def upsert_sessions(self, rows: Iterable[dict[str, Any]], *, verified_source: bool = False) -> int:
         """按 session_id 幂等写入。返回实际新增/更新的条数。"""
         now = int(time.time() * 1000)
         sql = """
@@ -245,6 +293,9 @@ class DB:
         n = 0
         with self.tx() as c:
             for r in rows:
+                if not verified_source and self._protected_source(str(r.get("id")), include_archived=True):
+                    self._reject_source_write(str(r.get("id")), "session_metadata", 1, 1)
+                    continue
                 payload = json.dumps(r, ensure_ascii=False)
                 old = c.execute("SELECT payload FROM raw_session WHERE session_id=?",
                                 (str(r.get("id")),)).fetchone()
@@ -287,19 +338,24 @@ class DB:
 
     # ---------- 消息正文 ----------
 
-    def upsert_messages(self, session_id: str, msgs: list[dict[str, Any]]) -> int:
+    def upsert_messages(self, session_id: str, msgs: list[dict[str, Any]], *, verified_source: bool = False) -> int:
         """正文是会话快照，更新时删除旧尾部，且让规则清洗重新处理。"""
         normalized = [{"role": m.get("role", ""), "content": m.get("content", ""),
-                       "ts": _int(m.get("ts"))} for m in msgs]
+                       "ts": _int(m.get("ts")), **({"source_message_id": str(m["source_message_id"])} if m.get("source_message_id") else {})} for m in msgs]
         if self.get_messages(session_id) == normalized:
             return len(msgs)
         with self.tx() as c:
+            if not verified_source and self._protected_source(session_id, include_archived=True):
+                self._reject_source_write(session_id, "message_snapshot", len(msgs), len(self.get_messages(session_id)))
+                return 0
+            c.execute("INSERT OR IGNORE INTO source_write_guard VALUES (?)", (session_id,))
             c.execute("DELETE FROM raw_message WHERE session_id=?", (session_id,))
             c.executemany(
-                "INSERT INTO raw_message (session_id, seq, role, content, ts) VALUES (?,?,?,?,?)",
-                [(session_id, i, m["role"], m["content"], m["ts"])
+                "INSERT INTO raw_message (session_id, seq, role, content, ts,source_message_id) VALUES (?,?,?,?,?,?)",
+                [(session_id, i, m["role"], m["content"], m["ts"],m.get("source_message_id"))
                  for i, m in enumerate(normalized)],
             )
+            c.execute("DELETE FROM source_write_guard WHERE session_id=?", (session_id,))
             c.execute("DELETE FROM extract_state WHERE session_id=?", (session_id,))
         return len(msgs)
 
@@ -371,10 +427,30 @@ class DB:
 
     def get_messages(self, session_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT role, content, ts FROM raw_message WHERE session_id=? ORDER BY seq",
+            "SELECT role, content, ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq",
             (session_id,),
         ).fetchall()
-        return [{"role": r["role"], "content": r["content"], "ts": r["ts"]} for r in rows]
+        return [{"role": r["role"], "content": r["content"], "ts": r["ts"],
+                 **({"source_message_id": r["source_message_id"]} if r["source_message_id"] else {})} for r in rows]
+
+    def restore_verified_source(self, session_id: str) -> bool:
+        if not self._protected_source(session_id):
+            return False
+        row = self._conn.execute("SELECT source_json FROM push_sync_state WHERE session_id=?", (session_id,)).fetchone()
+        from .push_sync import _project
+        snapshot = json.loads(row[0])
+        projected = _project(snapshot["session"], snapshot["messages"], snapshot["session"], int(session_id))
+        self.upsert_messages(session_id, projected, verified_source=True)
+        return True
+
+    def get_qa_origin(self, qa_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM qa_origin WHERE qa_id=?", (qa_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        for name in ("question_message_ids", "answer_message_ids"):
+            result[name] = json.loads(result[name])
+        return result
 
     def get_transcript(self, session_id: str) -> str:
         rows = self._conn.execute(
@@ -509,6 +585,15 @@ class DB:
     def replace_session_pairs(self, session_id: str, pairs: list[dict[str, Any]],
                               fingerprint: str, status: str) -> int:
         with self.tx() as c:
+            if pairs and all(p.get("evidence_key") for p in pairs):
+                self._replace_anchored_pairs(session_id, pairs)
+                c.execute("INSERT INTO extract_state VALUES (?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET version=excluded.version,fingerprint=excluded.fingerprint,status=excluded.status,pair_count=excluded.pair_count,processed_at=excluded.processed_at",
+                          (session_id, EXTRACT_VERSION, fingerprint, status, len(pairs), int(time.time()*1000)))
+                return len(pairs)
+            if pairs and any(p.get("evidence_key") for p in pairs):
+                raise ValueError("来源消息锚点不完整，暂停覆盖")
+            if pairs and any("qa_id" not in p for p in pairs) and c.execute("SELECT 1 FROM qa_origin WHERE session_id=? AND active=1", (session_id,)).fetchone():
+                raise ValueError("已有稳定来源锚点，拒绝降级为无来源问答")
             self.upsert_qa_pairs(pairs)
             keep = [int(p["idx"]) for p in pairs]
             if keep:
@@ -517,6 +602,7 @@ class DB:
                           [session_id, *keep])
             else:
                 c.execute("DELETE FROM qa_pair WHERE session_id=?", (session_id,))
+                c.execute("UPDATE qa_origin SET active=0 WHERE session_id=?", (session_id,))
             c.execute(
                 "INSERT INTO extract_state VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT(session_id) DO UPDATE SET version=excluded.version, "
@@ -526,6 +612,47 @@ class DB:
                  int(time.time() * 1000)),
             )
         return len(pairs)
+
+    def _replace_anchored_pairs(self, session_id: str, pairs: list[dict[str, Any]]) -> None:
+        c = self._conn
+        if len({p["evidence_key"] for p in pairs}) != len(pairs):
+            raise ValueError("同一会话存在重复来源锚点，暂停覆盖")
+        old = {row["evidence_key"]: dict(row) for row in c.execute("SELECT * FROM qa_origin WHERE session_id=?", (session_id,))}
+        existing = [dict(row) for row in c.execute("SELECT * FROM qa_pair WHERE session_id=?", (session_id,))]
+        mapped = {row["qa_id"] for row in old.values()}
+        # Bind a legacy QA only when its question, sender and time match uniquely.
+        legacy = [row for row in existing if row["qa_id"] not in mapped]
+        for row in legacy:
+            matches = [p for p in pairs if p["question"] == row["question"] and p["customer_id"] == row["customer_id"] and p["asked_at"] == row["asked_at"]]
+            if len(matches) != 1 or matches[0]["evidence_key"] in old:
+                raise ValueError("已有问答缺少可唯一匹配的来源锚点，暂停覆盖")
+            old[matches[0]["evidence_key"]] = {"qa_id": row["qa_id"]}
+        c.execute("UPDATE qa_pair SET idx=-qa_id WHERE session_id=?", (session_id,))
+        kept = []
+        for pair in pairs:
+            entry = old.get(pair["evidence_key"])
+            qa_id = entry["qa_id"] if entry else None
+            values = (session_id, pair["idx"], pair["customer_id"], pair["customer_name"], pair["group_name"], pair["staff_name"], pair["asked_at"], pair["question"], pair["answer"], pair["q_norm"])
+            if qa_id is None:
+                qa_id = c.execute("INSERT INTO qa_pair(session_id,idx,customer_id,customer_name,group_name,staff_name,asked_at,question,answer,q_norm,cluster_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,0,?)", (*values,int(time.time()*1000))).lastrowid
+            elif any(row["qa_id"] == qa_id for row in existing):
+                c.execute("UPDATE qa_pair SET session_id=?,idx=?,customer_id=?,customer_name=?,group_name=?,staff_name=?,asked_at=?,question=?,answer=?,q_norm=? WHERE qa_id=?", (*values,qa_id))
+            else:
+                c.execute("INSERT INTO qa_pair(qa_id,session_id,idx,customer_id,customer_name,group_name,staff_name,asked_at,question,answer,q_norm,cluster_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)", (qa_id,*values,int(time.time()*1000)))
+            digest = hashlib.sha256(json.dumps([pair["question"],pair["answer"],pair["question_message_ids"],pair["answer_message_ids"]],ensure_ascii=False).encode()).hexdigest()
+            c.execute("INSERT INTO qa_origin VALUES (?,?,?,?,?,?,1,1) ON CONFLICT(qa_id) DO UPDATE SET question_message_ids=excluded.question_message_ids,answer_message_ids=excluded.answer_message_ids,revision=qa_origin.revision+(qa_origin.fingerprint<>excluded.fingerprint),fingerprint=excluded.fingerprint,active=1",
+                      (qa_id,pair["evidence_key"],session_id,json.dumps(pair["question_message_ids"]),json.dumps(pair["answer_message_ids"]),digest))
+            kept.append(qa_id)
+        for row in existing:
+            if row["qa_id"] not in kept:
+                c.execute("DELETE FROM qa_pair WHERE qa_id=?", (row["qa_id"],))
+                c.execute("UPDATE qa_origin SET active=0 WHERE qa_id=?", (row["qa_id"],))
+
+    def _mark_retention(self, session_ids: Iterable[str]) -> None:
+        if not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state' AND type='table'").fetchone():
+            return
+        self._conn.executemany("UPDATE push_sync_state SET source_json='',source_version='',status='archived',archive_reason='retention',archived_at=?,updated_at=? WHERE session_id=?",
+                               [(time.time(),time.time(),str(sid)) for sid in session_ids])
 
     def local_status(self) -> dict[str, Any]:
         q = lambda sql: self._conn.execute(sql).fetchone()[0]
@@ -622,10 +749,12 @@ class DB:
         out = {"raw_message": 0, "raw_session": 0}
         if message_days > 0:
             cutoff = now_ms - message_days * 86400_000
+            self._mark_retention([r[0] for r in self._conn.execute("SELECT DISTINCT session_id FROM raw_message WHERE ts < ?", (cutoff,))])
             cur = self._conn.execute("DELETE FROM raw_message WHERE ts < ?", (cutoff,))
             out["raw_message"] = cur.rowcount or 0
         if session_days > 0:
             cutoff = now_ms - session_days * 86400_000
+            self._mark_retention([r[0] for r in self._conn.execute("SELECT session_id FROM raw_session WHERE end_ts < ?", (cutoff,))])
             cur = self._conn.execute("DELETE FROM raw_session WHERE end_ts < ?", (cutoff,))
             out["raw_session"] = cur.rowcount or 0
         self._conn.commit()
@@ -688,6 +817,7 @@ class DB:
                     "cutoff_ms": cutoff, "window_days": window_days, "grace_days": grace_days}
 
         # 1) 删过期会话
+        self._mark_retention([r[0] for r in self._conn.execute("SELECT s.session_id " + ses_sql, ses_args)])
         cur = self._conn.execute(
             "DELETE FROM raw_session WHERE session_id IN "
             "(SELECT s.session_id " + ses_sql + ")", ses_args)
