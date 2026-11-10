@@ -1,7 +1,6 @@
 import * as React from 'react'
 import { AlertCircle, Archive, ArrowDownLeft, ArrowUpRight, CircleCheck, CircleDashed, Layers2, Loader2, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
 import type { QAPair } from '@/lib/demo-data'
-import { topics } from '@/lib/demo-data'
 import { ApiError, apiGet, normalizePair } from '@/lib/api'
 import { customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
-export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local' | 'demo' }
+export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local' }
 
 interface ContextMessage { role: string; content: string; time: string }
 interface DetailResponse {
@@ -28,7 +27,7 @@ function messageRole(message: ContextMessage, pair: QAPair) {
   return ({ user: customerLabel(pair.customerName, pair.customerId), staff: `客服 · ${pair.staffName || '未记录'}`, bot: '机器人', system: '系统' })[message.role] || '消息'
 }
 
-export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps) {
+export function QADetail({ pair: requestedPair, onClose, source = 'local' }: QADetailProps) {
   const [retry, setRetry] = React.useState(0)
   const [request, setRequest] = React.useState<{ key: string; loading: boolean; data: DetailData | null; error: string | null }>({ key: '', loading: false, data: null, error: null })
   const sequence = React.useRef(0)
@@ -38,7 +37,7 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
       setRequest({ key: '', loading: false, data: null, error: null })
       return
     }
-    const [dataSource, id] = JSON.parse(requestKey) as ['local' | 'demo', string]
+    const [dataSource, id] = JSON.parse(requestKey) as ['local', string]
     const controller = new AbortController()
     const current = ++sequence.current
     setRequest({ key: requestKey, loading: true, data: null, error: null })
@@ -70,15 +69,10 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
   const loading = Boolean(requestKey) && (request.key !== requestKey || request.loading)
   const error = request.key === requestKey ? request.error : null
   const pair = loaded?.pair ?? requestedPair
-  const topic = pair && !source ? topics.find(topic => topic.id === pair.clusterId) : undefined
-  const normalizedQuestion = source
-    ? loaded?.normalizedQuestion.trim() ? loaded.normalizedQuestion : (loading ? '正在读取归一化问法…' : error ? '暂时无法读取归一化问法' : '未记录归一化问法')
-    : topic?.title || '未归类问题'
-  const archived = source ? Boolean(loaded?.archived) : Boolean(pair?.archived)
-  const messages: ContextMessage[] = source ? loaded?.messages || [] : pair ? [
-    { role: 'user', content: pair.question, time: fullTime(pair.askedAt) },
-    ...(pair.answer.trim() ? [{ role: 'staff', content: pair.answer, time: fullTime(pair.askedAt) }] : []),
-  ] : []
+  const normalizedQuestion = loaded?.normalizedQuestion.trim()
+    ? loaded.normalizedQuestion : (loading ? '正在读取归一化问法…' : error ? '暂时无法读取归一化问法' : '未记录归一化问法')
+  const archived = Boolean(loaded?.archived)
+  const messages: ContextMessage[] = loaded?.messages || []
 
   return (
     <Sheet open={Boolean(pair)} onOpenChange={open => { if (!open) onClose() }}>
@@ -94,7 +88,7 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
               {pair.answer.trim() ? <CircleCheck className="size-3.5" /> : <CircleDashed className="size-3.5" />}
               {pair.answer.trim() ? '有客服回复' : '未发现回复'}
             </Badge>
-            <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground"><ShieldCheck className="size-3.5" />{source === 'local' ? '已脱敏' : source === 'demo' ? '演示数据' : '脱敏样例'}</Badge>
+            <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground"><ShieldCheck className="size-3.5" />已脱敏</Badge>
           </div>
 
           <dl className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-5 pb-6 text-sm [&>div]:min-w-0">
@@ -126,7 +120,7 @@ export function QADetail({ pair: requestedPair, onClose, source }: QADetailProps
                   : messages.length ? <div className="space-y-5">{messages.map((message, index) => <div key={`${index}-${message.role}`} className={`min-w-0 max-w-[90%] ${message.role === 'staff' ? 'ml-auto' : ''}`}><div className="mb-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>{messageRole(message, pair)}</span><time>{message.time}</time></div><div className={message.role === 'staff' ? 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tr-sm bg-foreground px-4 py-3 text-sm leading-7 text-background' : 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tl-sm border bg-muted/35 px-4 py-3 text-sm leading-7'}>{message.content}</div></div>)}</div>
                     : <p className="rounded-lg border bg-muted/20 p-4 text-sm leading-6 text-muted-foreground">当前问答没有可展示的上下文消息。</p>}
           </section>
-          <p className="mt-7 text-xs leading-6 text-muted-foreground">{source === 'local' ? '问答与上下文由服务器返回，并按现有规则脱敏。' : source === 'demo' ? '当前查看演示数据源的问答与上下文。' : '以上为固定虚构样例，仅用于预览界面；未连接生产数据。'}</p>
+          <p className="mt-7 text-xs leading-6 text-muted-foreground">问答与上下文由服务器返回，并按现有规则脱敏。</p>
         </div>}
       </SheetContent>
     </Sheet>

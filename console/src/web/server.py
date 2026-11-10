@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from ..config import Settings, settings
 from .. import voc, knowledge, gateway
-from ..local import MAX_FILE_BYTES, clean_local, demo_settings, import_file, load_demo, parse_import, template_bytes
+from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
 from . import api
 
@@ -125,11 +125,12 @@ class Handler(BaseHTTPRequestHandler):
                 and self.headers.get("Sec-Fetch-Site", "same-origin") == "same-origin")
 
     def _cfg(self, qs: dict[str, list[str]]) -> Settings:
-        source = _str(qs, "source", "local")
-        if source not in ("local", "demo"):
+        sources = qs.get("source", ["local"])
+        if "demo" in sources:
+            raise ValueError("演示数据源已停用，请使用业务数据")
+        if any(source != "local" for source in sources):
             raise ValueError("未知数据源")
-        cfg = self.server.cfg
-        return demo_settings(cfg) if source == "demo" else cfg
+        return self.server.cfg
 
     def _filters(self, qs: dict[str, list[str]]) -> dict:
         replied = _str(qs, "replied")
@@ -292,10 +293,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "本地查询失败，请重试并查看服务日志"}, 500)
 
     def _api(self, name: str, qs: dict[str, list[str]]) -> None:
+        cfg = self._cfg(qs)
         if name == "gateway/config":
             self._json(gateway.public_config(self.server.cfg))
             return
-        cfg = self._cfg(qs)
         filters = self._filters(qs)
         if name == "voc/knowledge" or name.startswith("voc/knowledge/"):
             try:
@@ -437,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": str(exc)}, exc.status)
             elif u.path in ("/api/import/preview", "/api/import"):
                 if _str(qs, "source", "local") != "local":
-                    raise ValueError("演示库不接收导入，请切换到本地数据")
+                    raise ValueError("仅支持导入业务数据")
                 filename = unquote(self.headers.get("X-Filename", ""))
                 if u.path.endswith("preview"):
                     self._json(parse_import(data, filename).preview())
@@ -450,8 +451,7 @@ class Handler(BaseHTTPRequestHandler):
                 with DB_LOCK:
                     self._json(clean_local(cfg))
             elif u.path == "/api/demo":
-                with DB_LOCK:
-                    self._json(load_demo(self.server.cfg))
+                self._json({"error": "演示数据入口已停用"}, 410)
             else:
                 self._json({"error": "接口不存在"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -494,7 +494,7 @@ def serve(cfg: Settings | None = None, host: str = "127.0.0.1", port: int = 8848
                             admin_key=cfg.runtime.admin_key)
     url = f"http://{host}:{real_port}/"
     print(f"\n  本地会话工作台\n  地址   {url}\n  数据库 {cfg.runtime.db_path}")
-    print("  在网页导入 CSV/XLSX，或载入独立演示数据。不会自动连接七鱼、飞书或模型。")
+    print("  在网页导入 CSV/XLSX 并查看业务会话，模型服务由管理员配置。")
     if cfg.runtime.web_allowed_hosts:
         print(f"  反代放行 Host: {', '.join(cfg.runtime.web_allowed_hosts)}")
     print("  Ctrl+C 停止\n", flush=True)

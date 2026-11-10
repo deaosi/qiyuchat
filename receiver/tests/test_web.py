@@ -6,6 +6,8 @@ import hashlib
 import http.client
 import json
 import threading
+from pathlib import Path
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
@@ -90,19 +92,46 @@ class TestWeb(LocalFixture):
         self.assertEqual(self.call("/api/no-such-route")[0], 404)
         self.assertEqual(self.call("/api/clean", "POST", headers=self.write_headers(**{"Content-Length": "9000000"}))[0], 413)
 
-    def test_sources_are_serialized_during_parallel_requests(self):
+    def test_disabled_demo_cannot_switch_database_during_parallel_local_requests(self):
         self.seed()
-        self.assertEqual(self.call("/api/demo", "POST", headers=self.write_headers())[0], 200)
+        demo = Path(self.cfg.runtime.db_path).with_name("dashboard_demo.db")
+        sentinel = b"existing independent demo database must not be opened or changed"
+        demo.write_bytes(sentinel)
+        self.assertEqual(self.call("/api/demo", "POST", headers=self.write_headers())[0], 410)
         def read(i):
             source = "demo" if i % 2 else "local"
             status, data, _ = self.call("/api/summary?source=" + source)
             return status, source, data
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(read, range(24)))
-        self.assertTrue(all(status == 200 for status, _, _ in results))
         for _, source, data in results:
-            self.assertEqual(data["qa_pair"] == 5, source == "local")
+            if source == "local":
+                self.assertEqual(data["qa_pair"], 5)
+            else:
+                self.assertIn("已停用", data["error"])
+        self.assertTrue(all(status == (200 if source == "local" else 400) for status, source, _ in results))
+        self.assertEqual(demo.read_bytes(), sentinel)
         self.assertEqual(self.call("/api/import/preview?source=demo", "POST", b"x", self.write_headers())[0], 400)
+
+    def test_all_demo_http_routes_are_disabled_without_loading_helpers_or_files(self):
+        self.seed()
+        demo = Path(self.cfg.runtime.db_path).with_name("dashboard_demo.db")
+        before = self.call("/api/summary?source=local")[1]
+        with patch("src.local.load_demo", side_effect=AssertionError("HTTP must not load demo")) as helper:
+            for name in ("summary", "meta", "detail?id=1", "status", "export", "gateway/config", "voc/summary", "voc/knowledge"):
+                separator = "&" if "?" in name else "?"
+                self.assertEqual(self.call("/api/" + name + separator + "source=demo")[0], 400, name)
+            for name in ("demo", "clean", "import/preview", "voc/run", "voc/knowledge/run", "gateway/config", "gateway/models"):
+                self.assertEqual(self.call("/api/" + name + "?source=demo", "POST", b"{}", self.write_headers(**{"Content-Type": "application/json"}))[0], 400, name)
+            for query in ("source=local&source=demo", "source=demo&source=local", "source=local&source=unknown"):
+                self.assertEqual(self.call("/api/gateway/config?" + query)[0], 400)
+                self.assertEqual(self.call("/api/clean?" + query, "POST", headers=self.write_headers())[0], 400)
+            self.assertEqual(self.call("/api/demo", "POST", headers=self.write_headers())[0], 410)
+            self.assertEqual(self.call("/api/demo")[0], 404)
+        helper.assert_not_called()
+        self.assertFalse(demo.exists())
+        after = self.call("/api/summary?source=local")[1]
+        self.assertEqual((after["qa_pair"], after["customer_count"]), (before["qa_pair"], before["customer_count"]))
 
 
 class TestAdminKey(LocalFixture):

@@ -1,7 +1,7 @@
 import type { QAPair } from '@/lib/demo-data'
 
 export interface ApiFilters {
-  source: 'local' | 'demo'
+  source: 'local'
   days?: number
   start?: string
   end?: string
@@ -32,7 +32,7 @@ export class ApiError extends Error {
 
 export function apiUrl(name: string, filters: ApiFilters): string {
   const params = new URLSearchParams()
-  Object.entries(filters).forEach(([key, value]) => {
+  Object.entries({ ...filters, source: 'local' }).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
   })
   return `/api/${name}?${params}`
@@ -278,7 +278,7 @@ export async function downloadExport(filters: ApiFilters): Promise<void> {
   const url = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = url
-  link.download = filters.source === 'demo' ? '七鱼问答-演示数据.csv' : '七鱼问答-脱敏导出.csv'
+  link.download = '七鱼问答-脱敏导出.csv'
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
@@ -289,7 +289,7 @@ export async function downloadKnowledgeExport(source: ApiFilters['source']): Pro
   const url = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = url
-  link.download = source === 'demo' ? '七鱼知识-已确认-演示库.csv' : '七鱼知识-已确认.csv'
+  link.download = '七鱼知识-已确认.csv'
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
@@ -355,7 +355,7 @@ export interface MetaData {
   db_name: string
   total: number
   unknown_time: number
-  source: 'local' | 'demo'
+  source: 'local'
 }
 
 export interface TrendData {
