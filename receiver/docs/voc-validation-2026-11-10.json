@@ -1,0 +1,163 @@
+{
+  "date": "2026-11-10",
+  "data": "synthetic; no customer or production records",
+  "extraction_models": [
+    {
+      "model": "qwen3.8-flash",
+      "passed": true,
+      "source_cases": 9,
+      "covered_cases": 9,
+      "event_count": 8,
+      "topic_count": 2,
+      "consultation_count": 8,
+      "pairwise_precision": 1.0,
+      "pairwise_recall": 1.0,
+      "answer_kind_accuracy": 1.0,
+      "primary_intent_accuracy": 1.0,
+      "diagnosis_accuracy": 1.0,
+      "fragment_role_accuracy": 1.0,
+      "knowledge_kind_accuracy": 1.0,
+      "positive_ready_recall": 1.0,
+      "critical_false_ready": 0,
+      "ready_knowledge": 5,
+      "context_needed_cases": 1,
+      "source_unchanged": true,
+      "actual_attempts": 11,
+      "successful_retried_sources": 2,
+      "first_pass_complete": false,
+      "attempts": 11,
+      "usage_tokens": 120842
+    },
+    {
+      "model": "cn:deepseek-v4.1-flash",
+      "passed": true,
+      "source_cases": 9,
+      "covered_cases": 9,
+      "event_count": 8,
+      "topic_count": 2,
+      "consultation_count": 8,
+      "pairwise_precision": 1.0,
+      "pairwise_recall": 1.0,
+      "answer_kind_accuracy": 1.0,
+      "primary_intent_accuracy": 1.0,
+      "diagnosis_accuracy": 1.0,
+      "fragment_role_accuracy": 1.0,
+      "knowledge_kind_accuracy": 1.0,
+      "positive_ready_recall": 1.0,
+      "critical_false_ready": 0,
+      "ready_knowledge": 5,
+      "context_needed_cases": 1,
+      "source_unchanged": true,
+      "actual_attempts": 11,
+      "successful_retried_sources": 2,
+      "first_pass_complete": false,
+      "attempts": 11,
+      "usage_tokens": 127933
+    }
+  ],
+  "assistant_models": [
+    {
+      "model": "qwen3.8-flash",
+      "passed": true,
+      "cases": [
+        {
+          "kind": "frequency",
+          "passed": true
+        },
+        {
+          "kind": "confirmed",
+          "passed": true
+        },
+        {
+          "kind": "knowledge",
+          "passed": true
+        },
+        {
+          "kind": "scope",
+          "passed": true
+        },
+        {
+          "kind": "readonly",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "model": "cn:deepseek-v4.1-flash",
+      "passed": true,
+      "cases": [
+        {
+          "kind": "frequency",
+          "passed": true
+        },
+        {
+          "kind": "confirmed",
+          "passed": true
+        },
+        {
+          "kind": "knowledge",
+          "passed": true
+        },
+        {
+          "kind": "scope",
+          "passed": true
+        },
+        {
+          "kind": "readonly",
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "business_domain": "Zhihuige merchant software support; Qiyu is the collection source",
+  "scope": "These gateway model IDs passed the same nine domain extraction cases and five assistant cases; this is bounded compatibility evidence, not a guarantee of quality on every dataset or model.",
+  "golden_cases": [
+    "same software symptom across different SKUs",
+    "configuration how-to",
+    "same symptom with disabled-scene and unsynced-knowledge causes",
+    "merchant report does not prove a defect",
+    "explicitly confirmed version defect with verified workaround",
+    "buyer return-policy wording is reproduction context",
+    "pure SKU fragment is not a software consultation"
+  ],
+  "embedding": {
+    "model": "BAAI/bge-small-zh-v1.5",
+    "revision": "7999e1d3359715c523056ef9478215996d62a620",
+    "offline": true
+  },
+  "request_timeout_seconds": 180,
+  "domain_max_output_tokens": 12000,
+  "deterministic_quality_replay": {
+    "mode": "quality_replay",
+    "replay_network_calls": 0,
+    "original_snapshot_unchanged": true,
+    "models": [
+      {
+        "model": "qwen3.8-flash",
+        "quality_version": "quality-v4/zhg-support-v5/software-branches-v5",
+        "passed": true,
+        "quality_audit": {
+          "branch_local_titles": true,
+          "projected_scope_complete": true,
+          "exact_staff_claims": true
+        },
+        "covered_cases": 9,
+        "ready_knowledge": 5
+      },
+      {
+        "model": "cn:deepseek-v4.1-flash",
+        "quality_version": "quality-v4/zhg-support-v5/software-branches-v5",
+        "passed": true,
+        "quality_audit": {
+          "branch_local_titles": true,
+          "projected_scope_complete": true,
+          "exact_staff_claims": true
+        },
+        "covered_cases": 9,
+        "ready_knowledge": 5
+      }
+    ]
+  },
+  "retry_policy": "at most one source-level retry with controlled validation feedback; calls and usage include every attempt",
+  "reproduce": "LLM_TIMEOUT=180 python -m src.voc_eval --domain zhihuige --models MODEL_A MODEL_B --execute --max-calls 18 --max-tokens 1300000 --output evaluation.json"
+}

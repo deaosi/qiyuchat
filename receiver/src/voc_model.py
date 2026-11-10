@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import urllib.error
 import unicodedata
 from typing import Any
 from urllib.parse import urlsplit
@@ -259,7 +260,20 @@ def _gateway(cfg: LLMConfig, payload: dict[str, Any]) -> dict[str, Any]:
     except HttpError as error:
         raise VocModelError(f"模型网关请求失败（HTTP {error.status}），请检查配置或稍后重试。",
                             retryable=error.status in (408, 429) or error.status >= 500) from None
-    except Exception:
+    except Exception as error:
+        # The legacy HTTP helper wraps exhausted 429/5xx responses in a
+        # RuntimeError. Preserve only the safe status, never its body or URL.
+        cause, seen = error, set()
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
+            if isinstance(cause, HttpError):
+                raise VocModelError(f"模型网关请求失败（HTTP {cause.status}），请检查配置或稍后重试。",
+                                    retryable=cause.status in (408, 429) or cause.status >= 500) from None
+            if isinstance(cause, TimeoutError) or (isinstance(cause, urllib.error.URLError) and isinstance(cause.reason, TimeoutError)):
+                public = VocModelError(f"模型网关等待超过 {cfg.timeout} 秒，请调整等待时间或缩小整理范围。")
+                public.status = 504
+                raise public from None
+            cause = cause.__cause__ or cause.__context__
         raise VocModelError("模型网关连接失败，请检查配置或稍后重试。") from None
     if not isinstance(response, dict):
         raise VocModelError("模型网关返回格式无效。")

@@ -165,6 +165,10 @@ def _fail_owned_jobs(cfg: Settings, message: str, result: dict) -> None:
 def run(cfg: Settings, voc_limit: int = 100, knowledge_limit: int = 10) -> dict:
     _limits(voc_limit, knowledge_limit)
     result = _result(voc_limit, knowledge_limit)
+    from . import voc_service
+    if voc_service.busy(cfg):
+        result.update(status="skipped",reason="new_engine_busy")
+        return result
     preflight = check(cfg, voc_limit, knowledge_limit)
     if not preflight["configured"]:
         result.update(status="skipped", reason="unconfigured")

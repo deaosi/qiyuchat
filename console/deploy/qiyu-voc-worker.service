@@ -1,0 +1,25 @@
+[Unit]
+Description=Process derived Qiyu VOC and evidence-grounded knowledge jobs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qiyu
+Group=qiyu
+WorkingDirectory=/opt/qiyu-console
+EnvironmentFile=-/opt/qiyu-console/.env
+EnvironmentFile=-/var/cache/qiyu-voc/runtime.env
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=2
+Environment=MKL_NUM_THREADS=2
+Environment=TOKENIZERS_PARALLELISM=false
+ExecStart=/opt/qiyu-voc-venv/bin/python -m src.voc_service --worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

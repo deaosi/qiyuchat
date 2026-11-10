@@ -90,6 +90,15 @@ def _thinking_mode() -> str:
     return value
 
 
+def _voc_domain() -> str:
+    value = _s("VOC_DOMAIN").lower()
+    if value in ("", "generic"):
+        return ""
+    if value != "zhihuige":
+        raise ValueError("VOC_DOMAIN 仅支持留空、generic 或 zhihuige")
+    return value
+
+
 def _t(key: str) -> tuple[str, ...]:
     """逗号分隔的字符串列表；空值返回空元组。"""
     raw = os.environ.get(key, "")
@@ -186,6 +195,8 @@ class RuntimeConfig:
     web_allowed_origins: tuple[str, ...] = ()
     # 单管理员密钥：设置后整个看板必须凭这把钥匙访问（空 = 不做应用层鉴权，只认本机回环）
     admin_key: str = ""
+    # Business semantics are independent of the selected model/provider.
+    voc_domain: str = ""
 
 
 @dataclass(frozen=True)
@@ -255,6 +266,7 @@ def load_settings() -> Settings:
             web_allowed_hosts=_t("WEB_ALLOWED_HOSTS"),
             web_allowed_origins=_t("WEB_ALLOWED_ORIGINS"),
             admin_key=_s("ADMIN_KEY"),
+            voc_domain=_voc_domain(),
         ),
     )
 

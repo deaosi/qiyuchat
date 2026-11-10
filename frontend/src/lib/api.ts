@@ -19,6 +19,12 @@ export interface ApiFilters {
   topic_q?: string
   evidence_status?: 'all' | 'pending' | 'confirmed'
   topic_id?: number
+  support_intent?: 'all' | 'configuration_guidance' | 'functional_anomaly' | 'unclear'
+  diagnosis_status?: 'all' | 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
+}
+
+export type VocQueryFilters = {
+  [K in 'days' | 'start' | 'end' | 'group' | 'staff' | 'customer' | 'q' | 'support_intent' | 'diagnosis_status' | 'replied' | 'cluster']?: ApiFilters[K] | null
 }
 
 export class ApiError extends Error {
@@ -70,6 +76,92 @@ function hasCounts(value: Record<string, unknown>, keys: string[]): boolean {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string')
+}
+
+const vocKnowledgeKinds = ['configuration_guide', 'troubleshooting_advice', 'verified_workaround', 'capability_fact'] as const
+export type VocKnowledgeKind = typeof vocKnowledgeKinds[number]
+export type VocConversationVerification = {
+  status: 'accepted' | 'weak' | 'negative' | 'unknown'
+  acceptance: 'resolved' | 'understood' | 'weak_closure' | 'continuing' | 'rejected' | 'unknown'
+  effect: 'customer_reported_success' | 'customer_reported_failure' | 'not_established' | 'unknown'
+  auto_reusable: boolean
+  evidence: { quote: string; role: string; message_id?: string | number; ts?: string | number }[]
+  coverage: Record<string, unknown>
+  reason_codes: string[]
+  version: string
+  fingerprint: string
+}
+
+function validateVoc2Response(name: string, data: unknown): void {
+  if (!name.startsWith('voc2/')) return
+  const ref = (v: unknown) => isRecord(v) && ['question', 'answer'].includes(String(v.source))
+    && typeof v.quote === 'string' && isCount(v.start) && isCount(v.end) && typeof v.role === 'string' && v.alignment === 'exact'
+  const nullableRef = (v: unknown) => v === null || v === undefined || ref(v)
+  const refs = (v: unknown) => Array.isArray(v) && v.every(ref)
+  const closure = (v: unknown) => isRecord(v) && ['accepted', 'weak', 'negative', 'unknown'].includes(String(v.status))
+    && ['resolved', 'understood', 'weak_closure', 'continuing', 'rejected', 'unknown'].includes(String(v.acceptance))
+    && ['customer_reported_success', 'customer_reported_failure', 'not_established', 'unknown'].includes(String(v.effect))
+    && typeof v.auto_reusable === 'boolean' && (!v.auto_reusable || v.status === 'accepted')
+    && isRecord(v.coverage) && isStringArray(v.reason_codes)
+    && typeof v.version === 'string' && typeof v.fingerprint === 'string'
+    && Array.isArray(v.evidence) && v.evidence.every(item => isRecord(item) && typeof item.quote === 'string' && typeof item.role === 'string')
+  const intents = ['configuration_guidance', 'functional_anomaly', 'unclear']
+  const diagnoses = ['reported', 'pending', 'config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed', 'not_applicable']
+  const domain = (v: unknown) => isRecord(v) && intents.includes(String(v.primary_intent))
+    && ['request', 'follow_up', 'reproduction_context'].includes(String(v.fragment_role))
+    && ['platforms', 'modules', 'reproduction_context', 'prerequisites', 'operation_path'].every(key => refs(v[key]))
+    && nullableRef(v.merchant_goal) && nullableRef(v.expected) && nullableRef(v.actual)
+    && isRecord(v.diagnosis) && diagnoses.includes(String(v.diagnosis.status))
+    && typeof v.diagnosis.cause_code === 'string' && nullableRef(v.diagnosis.cause) && refs(v.diagnosis.evidence)
+    && Array.isArray(v.actions) && v.actions.every(action => isRecord(action) && typeof action.method_code === 'string'
+      && ref(action.instruction) && ['suggested', 'verified'].includes(String(action.effect_status)) && nullableRef(action.verification))
+    && isStringArray(v.tags)
+  const topic = (v: unknown) => isRecord(v) && typeof v.id === 'string' && typeof v.question === 'string'
+    && typeof v.theme === 'string' && typeof v.last_seen === 'string'
+    && hasCounts(v, ['event_count', 'customer_count', 'session_count', 'mention_count']) && isStringArray(v.samples)
+    && (v.primary_intent === undefined || intents.includes(String(v.primary_intent)))
+    && (v.consultation_count === undefined || isCount(v.consultation_count))
+  const evidence = (v: unknown) => isRecord(v) && typeof v.id === 'string' && typeof v.event_id === 'string'
+    && typeof v.question === 'string' && typeof v.answer === 'string' && typeof v.staff_source_verified === 'boolean'
+    && Array.isArray(v.claims) && v.claims.every(claim => isRecord(claim) && typeof claim.role === 'string'
+      && typeof claim.quote === 'string' && isCount(claim.start) && isCount(claim.end) && Array.isArray(claim.source_refs))
+    && (v.domain === undefined || domain(v.domain))
+  const knowledge = (v: unknown) => isRecord(v) && typeof v.id === 'string' && typeof v.topic_id === 'string'
+    && typeof v.question === 'string' && typeof v.answer === 'string' && typeof v.scope === 'string'
+    && isStringArray(v.steps) && isStringArray(v.reply_patterns) && isStringArray(v.cautions)
+    && Array.isArray(v.evidence) && v.evidence.every(evidence)
+    && (v.kind === undefined || (typeof v.kind === 'string' && vocKnowledgeKinds.some(kind => kind === v.kind)))
+    && (v.diagnosis_status === undefined || diagnoses.includes(String(v.diagnosis_status)))
+    && (v.applicability === undefined || refs(v.applicability)) && nullableRef(v.confirmed_cause)
+    && (v.conversation_verification === undefined || closure(v.conversation_verification))
+  const job = (v: unknown) => isRecord(v) && typeof v.id === 'string'
+    && ['queued', 'running', 'completed', 'partial', 'failed', 'skipped'].includes(String(v.status))
+    && hasCounts(v, ['total', 'processed', 'failed', 'skipped', 'usage_tokens'])
+    && typeof v.error === 'string'
+  let valid = isRecord(data)
+  if (valid && isRecord(data)) switch (name) {
+    case 'voc2/summary': valid = hasCounts(data, ['source_pairs', 'total_events', 'answered_events', 'topic_count', 'ready_knowledge', 'exception_count'])
+      && (data.auto_reusable_knowledge === undefined || isCount(data.auto_reusable_knowledge))
+      && isRecord(data.semantics) && typeof data.semantics.ready === 'boolean' && typeof data.semantics.model === 'string'
+      && isRecord(data.coverage) && hasCounts(data.coverage, ['processed_pairs', 'pending_pairs', 'answered_pairs'])
+      && (data.latest_job === null || job(data.latest_job)); break
+    case 'voc2/topics': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(topic); break
+    case 'voc2/knowledge': valid = data.item !== undefined ? knowledge(data.item) : isCount(data.total) && Array.isArray(data.items) && data.items.every(knowledge); break
+    case 'voc2/exceptions': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => isRecord(item)
+      && ['id', 'kind', 'question', 'reason', 'created_at'].every(key => typeof item[key] === 'string')); break
+    case 'voc2/topic': valid = topic(data.topic) && Array.isArray(data.events) && data.events.every(evidence); break
+    case 'voc2/event': valid = evidence(data.event) && (data.topic === undefined || topic(data.topic)); break
+    case 'voc2/defects': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => evidence(item)
+      && isRecord(item) && isRecord(item.domain) && isRecord(item.domain.diagnosis) && item.domain.diagnosis.status === 'defect_confirmed'); break
+    case 'voc2/jobs': valid = Array.isArray(data.items) && data.items.every(job); break
+    case 'voc2/run': valid = job(data.job); break
+    case 'voc2/assistant': valid = typeof data.answer === 'string' && typeof data.model === 'string'
+      && isRecord(data.scope) && typeof data.scope.label === 'string'
+      && Array.isArray(data.tools) && data.tools.every(item => isRecord(item) && typeof item.name === 'string' && typeof item.label === 'string')
+      && Array.isArray(data.citations) && data.citations.every(item => isRecord(item)
+        && ['topic', 'knowledge', 'event'].includes(String(item.kind)) && typeof item.id === 'string' && typeof item.title === 'string'); break
+  }
+  if (!valid) throw new ApiError('VOC 工作台返回的数据格式不完整，请刷新或联系管理员。', 502)
 }
 
 function isPair(value: unknown): boolean {
@@ -244,6 +336,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
   }))
   validateGetResponse(name, data)
   validateVocResponse(name, data)
+  validateVoc2Response(name, data)
   validateGatewayResponse(name, data)
   return data as T
 }
@@ -257,6 +350,7 @@ export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyI
     body: body ?? new Uint8Array(),
   }))
   validateVocResponse(name, data)
+  validateVoc2Response(name, data)
   validateGatewayResponse(name, data)
   return data as T
 }

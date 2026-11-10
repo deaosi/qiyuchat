@@ -14,7 +14,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ..config import Settings, settings
-from .. import voc, knowledge, gateway
+from .. import voc, knowledge, gateway, voc_service, voc_assistant
+from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
 from . import api
@@ -133,6 +134,16 @@ class Handler(BaseHTTPRequestHandler):
                 "staff": _str(qs, "staff"), "q": _str(qs, "q"),
                 "replied": replied, "cluster": _int(qs, "cluster", 0),
                 "customer": _str(qs, "customer")}
+
+    def _voc_filters(self, qs: dict[str, list[str]]) -> dict:
+        filters = self._filters(qs)
+        support = _str(qs, "support_intent", "all")
+        diagnosis = _str(qs, "diagnosis_status", "all")
+        if len(qs.get("support_intent", [])) > 1 or support not in ("all", "configuration_guidance", "functional_anomaly", "unclear"):
+            raise ValueError("未知知汇鸽咨询类型")
+        if len(qs.get("diagnosis_status", [])) > 1 or diagnosis not in ("all", "reported", "pending", "config_cause_confirmed", "platform_limit_confirmed", "defect_confirmed", "not_applicable"):
+            raise ValueError("未知问题诊断状态")
+        return {**filters,"support_intent":support,"diagnosis_status":diagnosis}
 
     # ---------- 单管理员密钥鉴权 ----------
     COOKIE = "qy_admin"
@@ -290,6 +301,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(gateway.public_config(self.server.cfg))
             return
         filters = self._filters(qs)
+        if name.startswith("voc2/"):
+            try:
+                self._json(voc_service.get(cfg, name[5:], self._voc_filters(qs), _str(qs, "id")))
+            except (voc_service.ServiceError, voc.VocError) as exc:
+                self._json({"error": str(exc)}, exc.status)
+            return
         if name == "voc/knowledge" or name.startswith("voc/knowledge/"):
             try:
                 if name == "voc/knowledge/export":
@@ -393,7 +410,29 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise ValueError("上传未完成，请重新选择文件")
-            if path in ("/api/gateway/config", "/api/gateway/models"):
+            if path.startswith("/api/voc2/"):
+                try:
+                    if not self.headers.get("Content-Type", "").lower().startswith("application/json") or len(data)>64*1024:
+                        raise voc_service.ServiceError("新整理请求须为最多 64 KB 的 JSON。")
+                    try:
+                        body=json.loads(data.decode("utf-8"))
+                    except (ValueError,UnicodeError,RecursionError):
+                        raise voc_service.ServiceError("新整理请求不是有效 JSON。") from None
+                    filters=self._filters(qs)
+                    if path=="/api/voc2/run":
+                        self._json(voc_service.start(cfg,filters,body))
+                    elif path=="/api/voc2/assistant":
+                        self._json(voc_assistant.answer(cfg,self._voc_filters(qs),body))
+                    else:
+                        self._json({"error":"新整理接口不存在。"},404)
+                except (voc_service.ServiceError,ModelProtocolError,voc.VocError) as exc:
+                    self._json({"error":str(exc)},exc.status)
+                except ValueError as exc:
+                    self._json({"error":str(exc)},400)
+                except Exception:
+                    log.warning("VOC新整理操作失败")
+                    self._json({"error":"新整理服务暂时不可用，请稍后重试。"},500)
+            elif path in ("/api/gateway/config", "/api/gateway/models"):
                 try:
                     if _str(qs, "source", "local") != "local":
                         raise gateway.GatewayError("网关设置仅用于业务服务，请切换到业务数据")
@@ -425,7 +464,10 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, UnicodeError, RecursionError):
                     raise ValueError("VOC 请求不是有效 JSON") from None
                 try:
-                    self._json(voc.handle_post(cfg, u.path[5:], self._filters(qs), body))
+                    with voc_service.LAUNCH_LOCK:
+                        if path in ("/api/voc/run","/api/voc/knowledge/run") and voc_service.busy(cfg):
+                            raise voc.VocError("新整理任务正在运行，请完成后再启动其他模型任务。",409)
+                        self._json(voc.handle_post(cfg, u.path[5:], self._filters(qs), body))
                 except voc.VocError as exc:
                     self._json({"error": str(exc)}, exc.status)
             elif u.path in ("/api/import/preview", "/api/import"):

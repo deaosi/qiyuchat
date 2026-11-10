@@ -1,0 +1,5 @@
+# Optional CPU worker dependencies. Existing receiver/console HTTP paths do not
+# import these packages until v2 work actually runs. Install PyTorch CPU wheels
+# for the deployment platform; do not install a CUDA runtime on the small server.
+langextract==1.7.2
+sentence-transformers==6.2.0
