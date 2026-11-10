@@ -155,6 +155,13 @@
 
 @keyframes qiyu-enter { from { opacity: .35; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 .qiyu-page-enter { animation: qiyu-enter .18s ease-out; }
+@keyframes voc-chat-arrive { from { opacity: .45; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+.voc-chat-message { animation: voc-chat-arrive .22s ease-out; }
+.voc-chat-suggestion { transition: color .18s ease-out, transform .18s ease-out; }
+.voc-chat-suggestion:hover, .voc-chat-suggestion:focus-visible { transform: translateX(3px); }
+.voc-chat-composer { transition: border-color .18s ease-out, box-shadow .18s ease-out; }
+.voc-chat-composer:focus-within { border-color: color-mix(in oklch, var(--foreground) 35%, var(--input)); box-shadow: 0 0 0 3px color-mix(in oklch, var(--foreground) 5%, transparent); }
+.voc-chat-disclosure[open] > div { animation: qiyu-enter .16s ease-out; }
 @keyframes qiyu-skeleton { to { background-position: -200% 0; } }
 @keyframes qiyu-loading-turn { to { transform: rotate(360deg); } }
 @keyframes qiyu-request-travel { from { transform: translateX(-105%); } to { transform: translateX(405%); } }
