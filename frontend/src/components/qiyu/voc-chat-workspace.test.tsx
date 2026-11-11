@@ -18,6 +18,30 @@ function setup(filters: ApiFilters) {
   return { transport, input: screen.getByRole<HTMLTextAreaElement>('textbox', { name: '向语海Voc提问' }) }
 }
 
+it.each([
+  [undefined, '当前范围的高频咨询有哪些？'],
+  ['t_' + 'a'.repeat(24), '这个问题怎么排查？给出适用条件和来源。'],
+])('fills the displayed placeholder on Enter in an empty draft (topic %s)', async (focus_topic, prompt) => {
+  const { transport, input } = setup({ source: 'local', days: 7, focus_topic })
+  input.focus()
+  expect(input.placeholder).toBe(prompt)
+  expect(input.value).toBe('')
+
+  fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+  fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+  expect(input.value).toBe('')
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(input.value).toBe(prompt)
+  expect(document.activeElement).toBe(input)
+  fireEvent.keyDown(input, { key: 'Enter', repeat: true })
+  expect(transport).not.toHaveBeenCalled()
+
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(transport).toHaveBeenCalledTimes(1)
+  expect(transport.mock.calls[0][1].message).toBe(prompt)
+  await screen.findByText('示例答复')
+})
+
 it('completes a typed keyword in place and only sends on a fresh Enter', async () => {
   const { transport, input } = setup({ source: 'local', days: 7 })
   input.focus()

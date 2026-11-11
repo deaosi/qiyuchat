@@ -54,8 +54,11 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
   const focus = useApi<{ topic: { question: string } }>('voc2/topic', { ...filters, id: filters.focus_topic }, refreshKey, Boolean(filters.focus_topic))
   const topicTitle = filters.focus_topic ? focus.data?.topic.question || '当前问题' : ''
   const presets = filters.focus_topic ? topicSuggestions : suggestions
+  const defaultPrompt = presets[0].prompt
+  const emptyDraft = !pending && current?.draft === ''
   const completionDismissed = current && dismissedCompletion?.threadId === current.id && dismissedCompletion.draft === current.draft
   const completion = current && !pending && !completionDismissed ? matchPreset(current.draft, presets) : undefined
+  const enterPrompt = completion ?? (emptyDraft ? defaultPrompt : undefined)
 
   useEffect(() => { store.ensureScope(filters) }, [scopeKey, store])
   useEffect(() => { setSelection(null) }, [state.activeId])
@@ -95,9 +98,9 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
     }
     store.setDraft(current.id, draft)
   }
-  function acceptCompletion() {
-    if (!current || !completion) return
-    store.setDraft(current.id, completion)
+  function acceptCompletion(prompt: string) {
+    if (!current || pending) return
+    store.setDraft(current.id, prompt)
     input.current?.focus()
   }
   function openSource(citation: ChatCitation, message: ChatMessage) {
@@ -149,7 +152,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
         {state.storageWarning && <p role="status" className="mb-2 text-xs text-muted-foreground">本窗口暂时无法保存聊天历史，刷新后可能无法恢复当前对话。</p>}
         {current?.error && <p role="alert" className="mb-2 text-sm text-destructive">{current.error}</p>}
         <form onSubmit={event => { event.preventDefault(); send() }} className="voc-chat-composer rounded-lg border border-input bg-background/75 p-3">
-          <textarea ref={input} rows={2} aria-label="向语海Voc提问" aria-describedby={completion ? completionId : undefined} placeholder="输入问题，或用「高频」「排查」补全预设话术…" maxLength={draftLimit} value={current?.draft || ''} disabled={!current || pending} onChange={event => {
+          <textarea ref={input} rows={2} aria-label="向语海Voc提问" aria-describedby={completion ? completionId : undefined} placeholder={defaultPrompt} maxLength={draftLimit} value={current?.draft || ''} disabled={!current || pending} onChange={event => {
             if (!current) return
             setDismissedCompletion(null)
             store.setDraft(current.id, event.target.value)
@@ -163,17 +166,17 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
             if (event.key !== 'Enter' || event.shiftKey) return
             event.preventDefault()
             if (event.repeat) return
-            if (completion) acceptCompletion()
+            if (enterPrompt) acceptCompletion(enterPrompt)
             else send()
           }} className="block min-h-14 max-h-40 w-full resize-none bg-transparent px-1 py-1 text-sm leading-6 outline-none placeholder:text-muted-foreground/70 disabled:opacity-60" />
           <div id={completionId} aria-live="polite">
-            {completion && <button type="button" onClick={acceptCompletion} className="mt-1 flex w-full items-center justify-between gap-3 rounded-md bg-muted/55 px-2 py-1.5 text-left text-xs leading-5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring">
+            {completion && <button type="button" onClick={() => acceptCompletion(completion)} className="mt-1 flex w-full items-center justify-between gap-3 rounded-md bg-muted/55 px-2 py-1.5 text-left text-xs leading-5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring">
               <span>{completion}</span><span className="shrink-0 text-[10px]">Enter 补全</span>
             </button>}
           </div>
           <div className="mt-2 flex items-center gap-2 sm:gap-3">
             <span className="min-w-0 max-w-[40%] truncate px-1 py-1 text-[11px] text-muted-foreground" title={gateway.data?.model ? `当前网关模型：${gateway.data.model}` : undefined}>{gateway.data?.model || (gateway.loading ? '正在读取模型' : '使用已配置模型')}</span>
-            <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/70 sm:inline">{completion ? 'Esc 取消补全' : 'Enter 发送'} · Shift+Enter 换行</span>
+            <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/70 sm:inline">{completion ? 'Esc 取消补全' : emptyDraft ? 'Enter 填入提问' : 'Enter 发送'} · Shift+Enter 换行</span>
             {pending ? <Button type="button" size="icon-sm" className="ml-auto shrink-0 sm:ml-0" aria-label="停止等待" title="停止等待" onClick={() => current && store.stop(current.id)}><Square className="size-3.5 fill-current" /></Button> : <Button type="submit" size="icon-sm" className="ml-auto shrink-0 rounded-lg sm:ml-0" aria-label="发送问题" disabled={!current?.draft.trim()}><ArrowUp className="size-4" /></Button>}
           </div>
         </form>
