@@ -75,6 +75,27 @@ describe('embedded case conversation details', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  it.each([true, false])('aligns customer, staff and other messages by sender (embedded=%s)', async embedded => {
+    vi.mocked(apiGet).mockResolvedValue(response('21', [
+      message(0, '客户提问'),
+      { ...message(1, '自动回复'), role: 'bot' },
+      message(3, '客服回答'),
+      { ...message(4, '角色未记录的原话'), role: '__proto__' },
+    ]))
+    render(<QADetail pair={pair()} onClose={vi.fn()} embedded={embedded} />)
+
+    const transcript = await screen.findByRole('list', { name: '会话消息' })
+    const [customer, bot, staff, unknown] = within(transcript).getAllByRole('listitem')
+    expect(customer.dataset.side).toBe('left')
+    expect(staff.dataset.side).toBe('right')
+    expect(bot.dataset.side).toBe('center')
+    expect(unknown.dataset.side).toBe('center')
+    expect(within(customer).getByText('客户提问')).toBeTruthy()
+    expect(within(staff).getByText('客服回答')).toBeTruthy()
+    expect(within(staff).getByText('2026-11-11 09:00:03', { selector: 'time' })).toBeTruthy()
+    expect(within(unknown).getByText('消息')).toBeTruthy()
+  })
+
   it('looks up eligible replies in the standard drawer only after the user requests them', async () => {
     const detail = response('21', [message(0, '客户原话')], { availability: 'available', can_lookup_replies: true })
     vi.mocked(apiGet).mockResolvedValueOnce({ ...detail, pair: { ...detail.pair, answer: '' } })
@@ -152,8 +173,10 @@ describe('embedded case conversation details', () => {
     expect(screen.getByText('已补充七鱼返回的人工客服回复。')).toBeTruthy()
     expect(screen.getByText(next.content)).toBe(saved)
     const transcript = screen.getByRole('list', { name: '会话消息' })
-    const bodies = within(transcript).getAllByRole('listitem').map(row => within(row).getByText(/^(已保存的|补取的)/).textContent)
+    const rows = within(transcript).getAllByRole('listitem')
+    const bodies = rows.map(row => within(row).getByText(/^(已保存的|补取的)/).textContent)
     expect(bodies).toEqual([first.content, '补取的第一条回复', next.content, sameTime.content, '补取的同一时刻回复'])
+    expect(rows.map(row => row.dataset.side)).toEqual(['left', 'right', 'left', 'left', 'right'])
     expect(within(transcript).getAllByText('人工客服')).toHaveLength(2)
     expect(within(transcript).getByText('2026-11-11 09:00:01')).toBeTruthy()
     expect(within(transcript).getByAltText('会话图片').getAttribute('src')).toBe('https://ysf.nosdn.127.net/official-reply.png')

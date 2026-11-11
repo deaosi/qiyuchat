@@ -3,7 +3,7 @@ import { AlertCircle, Archive, ArrowUpRight, CircleCheck, CircleDashed, Layers2,
 import { LoadingState } from './loading-state'
 import type { QAPair } from '@/lib/demo-data'
 import { ApiError, apiGet, apiPost, normalizePair, type DetailMessageImage, type DetailRepliesResponse } from '@/lib/api'
-import { customerLabel } from '@/lib/utils'
+import { cn, customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -74,7 +74,13 @@ function fullTime(value: string) {
 
 function messageRole(message: ContextMessage, pair: QAPair) {
   if (message.official) return '人工客服'
-  return ({ user: `客户 · ${customerLabel(pair.customerName, pair.customerId)}`, staff: `客服 · ${pair.staffName || '未记录'}`, bot: '机器人', system: '系统' })[message.role] || '消息'
+  switch (message.role) {
+    case 'user': return `客户 · ${customerLabel(pair.customerName, pair.customerId)}`
+    case 'staff': return `客服 · ${pair.staffName || '未记录'}`
+    case 'bot': return '机器人'
+    case 'system': return '系统'
+    default: return '消息'
+  }
 }
 
 function ConversationImage({ url }: DetailMessageImage) {
@@ -88,6 +94,35 @@ function ConversationImage({ url }: DetailMessageImage) {
     <img src={url} alt="会话图片" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)}
       className={`block h-auto max-w-full object-contain ${expanded ? 'max-h-[65vh]' : 'max-h-36'}`} />
   </button>
+}
+
+const messageLayout = {
+  left: { row: 'justify-start', group: 'items-start', bubble: 'rounded-tl-sm border-border/80 bg-background' },
+  right: { row: 'justify-end', group: 'items-end', bubble: 'rounded-tr-sm border-foreground/10 bg-linear-to-b from-foreground/10 to-foreground/[0.06]' },
+  center: { row: 'justify-center', group: 'items-center', bubble: 'border-transparent bg-foreground/5 text-muted-foreground' },
+} as const
+
+function ConversationMessage({ message, pair }: { message: ContextMessage; pair: QAPair }) {
+  const side = message.role === 'staff' ? 'right' : message.role === 'user' ? 'left' : 'center'
+  const layout = messageLayout[side]
+
+  return (
+    <li data-side={side} className={cn('flex min-w-0', layout.row)}>
+      <div className={cn('flex w-fit min-w-0 max-w-[88%] flex-col gap-1.5 sm:max-w-[80%]', layout.group)}>
+        <div className={cn('flex max-w-full flex-wrap items-baseline gap-x-2 gap-y-0.5 px-1 text-xs leading-5 text-muted-foreground', layout.row)}>
+          <span className="min-w-0">{messageRole(message, pair)}</span>
+          <time className="tabular-nums">{message.time}</time>
+          {message.sourceMessageId && message.isQuestion && <span className="text-[11px] font-medium text-foreground">本次咨询</span>}
+        </div>
+        <div className={cn('w-fit min-w-0 max-w-full whitespace-pre-wrap rounded-xl border px-3.5 py-2.5 text-sm leading-6 [overflow-wrap:anywhere]', layout.bubble)}>
+          {(!message.images.length || message.content.trim() !== '[图片]') && <p>{message.content}</p>}
+          {message.images.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
+            {message.images.map((image, index) => <ConversationImage key={`${image.url}-${index}`} url={image.url} />)}
+          </div>}
+        </div>
+      </div>
+    </li>
+  )
 }
 
 export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false }: QADetailProps) {
@@ -199,23 +234,9 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
                     {(lookupStatus === 'busy' || lookupStatus === 'unavailable') && <Button variant="ghost" size="xs" onClick={() => setReplyRevision(value => value + 1)}>重试查询</Button>}
                   </div>}
                   {availability === 'archived' && <div role="status" className="mb-4 flex items-start gap-3 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><Archive className="mt-1 size-4 shrink-0" /><p>原始聊天记录已归档。</p></div>}
-                  {messages.length ? <ol className="space-y-5" aria-label="会话消息">{messages.map(message => (
-                    <li key={message.key} className={`min-w-0 max-w-[90%] ${message.role === 'staff' ? 'ml-auto' : ''}`}>
-                      <div className="mb-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                        <span>{messageRole(message, pair)}</span>
-                        {message.sourceMessageId && message.isQuestion && <span className="text-[11px] font-medium text-foreground">本次咨询</span>}
-                        <time>{message.time}</time>
-                      </div>
-                      <div className={message.role === 'staff'
-                        ? 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tr-sm bg-foreground px-4 py-3 text-sm leading-7 text-background'
-                        : 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tl-sm border bg-muted/35 px-4 py-3 text-sm leading-7'}>
-                        {(!message.images.length || message.content.trim() !== '[图片]') && <p>{message.content}</p>}
-                        {message.images.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
-                          {message.images.map((image, index) => <ConversationImage key={`${message.key}-${image.url}-${index}`} url={image.url} />)}
-                        </div>}
-                      </div>
-                    </li>
-                  ))}</ol>
+                  {messages.length ? <ol className="space-y-4 rounded-xl border border-border/70 bg-surface px-3 py-4 sm:space-y-5 sm:px-5 sm:py-5" aria-label="会话消息">
+                    {messages.map(message => <ConversationMessage key={message.key} message={message} pair={pair} />)}
+                  </ol>
                     : availability !== 'archived' && <p className="rounded-lg border bg-muted/20 p-4 text-sm leading-6 text-muted-foreground">当前会话没有可展示的聊天记录。</p>}
                 </>}
           </section>
