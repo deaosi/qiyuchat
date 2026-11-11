@@ -290,7 +290,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self._gate(path, qs):
                 return
-            if path.startswith("/api/"):
+            if path.startswith("/api/voc2/"):
+                # VOC queries own their SQLite connections. A slow ranking or
+                # knowledge request must not hold the shared dashboard DB lock.
+                self._api(path[5:], qs)
+            elif path.startswith("/api/"):
                 with DB_LOCK:
                     self._api(path[5:], qs)
             else:

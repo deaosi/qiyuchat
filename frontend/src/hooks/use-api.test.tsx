@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { Profiler, useCallback, useState } from 'react'
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, apiGet } from '@/lib/api'
@@ -17,6 +17,22 @@ function deferred<T>() {
 afterEach(() => { cleanup(); vi.resetAllMocks(); vi.useRealTimers() })
 
 describe('same-scope background updates', () => {
+  it('commits the first loading view once before the request resolves', async () => {
+    const result = deferred<{ title: string }>()
+    vi.mocked(apiGet).mockReturnValueOnce(result.promise)
+    const commit = vi.fn()
+    function ReadingView() {
+      const query = useApi<{ title: string }>('voc2/topics', { source: 'local' })
+      return <p>{query.loading ? '正在读取' : query.data?.title}</p>
+    }
+    render(<Profiler id="query" onRender={commit}><ReadingView /></Profiler>)
+    expect(screen.getByText('正在读取')).toBeTruthy()
+    expect(commit).toHaveBeenCalledTimes(1)
+
+    await act(async () => { result.resolve({ title: '查询结果' }) })
+    expect(screen.getByText('查询结果')).toBeTruthy()
+  })
+
   it('continues polling when fast responses batch away intermediate loading states', async () => {
     vi.useFakeTimers()
     vi.mocked(apiGet).mockResolvedValue({ count: 12 })

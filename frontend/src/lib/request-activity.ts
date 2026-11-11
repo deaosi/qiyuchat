@@ -14,6 +14,8 @@ export function createRequestActivity() {
   return {
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     getSnapshot: () => snapshot,
+    getForegroundLabel: () => snapshot.foreground ? snapshot.label : null,
+    getBusy: () => snapshot.foreground + snapshot.background > 0,
     begin(label: string, background = false) {
       const id = Symbol()
       requests.set(id, { label, background }); publish()

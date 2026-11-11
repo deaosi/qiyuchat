@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useTransition, type CSSProperties, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
@@ -49,7 +49,7 @@ type ListItem = ClusterItem | GroupItem | CustomerItem
 const readView = (): View => { const id = location.hash.slice(1).split('?')[0]; return navigation.some(item => item.id === id) ? id as View : 'overview' }
 const numberText = (value: unknown) => typeof value === 'number' ? value.toLocaleString('zh-CN') : '—'
 
-function AppSidebar({ view, total, navigate, onImport }: { view: View; total?: number; navigate: (view: View) => void; onImport: () => void }) {
+const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport }: { view: View; total?: number; navigate: (view: View) => void; onImport: () => void }) {
   const { setOpenMobile } = useSidebar()
   return <Sidebar collapsible="offcanvas" variant="inset">
     <SidebarHeader className="border-b px-4 py-4"><div className="flex h-7 items-center justify-between gap-2"><span className="text-base font-semibold tracking-tight">语海Voc</span><Badge variant="outline" className="text-[10px] font-normal">工作台</Badge></div></SidebarHeader>
@@ -57,7 +57,7 @@ function AppSidebar({ view, total, navigate, onImport }: { view: View; total?: n
       <SidebarGroup className="mt-auto"><SidebarGroupLabel>系统设置</SidebarGroupLabel><SidebarGroupContent><SidebarMenu><SidebarMenuItem><SidebarMenuButton isActive={view === 'settings'} onClick={() => { navigate('settings'); setOpenMobile(false) }} tooltip="模型网关"><SlidersHorizontal /><span>模型网关</span></SidebarMenuButton></SidebarMenuItem><SidebarMenuItem><SidebarMenuButton onClick={onImport}><CirclePlus /><span>导入会话数据</span></SidebarMenuButton></SidebarMenuItem><SidebarMenuItem><SidebarMenuButton onClick={() => toast.info('统计按业务会话中的有效问答计算；有回复不代表已解决。')}><CircleHelp /><span>统计说明</span></SidebarMenuButton></SidebarMenuItem><SidebarMenuItem><SidebarMenuButton asChild><a href="/logout"><LogOut /><span>退出登录</span></a></SidebarMenuButton></SidebarMenuItem></SidebarMenu></SidebarGroupContent></SidebarGroup>
     </SidebarContent><SidebarFooter className="border-t p-3"><div className="flex items-center gap-3 rounded-lg px-2 py-1.5"><Avatar className="size-8 rounded-lg"><AvatarFallback className="rounded-lg text-xs">管理</AvatarFallback></Avatar><div className="grid flex-1 gap-0.5 text-sm"><span className="font-medium">管理员</span><span className="text-xs text-muted-foreground">业务数据工作台</span></div><ShieldCheck className="size-4 text-muted-foreground" /></div></SidebarFooter>
   </Sidebar>
-}
+})
 
 function QueryState({ loading, error, empty, retry, children }: { loading?: boolean; error?: string | null; empty?: boolean; retry?: () => void; children?: ReactNode }) {
   if (loading) return <Card><CardContent><LoadingState /></CardContent></Card>
@@ -67,11 +67,10 @@ function QueryState({ loading, error, empty, retry, children }: { loading?: bool
 
 function Workspace() {
   const [view, setView] = useState<View>(readView)
-  const [navigating, startNavigation] = useTransition()
   const [filters, setFilters] = useState<ApiFilters>(() => readChatFilters(location.hash) || { source: 'local', days: 7 })
   const [drillFilters, setDrillFilters] = useState<Partial<ApiFilters>>({})
   const [drillCustomerName, setDrillCustomerName] = useState('')
-  const [exportFilters, setExportFilters] = useState<ApiFilters>(filters)
+  const [tableExport, setTableExport] = useState<{ key: string; filters: ApiFilters } | null>(null)
   const [initialReply, setInitialReply] = useState<Reply>('all')
   const [selected, setSelected] = useState<QAPair | null>(null)
   const [importOpen, setImportOpen] = useState(false)
@@ -88,47 +87,86 @@ function Workspace() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => { try { return localStorage.getItem('qiyu-theme') === 'dark' ? 'dark' : 'light' } catch { return 'light' } })
   const source = 'local' as const
   const busy = cleaning
-  const effectiveFilters = useMemo<ApiFilters>(() => ({ ...filters, ...drillFilters }), [filters, drillFilters])
+  const { days, start, end, group, staff } = filters
+  const sharedScope = useMemo<ApiFilters>(() => ({ source, days, start, end, group, staff }), [days, start, end, group, staff])
+  const effectiveFilters = useMemo<ApiFilters>(() => ({ ...sharedScope, ...drillFilters }), [sharedScope, drillFilters])
+  const tableScope = view === 'pairs' ? effectiveFilters : sharedScope
+  const tableExportKey = JSON.stringify([view, tableScope, view === 'pairs' ? initialReply : 'all'])
+  const captureTableFilters = useCallback((filters: ApiFilters) => setTableExport({ key: tableExportKey, filters }), [tableExportKey])
   const meta = useApi<MetaData>('meta', { source }, refreshKey)
-  const summary = useApi<SummaryData>('summary', filters, refreshKey, view === 'overview')
-  const trend = useApi<TrendData>('trend', filters, refreshKey, view === 'overview')
+  const summary = useApi<SummaryData>('summary', sharedScope, refreshKey, view === 'overview')
+  const trend = useApi<TrendData>('trend', sharedScope, refreshKey, view === 'overview')
   const listEnabled = ['clusters', 'groups', 'customers'].includes(view)
-  const list = useApi<{ items: ListItem[]; total?: number }>(listEnabled ? view : 'clusters', { ...filters, top: view === 'customers' ? 500 : view === 'groups' ? 3 : 100 }, refreshKey, listEnabled)
+  const list = useApi<{ items: ListItem[]; total?: number }>(listEnabled ? view : 'clusters', { ...sharedScope, top: view === 'customers' ? 500 : view === 'groups' ? 3 : 100 }, refreshKey, listEnabled)
   const status = useApi<LocalStatus>('status', { source }, refreshKey, view === 'cleaning')
   const recent = useMemo(() => summary.data?.recent?.map(normalizePair) ?? [], [summary.data])
   const page = navigation.find(item => item.id === view)!
-  const vocScope = { source, days: filters.days, start: filters.start, end: filters.end, group: filters.group, staff: filters.staff }
   const showQaExport = view !== 'questions' && view !== 'voc-next'
   const rangeLabel = filters.start || filters.end ? '自定义日期' : filters.days ? `近 ${filters.days} 天` : '全部时间'
   const scopeLabel = trend.data?.series.length ? `${trend.data.series[0].date} — ${trend.data.series.at(-1)!.date}` : rangeLabel
 
-  useEffect(() => { const handler = () => { startNavigation(() => { setView(readView()); const scope = readChatFilters(location.hash); if (scope) { setFilters(scope); setRange(scope.start || scope.end ? 'custom' : String(scope.days)); setCustomStart(scope.start || ''); setCustomEnd(scope.end || '') } }) }; window.addEventListener('hashchange', handler); window.addEventListener('popstate', handler); return () => { window.removeEventListener('hashchange', handler); window.removeEventListener('popstate', handler) } }, [])
+  const clearDrill = useCallback(() => {
+    setDrillFilters(current => Object.keys(current).length ? {} : current)
+    setDrillCustomerName('')
+    setInitialReply('all')
+  }, [])
+  useEffect(() => {
+    const handler = () => {
+      setView(readView())
+      clearDrill()
+      setSelected(null)
+      setTableExport(null)
+      const scope = readChatFilters(location.hash)
+      if (scope) {
+        const href = chatHref(scope)
+        setFilters(current => chatHref(current) === href ? current : scope)
+        setRange(scope.start || scope.end ? 'custom' : String(scope.days))
+        setCustomStart(scope.start || '')
+        setCustomEnd(scope.end || '')
+      }
+    }
+    window.addEventListener('hashchange', handler)
+    window.addEventListener('popstate', handler)
+    return () => { window.removeEventListener('hashchange', handler); window.removeEventListener('popstate', handler) }
+  }, [clearDrill])
   useEffect(() => { if (view === 'voc-chat' && location.hash !== chatHref(filters)) history.replaceState(null, '', chatHref(filters)) }, [view, filters])
   useEffect(() => { document.documentElement.classList.toggle('dark', theme === 'dark'); try { localStorage.setItem('qiyu-theme', theme) } catch { /* Storage may be unavailable. */ } }, [theme])
   useEffect(() => { document.documentElement.dataset.motion = motion ? 'on' : 'off' }, [motion])
-  useEffect(() => setExportFilters(view === 'pairs' ? effectiveFilters : filters), [view, effectiveFilters, filters])
-  const navigate = (next: View, scope = filters) => { startNavigation(() => setView(next)); const href = next === 'voc-chat' ? chatHref(scope) : `#${next}`; if (location.hash !== href) history.pushState(null, '', href) }
+  const navigate = useCallback((next: View, scope = filters) => {
+    setView(next)
+    setSelected(null)
+    if (next !== view) setTableExport(null)
+    const href = next === 'voc-chat' ? chatHref(scope) : `#${next}`
+    if (location.hash !== href) history.pushState(null, '', href)
+  }, [filters, view])
   const setChatScope = (next: ApiFilters) => { const scope = normalizeChatFilters(next); setFilters(scope); setRange(scope.start || scope.end ? 'custom' : String(scope.days)); setCustomStart(scope.start || ''); setCustomEnd(scope.end || ''); setDrillFilters({}) }
   const openChat = (next: ApiFilters) => { setChatScope(next); navigate('voc-chat', next) }
-  const sideNavigate = (next: View) => { setDrillFilters({}); setInitialReply('all'); navigate(next) }
+  const sideNavigate = useCallback((next: View) => { clearDrill(); navigate(next) }, [clearDrill, navigate])
   const drill = (next: Partial<ApiFilters> = {}, reply: Reply = 'all', customerName?: string) => { setDrillFilters(next); setDrillCustomerName(next.customer ? customerLabel(customerName, next.customer) : ''); setInitialReply(reply); navigate('pairs') }
-  const openImport = () => { if (busy) return; setImportOpen(true) }
+  const openImport = useCallback(() => { if (!busy) setImportOpen(true) }, [busy])
   const changeDays = (days: number) => { setRange(String(days)); setFilters(current => ({ ...current, days, start: undefined, end: undefined })); setDrillFilters({}) }
   const reset = () => { setFilters({ source, days: 7 }); setRange('7'); setCustomStart(''); setCustomEnd(''); setDrillFilters({}); setInitialReply('all') }
   const applyCustom = () => { if (!customStart && !customEnd) { toast.error('请至少填写一个日期边界'); return } if (customStart && customEnd && customStart > customEnd) { toast.error('开始日期不能晚于结束日期'); return } setFilters(current => ({ ...current, days: 0, start: customStart, end: customEnd })); setDrillFilters({}) }
   const cardNavigate = (next: string) => next === 'unanswered' ? drill({}, 'unanswered') : next === 'pairs' ? drill() : sideNavigate(next as View)
   const clean = async () => { setCleanOpen(false); setCleaning(true); try { const result = await apiPost<{ sessions_scanned: number; qa_pairs: number; clusters: number }>('clean', { source }); setDrillFilters({}); setSelected(null); setRefreshKey(key => key + 1); toast.success(`规则清洗完成：处理 ${result.sessions_scanned} 个会话，${result.qa_pairs} 条问答，${result.clusters} 个问题簇。`) } catch (error) { toast.error(error instanceof Error ? error.message : '清洗失败，请重试。') } finally { setCleaning(false) } }
-  const exportCsv = async () => { setExporting(true); try { await downloadExport(view === 'pairs' || view === 'overview' ? exportFilters : filters); toast.success('已下载当前范围的脱敏问答') } catch (error) { toast.error(error instanceof Error ? error.message : '导出失败，请重试。') } finally { setExporting(false) } }
+  const exportCsv = async () => {
+    const fallback = view === 'pairs' && initialReply !== 'all' ? { ...tableScope, replied: initialReply } : tableScope
+    const exportScope = tableExport?.key === tableExportKey ? tableExport.filters : fallback
+    setExporting(true)
+    try { await downloadExport(exportScope); toast.success('已下载当前范围的脱敏问答') }
+    catch (error) { toast.error(error instanceof Error ? error.message : '导出失败，请重试。') }
+    finally { setExporting(false) }
+  }
   const exportTemplate = async () => { if (downloadingTemplate) return; setDownloadingTemplate(true); try { await downloadTemplate(); toast.success('已下载会话导入模板') } catch (error) { toast.error(error instanceof Error ? error.message : '模板下载失败，请重试。') } finally { setDownloadingTemplate(false) } }
 
   return <SidebarProvider style={{ '--sidebar-width': 'calc(var(--spacing) * 64)', '--header-height': 'calc(var(--spacing) * 14)' } as CSSProperties}>
     <AppSidebar view={view} total={meta.data?.total} navigate={sideNavigate} onImport={openImport} />
     <SidebarInset data-density={compact ? 'compact' : 'normal'} data-motion={motion ? 'on' : 'off'}>
-      <header className="relative flex h-(--header-height) shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear"><PageActivity navigating={navigating} /><div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6"><SidebarTrigger className="-ml-1" /><Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" /><h1 className="text-base font-medium">{page.title}</h1><div className="ml-auto flex items-center gap-2">
+      <header className="relative flex h-(--header-height) shrink-0 items-center gap-2 border-b"><PageActivity /><div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6"><SidebarTrigger className="-ml-1" /><Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" /><h1 key={view} className="qiyu-page-title text-base font-medium">{page.title}</h1><div className="ml-auto flex items-center gap-2">
         <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="显示设置"><Settings2 className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-48"><DropdownMenuLabel>显示设置</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuCheckboxItem checked={motion} onCheckedChange={setMotion}>切换动画</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={compact} onCheckedChange={setCompact}>紧凑表格</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun /> : <Moon />}切换{theme === 'dark' ? '浅色' : '深色'}外观</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
         {view !== 'settings' && view !== 'voc-chat' && view !== 'voc-next' && <Button size="sm" onClick={openImport} disabled={busy}><CirclePlus /><span className="hidden sm:inline">导入会话</span></Button>}
       </div></div></header>
-      <div className="flex flex-1 flex-col"><div className="@container/main flex flex-1 flex-col gap-2"><div key={view} className={`flex flex-col ${view === 'voc-chat' ? 'min-h-0 gap-3 h-[calc(100svh-var(--header-height))] overflow-hidden md:h-[calc(100svh-var(--header-height)-1rem)]' : 'gap-4 py-4 md:gap-6 md:py-6'} ${motion ? 'qiyu-page-enter' : ''}`}>
+      <div className="flex flex-1 flex-col"><div className="@container/main flex flex-1 flex-col gap-2"><div className={`flex flex-col ${view === 'voc-chat' ? 'min-h-0 gap-3 h-[calc(100svh-var(--header-height))] overflow-hidden md:h-[calc(100svh-var(--header-height)-1rem)]' : 'gap-4 py-4 md:gap-6 md:py-6'}`}>
         {meta.error && view !== 'settings' && <div className="px-4 lg:px-6"><QueryState error={meta.error} retry={meta.retry} /></div>}
         {view !== 'cleaning' && view !== 'settings' && <div className={`flex shrink-0 flex-wrap items-center gap-2 px-4 lg:px-6 ${view === 'voc-chat' ? 'py-3' : ''}`}>
           <div className="mr-auto hidden items-center gap-2 text-sm text-muted-foreground xl:flex"><CalendarDays className="size-4" />{scopeLabel}</div>
@@ -142,12 +180,12 @@ function Workspace() {
           <QiyuSectionCards summary={summary.data} rangeLabel={rangeLabel} loading={summary.loading} onNavigate={cardNavigate} />
           {summary.error && <div className="px-4 lg:px-6"><QueryState error={summary.error} retry={summary.retry} /></div>}
           <div className="px-4 lg:px-6">{trend.error ? <QueryState error={trend.error} retry={trend.retry} /> : <QiyuAreaChart data={trend.data} loading={trend.loading} days={filters.start || filters.end ? -1 : filters.days ?? 0} onDaysChange={changeDays} onDaySelect={day => drill({ days: 0, start: day, end: day })} animate={motion} />}</div>
-          <div className="px-4 lg:px-6"><QATable key={`overview-${source}`} data={recent} remote={{ filters, refreshKey }} onSelect={setSelected} onFiltersChange={setExportFilters} /></div>
+          <div className="px-4 lg:px-6"><QATable key={`overview-${source}`} data={recent} remote={{ filters: sharedScope, refreshKey }} onSelect={setSelected} onFiltersChange={captureTableFilters} /></div>
         </>}
-        {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={() => { setDrillFilters({}); setInitialReply('all') }}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={setSelected} initialReply={initialReply} onFiltersChange={setExportFilters} /></div>}
+        {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={clearDrill}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={setSelected} initialReply={initialReply} onFiltersChange={captureTableFilters} /></div>}
         {view === 'settings' && <div className="px-4 lg:px-6"><GatewaySettings onSaved={() => setRefreshKey(key => key + 1)} /></div>}
-        {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace filters={vocScope} refreshKey={refreshKey} onOpenPair={setSelected} onOpenChat={openChat} /></div>}
-        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={vocScope} refreshKey={refreshKey} onOpenPair={setSelected} /></div>}
+        {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={setSelected} onOpenChat={openChat} /></div>}
+        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={setSelected} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
         {listEnabled && <div className="px-4 lg:px-6"><QueryState loading={list.loading} error={list.error} retry={list.retry} empty={!list.data?.items.length}>
           {view === 'clusters' && <div className="grid gap-4 lg:grid-cols-2">{(list.data?.items as ClusterItem[] | undefined)?.map(item => <Card key={item.cluster_id} className="min-w-0"><CardHeader className="min-w-0"><div className="mb-1 flex flex-wrap items-center justify-between gap-2"><Badge variant="outline">问题簇 {item.cluster_id}</Badge><span className="text-xs text-muted-foreground">{item.variants} 种问法</span></div><CardTitle className="min-w-0 whitespace-normal text-lg leading-relaxed [overflow-wrap:anywhere]">{item.question}</CardTitle><CardDescription>{item.count} 条问答 · {item.customers} 位客户 · {item.groups} 个客户群</CardDescription></CardHeader><CardContent className="min-w-0"><ul className="space-y-2 text-sm text-muted-foreground">{item.samples.map(sample => <li key={sample} className="flex min-w-0 gap-2"><MessageSquareText className="mt-0.5 size-4 shrink-0 opacity-50" /><span className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{sample}</span></li>)}</ul></CardContent><CardFooter className="flex-wrap justify-between gap-2"><Badge variant="secondary">{item.unanswered} 条未发现回复</Badge><Button variant="outline" size="sm" onClick={() => drill({ cluster: item.cluster_id })}>追溯问答<ArrowRight /></Button></CardFooter></Card>)}</div>}

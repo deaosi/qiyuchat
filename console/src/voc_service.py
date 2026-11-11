@@ -249,13 +249,13 @@ def execute(cfg: Settings, job_id: str) -> dict:
         row=db.execute('SELECT * FROM voc_service_job WHERE id=?',(job_id,)).fetchone()
         if row is None or row['status']!='queued':
             raise ServiceError('待执行任务不存在或已经执行。',409)
-        request=json.loads(row['request_json'])
         db.execute("UPDATE voc_service_job SET status='running',owner=?,updated_at=? WHERE id=?",(os.getpid(),time.time(),job_id))
     def progress(data):
         values={key:data[key] for key in ('total','processed','failed','skipped','usage_tokens')
                 if type(data.get(key)) is int and data[key]>=0}
         _update(cfg,job_id,**values)
     try:
+        request=json.loads(row['request_json'])
         with _profile_path(cfg,job_id).open(encoding='utf-8') as file:
             profile=json.load(file)
         profile['extra_headers']=tuple(tuple(pair) for pair in profile.get('extra_headers',()))

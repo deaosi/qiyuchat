@@ -7,7 +7,7 @@ External inference and local embedding run without an open SQLite connection.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 import importlib.util
 from itertools import zip_longest
 import json
@@ -48,7 +48,27 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-def _sources(cfg: Settings, filters: dict) -> dict[int, dict]:
+def _anchored_text(conn: sqlite3.Connection, session_id: str, ids: list[str], role: str) -> tuple[str, list[dict]]:
+    if not ids or len(set(ids)) != len(ids):
+        return "", []
+    marks = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT source_message_id,role,content FROM raw_message WHERE session_id=? AND source_message_id IN ({marks}) ORDER BY seq",
+        (session_id, *ids),
+    ).fetchall()
+    if [row["source_message_id"] for row in rows] != ids or any(row["role"] != role for row in rows):
+        return "", []
+    chunks, parts, offset = [], [], 0
+    for row in rows:
+        text = _staff_answer(row["content"]) if role == "staff" else mask_pii(clean_visible_text(row["content"] or ""))
+        if text:
+            chunks.append(text)
+            parts.append({"message_id": row["source_message_id"], "start": offset, "end": offset + len(text)})
+            offset += len(text) + 1
+    return "\n".join(chunks), parts
+
+
+def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None) -> dict[int, dict]:
     source_path = Path(cfg.runtime.db_path).resolve()
     if not source_path.is_file():
         return {}
@@ -56,7 +76,7 @@ def _sources(cfg: Settings, filters: dict) -> dict[int, dict]:
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("BEGIN")  # Consistent read snapshot, closed before any model work.
-        source = voc._scope(conn, filters)
+        source = voc._scope(conn, filters, qa_id=only_qa_id, include_messages=False)
         tables = _tables(conn)
         anchored_column = "raw_message" in tables and "source_message_id" in {row[1] for row in conn.execute("PRAGMA table_info(raw_message)")}
         for qa_id in list(source):
@@ -65,14 +85,13 @@ def _sources(cfg: Settings, filters: dict) -> dict[int, dict]:
             original = conn.execute("SELECT session_id,customer_id FROM qa_pair WHERE qa_id=?", (qa_id,)).fetchone()
             raw_sid, raw_customer = original["session_id"], original["customer_id"] or ""
             row["_session_key"] = "s_" + assets.digest(["raw-session", raw_sid])
-            row.pop("messages", None)  # Control rows/context never enter v2 prompts.
             row["answer"] = _staff_answer(row["answer"])
             origin = conn.execute("SELECT * FROM qa_origin WHERE qa_id=?", (qa_id,)).fetchone() if "qa_origin" in tables else None
             if origin is not None and not origin["active"]:
                 del source[qa_id]
                 continue
             question_ids, answer_ids = [], []
-            if origin:
+            if origin and origin["session_id"] == raw_sid:
                 try:
                     question_ids = json.loads(origin["question_message_ids"])
                     answer_ids = json.loads(origin["answer_message_ids"])
@@ -81,62 +100,35 @@ def _sources(cfg: Settings, filters: dict) -> dict[int, dict]:
                 if not all(isinstance(value, list) and all(isinstance(item, str) and item for item in value) for value in (question_ids, answer_ids)):
                     question_ids, answer_ids = [], []
             row.update(question_message_ids=question_ids, answer_message_ids=answer_ids,
-                       source_kind="source-anchored" if question_ids and origin else "legacy-reference",
+                       source_kind="evidence-key-reference" if origin else "legacy-reference",
                        _evidence_key=origin["evidence_key"] if origin and question_ids else
                        "legacy:" + assets.digest([row["_session_key"], row["customer_id"], qa_id]))
             row["_origin_fingerprint"] = [origin["fingerprint"], origin["revision"]] if origin else None
-            parts = []
+            row["_question_parts"] = []
             if question_ids and anchored_column:
-                marks = ",".join("?" for _ in question_ids)
-                messages = {message["source_message_id"]: dict(message) for message in conn.execute(
-                    f"SELECT source_message_id,role,content FROM raw_message WHERE session_id=? AND source_message_id IN ({marks})",
-                    (origin["session_id"] if origin else row["session_id"], *question_ids))}
-                chunks, offset = [], 0
-                for message_id in question_ids:
-                    message = messages.get(message_id, {})
-                    if message.get("role") != "user":
-                        break
-                    content = mask_pii(clean_visible_text(str(message.get("content") or "").strip()))
-                    chunks.append(content)
-                    parts.append({"message_id": message_id, "start": offset, "end": offset + len(content)})
-                    offset += len(content) + 1
-                if "\n".join(chunks).strip() != row["question"]:
-                    parts = []
-            row["_question_parts"] = parts
-            if question_ids and not parts:
-                row["source_kind"] = "evidence-key-reference"
+                question, question_parts = _anchored_text(conn, raw_sid, question_ids, "user")
+                if question == row["question"] and question_parts:
+                    row["_question_parts"] = question_parts
+                    row["source_kind"] = "source-anchored"
             row["_answer_parts"] = []
             row["_staff_verified"] = False
-            if row["answer"] and answer_ids and anchored_column:
-                marks = ",".join("?" for _ in answer_ids)
-                answer_messages = {message["source_message_id"]: dict(message) for message in conn.execute(
-                    f"SELECT source_message_id,role,content FROM raw_message WHERE session_id=? AND source_message_id IN ({marks})",
-                    (raw_sid, *answer_ids))}
-                chunks, answer_parts, offset = [], [], 0
-                for message_id in answer_ids:
-                    message = answer_messages.get(message_id, {})
-                    if message.get("role") != "staff":
-                        break
-                    content = _staff_answer(message.get("content"))
-                    if content:
-                        chunks.append(content)
-                        answer_parts.append({"message_id": message_id, "start": offset, "end": offset + len(content)})
-                        offset += len(content) + 1
-                if "\n".join(chunks) == row["answer"]:
+            if row["answer"] and row["_question_parts"] and answer_ids and anchored_column:
+                answer, answer_parts = _anchored_text(conn, raw_sid, answer_ids, "staff")
+                if answer == row["answer"] and answer_parts:
                     row["_answer_parts"], row["_staff_verified"] = answer_parts, True
-            elif row["answer"] and "raw_message" in tables:
+            elif row["answer"] and origin is None and "raw_message" in tables:
                 messages = [dict(message) for message in conn.execute(
                     "SELECT role,content,ts FROM raw_message WHERE session_id=? ORDER BY seq", (raw_sid,))]
                 visible = sender_context(messages, raw_sid, raw_customer)
                 staff = "\n".join(_staff_answer(message.get("content")) for message in visible if message.get("role") == "staff")
                 row["_staff_verified"] = row["answer"] in staff
             row["_context"] = []
-            if row["_domain_mode"] and anchored_column and question_ids:
+            if row["_domain_mode"] and anchored_column and row["_question_parts"]:
                 raw_context = [dict(message) for message in conn.execute(
                     "SELECT seq,role,content,ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq", (raw_sid,))]
                 if any(message["role"] == SOURCE_IDENTITY_ROLE for message in raw_context):
                     visible = sender_context(raw_context, raw_sid, raw_customer)
-                    anchors = {message_id for message_id in question_ids + answer_ids}
+                    anchors = {part["message_id"] for part in row["_question_parts"] + row["_answer_parts"]}
                     current = [index for index, message in enumerate(visible) if message.get("source_message_id") in anchors]
                     if current:
                         near = visible[max(0, min(current) - 3):max(current) + 4]
@@ -157,6 +149,8 @@ def _sources(cfg: Settings, filters: dict) -> dict[int, dict]:
                 "question_message_ids", "answer_message_ids", "_evidence_key", "_staff_verified", "_origin_fingerprint", "_session_key")}
             if row["_domain_mode"]:
                 fingerprint_data.update(domain_pipeline=variants.pipeline(cfg), context=row["_context"])
+            if origin and row["source_kind"] != "source-anchored":
+                fingerprint_data["incomplete_source_anchors"] = True
             row["_fingerprint"] = assets.digest(fingerprint_data)
         return source
     finally:
@@ -259,8 +253,12 @@ def _public_topic(topic: dict, events: list[dict]) -> dict:
 
 
 def _topic_items(cfg: Settings, events: list[dict]) -> list[dict]:
-    items = [_public_topic(topic, [row for row in events if row["topic_id"] == topic["id"]]) for topic in _stored_topics(path(cfg), domain_mode=variants.mode(cfg))]
-    return sorted([item for item in items if item["event_count"]], key=lambda item: (-item["consultation_count"], -item["event_count"], item["id"]))
+    by_topic = defaultdict(list)
+    for row in events:
+        by_topic[row["topic_id"]].append(row)
+    items = [_public_topic(topic, by_topic[topic["id"]])
+             for topic in _stored_topics(path(cfg), domain_mode=variants.mode(cfg)) if topic["id"] in by_topic]
+    return sorted(items, key=lambda item: (-item["consultation_count"], -item["event_count"], item["id"]))
 
 
 def topics(cfg: Settings, filters: dict) -> dict:
@@ -307,9 +305,12 @@ def _compile_input(topic: dict, rows: list[dict], duplicate_links: list) -> str:
 
 def _knowledge_plans(cfg: Settings, events: list[dict]) -> list[dict]:
     duplicates = _duplicate_context(events)
+    by_topic = defaultdict(list)
+    for row in events:
+        by_topic[row["topic_id"]].append(row)
     result = []
     for topic in _stored_topics(path(cfg), domain_mode=variants.mode(cfg)):
-        rows = [row for row in events if row["topic_id"] == topic["id"]]
+        rows = by_topic.get(topic["id"])
         if not rows:
             continue
         for plan in variants.plans(cfg, topic, rows):
@@ -321,12 +322,14 @@ def _knowledge_plans(cfg: Settings, events: list[dict]) -> list[dict]:
     return result
 
 
-def _latest_assets(cfg: Settings, *, _current: dict | None = None) -> list[dict]:
-    store, current = path(cfg), _sources(cfg, {}) if _current is None else _current
+def _latest_assets(cfg: Settings, *, _current: dict | None = None, _plans: list[dict] | None = None) -> list[dict]:
+    store = path(cfg)
     if not store.is_file():
         return []
-    events = _events(cfg, {}, _current=current)
-    expected_inputs = {(plan["topic"]["id"], plan["key"]): plan["compile_input"] for plan in _knowledge_plans(cfg, events)}
+    current = _sources(cfg, {}) if _current is None else _current
+    plans = _knowledge_plans(cfg, _events(cfg, {}, _current=current)) if _plans is None else _plans
+    expected_plans = {(plan["topic"]["id"], plan["key"]): plan for plan in plans}
+    quality_version = variants.quality_version(cfg)
     with assets.connection(store) as conn:
         if "v2_asset" not in _tables(conn):
             return []
@@ -334,18 +337,42 @@ def _latest_assets(cfg: Settings, *, _current: dict | None = None) -> list[dict]
         has_variants = "variant_key" in {row[1] for row in conn.execute("PRAGMA table_info(v2_asset)")}
         by_variant = " AND b.variant_key=a.variant_key" if has_variants else ""
         for row in conn.execute("SELECT a.* FROM v2_asset a JOIN v2_topic t ON t.id=a.topic_id WHERE t.status!='ignored' AND a.version=(SELECT MAX(b.version) FROM v2_asset b WHERE b.topic_id=a.topic_id" + by_variant + ")"):
+            branch = row["variant_key"] if has_variants else ""
+            plan = expected_plans.get((row["topic_id"], branch))
+            expected_input = plan["compile_input"] if plan else None
+            data = json.loads(row["payload"])
+            restored = False
+            if expected_input and (data.get("quality_version") != quality_version or data.get("compile_input") != expected_input):
+                # The compiler deduplicates an exact prior input, so a newer
+                # version with different evidence must not mask that result.
+                clause = " AND variant_key=?" if has_variants else ""
+                args = (row["topic_id"], row["version"], expected_input, quality_version)
+                if has_variants:
+                    args += (branch,)
+                prior = conn.execute(
+                    "SELECT * FROM v2_asset WHERE topic_id=? AND version<? "
+                    "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.compile_input') END=? "
+                    "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.quality_version') END=?"
+                    + clause + " ORDER BY version DESC,id DESC LIMIT 1", args,
+                ).fetchone()
+                if prior is not None:
+                    row = prior
+                    data = json.loads(row["payload"])
+                    restored = True
             item = dict(row)
-            data = json.loads(item.pop("payload"))
+            item.pop("payload")
             item.update(data)
             item["status"] = row["status"]
+            if restored and item["status"] == "ready" and _same_evidence_manually_ignored(conn, row["topic_id"], plan["rows"]):
+                item["status"] = "ignored"
             item["id"] = str(row["id"])
             item["updated_at"] = _when(row["updated_at"])
             item["created_at"] = _when(row["created_at"])
-            item["variant_key"] = row["variant_key"] if has_variants else ""
+            item["variant_key"] = branch
             # Cross-database updates cannot be atomic. Revalidate every citation
             # at read time so a concurrently changed/retired QA is never ready.
-            item["needs_compile"] = (item.get("quality_version") != variants.quality_version(cfg)
-                                     or item.get("compile_input") != expected_inputs.get((row["topic_id"], item["variant_key"])))
+            item["needs_compile"] = (expected_input is None or item.get("quality_version") != quality_version
+                                     or item.get("compile_input") != expected_input)
             item["stale"] = item["needs_compile"] or any(not current.get(citation["qa_id"]) or current[citation["qa_id"]]["_fingerprint"] != citation["source_fingerprint"]
                                                         for citation in item["evidence"])
             result.append(item)
@@ -374,12 +401,16 @@ def _with_conversation_verification(cfg: Settings, items: list[dict], rows: list
 
 
 def knowledge(cfg: Settings, filters: dict, knowledge_id: str = "") -> dict:
-    rows = _events(cfg, filters)
+    current = _sources(cfg, {})
+    all_events = _events(cfg, {}, _current=current)
+    rows = _events(cfg, filters) if any(value for key, value in filters.items() if key != "source") else all_events
     visible = {row["topic_id"] for row in rows}
     event_ids = {row["id"] for row in rows}
-    items = [item for item in _latest_assets(cfg) if item["status"] == "ready" and not item["stale"] and item["topic_id"] in visible
+    plans = _knowledge_plans(cfg, all_events)
+    items = [item for item in _latest_assets(cfg, _current=current, _plans=plans)
+             if item["status"] == "ready" and not item["stale"] and item["topic_id"] in visible
              and any(citation["event_id"] in event_ids for citation in item["evidence"])]
-    items = _with_conversation_verification(cfg, items, rows, events=_events(cfg, {}))
+    items = _with_conversation_verification(cfg, items, rows, events=all_events)
     if knowledge_id:
         item = next((item for item in items if item["id"] == str(knowledge_id)), None)
         if item is None:
@@ -447,20 +478,21 @@ def summary(cfg: Settings, filters: dict) -> dict:
     if path(cfg).is_file():
         with assets.connection(path(cfg)) as conn:
             if "v2_source" in _tables(conn):
-                processed = sum(bool((row := conn.execute("SELECT fingerprint,pipeline,state FROM v2_source WHERE qa_id=?", (qa_id,)).fetchone())
-                                and row["fingerprint"] == pair["_fingerprint"] and row["pipeline"] == variants.pipeline(cfg) and row["state"] in ("done", "excluded", "context_needed"))
-                                for qa_id, pair in source.items())
-                context_needed = sum(bool((row := conn.execute("SELECT fingerprint,pipeline,state FROM v2_source WHERE qa_id=?", (qa_id,)).fetchone())
-                                          and row["fingerprint"] == pair["_fingerprint"] and row["pipeline"] == variants.pipeline(cfg) and row["state"] == "context_needed")
-                                     for qa_id, pair in source.items())
+                states = Counter(
+                    row["state"] for row in conn.execute("SELECT qa_id,fingerprint,state FROM v2_source WHERE pipeline=?", (variants.pipeline(cfg),))
+                    if row["qa_id"] in source and row["fingerprint"] == source[row["qa_id"]]["_fingerprint"]
+                )
+                context_needed = states["context_needed"]
+                processed = states["done"] + states["excluded"] + context_needed
                 row = conn.execute("SELECT * FROM v2_job ORDER BY id DESC LIMIT 1").fetchone()
                 latest_job = _public_job(row) if row else None
     topic_items = _topic_items(cfg, events)
     visible = {item["id"] for item in topic_items}
     global_source = _sources(cfg, {}) if any(value for key, value in filters.items() if key != "source") else source
-    latest = _latest_assets(cfg, _current=global_source)
+    all_events = events if global_source is source else _events(cfg, {}, _current=global_source)
+    plans = _knowledge_plans(cfg, all_events)
+    latest = _latest_assets(cfg, _current=global_source, _plans=plans)
     by_branch = {(item["topic_id"], item["variant_key"]): item for item in latest}
-    plans = _knowledge_plans(cfg, _events(cfg, {}, _current=global_source))
     pending_topics = {plan["topic"]["id"] for plan in plans if plan["topic"]["id"] in visible
                       and ((plan["topic"]["id"], plan["key"]) not in by_branch
                            or by_branch[(plan["topic"]["id"], plan["key"])]["needs_compile"])}
@@ -468,7 +500,7 @@ def summary(cfg: Settings, filters: dict) -> dict:
     event_ids = {row["id"] for row in events}
     know = [item for item in latest if item["status"] == "ready" and not item["stale"] and item["topic_id"] in visible
             and any(citation["event_id"] in event_ids for citation in item["evidence"])]
-    know = _with_conversation_verification(cfg, know, events, events=_events(cfg, {}, _current=global_source))
+    know = _with_conversation_verification(cfg, know, events, events=all_events)
     problems = _exception_items(cfg, source, visible, {item["fingerprint"]: item for item in latest}, filters=filters, event_ids=event_ids)
     return {"total_events": len(events), "topic_count": len(topic_items),
             "ready_knowledge": len(know), "auto_reusable_knowledge": sum(item["conversation_verification"]["auto_reusable"] for item in know),
@@ -623,9 +655,10 @@ def _save_job(cfg: Settings, job: dict, progress: Callable | None) -> None:
 
 
 class _ExtractionBudgetStop(Exception):
-    def __init__(self, message: str, *, after_failure: bool = False):
+    def __init__(self, message: str, *, after_failure: bool = False, cannot_fit: bool = False):
         super().__init__(message)
         self.after_failure = after_failure
+        self.cannot_fit = cannot_fit
 
 
 def _extract_source(cfg, pair, candidates, provider, aligner, job, max_calls, max_tokens, progress):
@@ -640,6 +673,8 @@ def _extract_source(cfg, pair, candidates, provider, aligner, job, max_calls, ma
         output_budget = output_token_limit(pair)
         request = request_payload(cfg.llm, request_source, candidates, output_budget)
         reservation = len(assets.dump(request).encode("utf-8")) + output_budget
+        if reservation > max_tokens and feedback is None:
+            raise _ExtractionBudgetStop("本轮总预算不足以提取当前来源，请提高预算后重试。", cannot_fit=True)
         if job["reserved_tokens"] + reservation > max_tokens:
             raise _ExtractionBudgetStop("本轮保守用量预算不足以完成下一次提取；来源保留待整理，可在下一轮继续。", after_failure=feedback is not None)
         job["calls"] += 1
@@ -763,7 +798,7 @@ def run(cfg: Settings, filters: dict, limit: int = 20, max_calls: int = 20,
                         near = retrieve(path(cfg), embedder, data["question"], compatible, top_k=5, minimum=0.86)
                         if near:
                             data["possible_duplicate"] = [candidate["id"] for candidate in near]
-                latest = _sources(cfg, {}).get(pair["qa_id"])
+                latest = _sources(cfg, {}, only_qa_id=pair["qa_id"]).get(pair["qa_id"])
                 if not latest or latest["_fingerprint"] != pair["_fingerprint"]:
                     job["skipped"] += 1
                 else:
@@ -792,7 +827,14 @@ def run(cfg: Settings, filters: dict, limit: int = 20, max_calls: int = 20,
                     job["processed"] += 1
                 failure_streak = 0
             except _ExtractionBudgetStop as error:
-                job["error"] = str(error)
+                if not job["error"] or not error.cannot_fit:
+                    job["error"] = str(error)
+                if error.cannot_fit:
+                    job["skipped"] += 1
+                    with assets.connection(path(cfg), write=True) as conn:
+                        assets.put_exception(conn, kind="extraction_failed", fingerprint=pair["_fingerprint"], qa_id=pair["qa_id"],
+                                             payload={"question": pair["question"][:120], "reason": str(error)})
+                    continue
                 if error.after_failure:
                     with assets.connection(path(cfg), write=True) as conn:
                         assets.put_exception(conn, kind="extraction_failed", fingerprint=pair["_fingerprint"], qa_id=pair["qa_id"],

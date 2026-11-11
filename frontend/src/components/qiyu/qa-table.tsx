@@ -54,8 +54,11 @@ function pairTime(value: string) {
 
 export function QATable({ data, onSelect, initialReply, remote, onFiltersChange }: QATableProps) {
   const initialTab: ReplyTab = initialReply ?? (remote?.filters.replied === 'answered' || remote?.filters.replied === 'unanswered' ? remote.filters.replied : 'all')
-  const [query, setQuery] = React.useState('')
-  const [debouncedQuery, setDebouncedQuery] = React.useState('')
+  const filtersKey = remote ? JSON.stringify(remote.filters) : ''
+  const initialQuery = remote?.filters.q || ''
+  const [queryScope, setQueryScope] = React.useState(filtersKey)
+  const [query, setQuery] = React.useState(initialQuery)
+  const [debouncedQuery, setDebouncedQuery] = React.useState(initialQuery.trim())
   const [reply, setReply] = React.useState<ReplyTab>(initialTab)
   const [page, setPage] = React.useState(0)
   const [pageSize, setPageSize] = React.useState(8)
@@ -70,22 +73,26 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
   const requestSequence = React.useRef(0)
   const onFiltersChangeRef = React.useRef(onFiltersChange)
   const isRemote = Boolean(remote)
-  const filtersKey = remote ? JSON.stringify(remote.filters) : ''
   const refreshKey = remote?.refreshKey
+  const currentScope = queryScope === filtersKey
+  const displayQuery = currentScope ? query : initialQuery
+  const serverQuery = currentScope ? debouncedQuery : initialQuery.trim()
+  const requestPage = currentScope ? page : 0
 
   React.useEffect(() => { setReply(initialTab); setPage(0) }, [initialTab])
   React.useEffect(() => {
     if (!filtersKey) return
     const filters = JSON.parse(filtersKey) as ApiFilters
+    setQueryScope(filtersKey)
     setPage(0)
     setQuery(filters.q || '')
-    setDebouncedQuery(filters.q || '')
+    setDebouncedQuery(filters.q?.trim() || '')
     setSelected(new Set())
   }, [filtersKey])
   React.useEffect(() => { setSelected(new Set()) }, [refreshKey])
   React.useEffect(() => { onFiltersChangeRef.current = onFiltersChange }, [onFiltersChange])
   const exportFilterKey = filtersKey ? JSON.stringify({
-    ...JSON.parse(filtersKey), q: query.trim(), replied: reply === 'all' ? '' : reply,
+    ...JSON.parse(filtersKey), q: displayQuery.trim(), replied: reply === 'all' ? '' : reply,
   }) : ''
   React.useEffect(() => {
     if (!exportFilterKey) return
@@ -101,10 +108,10 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
   }, [query, isRemote])
   const requestKey = filtersKey ? JSON.stringify({
     ...JSON.parse(filtersKey),
-    q: debouncedQuery,
+    q: serverQuery,
     replied: reply === 'all' ? '' : reply,
     limit: pageSize,
-    offset: page * pageSize,
+    offset: requestPage * pageSize,
   }) : ''
   React.useEffect(() => {
     if (!requestKey) return
@@ -116,7 +123,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
         if (controller.signal.aborted || sequence !== requestSequence.current) return
         const total = Math.max(0, Number(result.total) || 0)
         const lastPage = Math.max(0, Math.ceil(total / pageSize) - 1)
-        if (page > lastPage) { setPage(lastPage); return }
+        if (requestPage > lastPage) { setPage(lastPage); return }
         setServer({ key: requestKey, rows: (result.items || []).map(normalizePair), total, loading: false, error: null })
       })
       .catch(error => {
@@ -125,7 +132,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
         setServer({ key: requestKey, rows: [], total: null, loading: false, error: error instanceof Error ? error.message : '读取问答失败，请重试。' })
       })
     return () => controller.abort()
-  }, [requestKey, refreshKey, retry, page, pageSize])
+  }, [requestKey, refreshKey, retry, requestPage, pageSize])
   const keywordRows = React.useMemo(() => {
     const value = query.trim().toLocaleLowerCase()
     return value ? data.filter(row => [row.question, row.answer, row.customerName,
@@ -139,11 +146,11 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
   ), [keywordRows, reply])
   const total = isRemote ? server.total ?? 0 : filtered.length
   const pages = Math.max(1, Math.ceil(total / pageSize))
-  const currentPage = isRemote ? page : Math.min(page, pages - 1)
+  const currentPage = isRemote ? requestPage : Math.min(page, pages - 1)
   const pageRows = isRemote ? server.rows : filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize)
   const selectedCount = isRemote ? selected.size : filtered.filter(row => selected.has(row.id)).length
   const selectedOnPage = pageRows.filter(row => selected.has(row.id)).length
-  const pending = isRemote && (server.key !== requestKey || server.loading || query.trim() !== debouncedQuery)
+  const pending = isRemote && (server.key !== requestKey || server.loading || displayQuery.trim() !== serverQuery)
   const failed = isRemote && server.key === requestKey && server.error
   function changeQuery(value: string) { setQuery(value); setPage(0); setSelected(new Set()) }
   function changeReply(value: ReplyTab) { setReply(value); setPage(0); setSelected(new Set()) }
@@ -203,10 +210,10 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="relative w-full max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={query} onChange={event => changeQuery(event.target.value)} maxLength={200}
+          <Input value={displayQuery} onChange={event => changeQuery(event.target.value)} maxLength={200}
             placeholder="搜索问题、回复、客户名称或会话 ID…" aria-label="搜索问答"
             className="h-9 pl-9 pr-9" />
-          {query && <Button variant="ghost" size="icon-xs" className="absolute right-1.5 top-1/2 -translate-y-1/2"
+          {displayQuery && <Button variant="ghost" size="icon-xs" className="absolute right-1.5 top-1/2 -translate-y-1/2"
             onClick={() => changeQuery('')} aria-label="清空搜索"><X /></Button>}
         </div>
         <p className="text-xs text-muted-foreground">{pending ? '正在读取问答…' : failed ? '问答读取失败' : `共 ${total} 条匹配记录 · 点击问题追溯上下文`}</p>

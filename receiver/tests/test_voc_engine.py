@@ -785,8 +785,8 @@ class TestEngine(unittest.TestCase):
         self.seed()
         self.sql("PRAGMA journal_mode=WAL")
         original_scope = engine.voc._scope
-        def concurrent_update(conn, filters):
-            rows = original_scope(conn, filters)
+        def concurrent_update(conn, filters, **kwargs):
+            rows = original_scope(conn, filters, **kwargs)
             changed = "进入安装页面，点击固定底座并保存设置。"
             self.sql("UPDATE qa_pair SET answer=?", (changed,))
             self.sql("UPDATE raw_message SET content=? WHERE role='staff'", (changed,))
@@ -800,6 +800,30 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(first["_origin_fingerprint"], ["test-source-fp", 1])
         self.assertEqual(second["_origin_fingerprint"], ["changed-origin", 2])
         self.assertNotEqual(first["_fingerprint"], second["_fingerprint"])
+
+    def test_source_requires_all_anchors_in_the_same_session_and_expected_roles(self):
+        self.seed(1)
+        self.seed(2)
+        valid = engine._sources(self.cfg, {})[1]
+        self.assertTrue(valid["_staff_verified"])
+        self.assertEqual(engine._sources(self.cfg, {}, only_qa_id=1), {1: valid})
+        qid, aid = valid["question_message_ids"][0], valid["answer_message_ids"][0]
+        examples = [
+            ("session-1", [qid], [aid, "missing-answer"], "source-anchored"),
+            ("session-1", [qid, aid], [aid], "evidence-key-reference"),
+            ("session-1", [qid], [], "source-anchored"),
+            ("session-2", ["source:session-2:question-2"], [aid], "evidence-key-reference"),
+        ]
+        for session, question_ids, answer_ids, expected in examples:
+            with self.subTest(session=session, question_ids=question_ids, answer_ids=answer_ids):
+                self.sql("UPDATE qa_origin SET session_id=?,question_message_ids=?,answer_message_ids=? WHERE qa_id=1",
+                         (session, json.dumps(question_ids), json.dumps(answer_ids)))
+                changed = engine._sources(self.cfg, {}, only_qa_id=1)[1]
+                self.assertEqual(changed["source_kind"], expected)
+                self.assertFalse(changed["_staff_verified"])
+                self.assertEqual(changed["_answer_parts"], [])
+                self.assertNotEqual(changed["_fingerprint"], valid["_fingerprint"])
+        self.assertTrue(engine._sources(self.cfg, {}, only_qa_id=2)[2]["_staff_verified"])
 
     def test_quality_upgrade_hides_old_unsafe_ready_and_recompiles_for_free(self):
         self.seed(question="如何导出完整报表？", answer="管理员可以在控制台页面导出完整报表。")
@@ -830,6 +854,29 @@ class TestEngine(unittest.TestCase):
         self.assertEqual((first["job"]["processed"], first["summary"]["coverage"]["pending_pairs"], first["summary"]["needs_compile"]), (1, 0, 1))
         second = self.run_engine()
         self.assertEqual((second["job"]["calls"], second["summary"]["needs_compile"], second["summary"]["ready_knowledge"]), (0, 0, 1))
+
+    def test_restored_evidence_uses_existing_matching_asset_without_recompile(self):
+        self.seed(1)
+        self.run_engine()
+        original = engine.knowledge(self.cfg, {})["items"][0]
+        self.seed(2)
+        self.run_engine()
+        self.assertNotEqual(engine.knowledge(self.cfg, {})["items"][0]["id"], original["id"])
+        self.sql("DELETE FROM qa_pair WHERE qa_id=2")
+        summary = engine.summary(self.cfg, {})
+        self.assertEqual((summary["ready_knowledge"], summary["needs_compile"]), (1, 0))
+        self.assertEqual(engine.knowledge(self.cfg, {})["items"][0]["id"], original["id"])
+
+    def test_restored_asset_respects_newer_manual_ignore_of_identical_evidence(self):
+        self.seed(1)
+        self.run_engine()
+        with patch("src.voc_quality.VERSION", "quality-version-synthetic"):
+            self.run_engine()
+            changed = engine.knowledge(self.cfg, {})["items"][0]
+            engine.review(self.cfg, kind="knowledge", item_id=changed["id"], status="ignored", revision=changed["revision"])
+        summary = engine.summary(self.cfg, {})
+        self.assertEqual((summary["ready_knowledge"], summary["needs_compile"]), (0, 0))
+        self.assertEqual(engine.knowledge(self.cfg, {})["items"], [])
 
 
 class TestProviderNeutrality(unittest.TestCase):

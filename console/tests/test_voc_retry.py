@@ -87,6 +87,19 @@ class TestExtractionRetry(unittest.TestCase):
         self.assertEqual((len(calls),job['calls'],job['reserved_tokens'],job['failed'],job['skipped']),(1,1,first,0,1))
         self.assertEqual(job['status'],'partial')
 
+    def test_source_exceeding_entire_budget_does_not_starve_a_smaller_source(self):
+        self.seed(1, question='背景补充信息' * 300 + '底座该怎么安装？')
+        self.seed(2)
+        short = engine._sources(self.cfg, {}, only_qa_id=2)[2]
+        limit = output_token_limit(short)
+        budget = len(assets.dump(request_payload(self.cfg.llm, short, [], limit)).encode('utf-8')) + limit
+        result = self.run_engine(limit=2, max_calls=2, max_tokens=budget)
+        job = result['job']
+        self.assertEqual((job['status'], job['processed'], job['skipped'], job['calls']), ('partial', 1, 1, 1))
+        self.assertEqual([source['qa_id'] for source, _ in self.provider.seen], [2])
+        self.assertEqual(result['summary']['coverage']['pending_pairs'], 1)
+        self.assertEqual([item['qa_id'] for item in engine.exceptions(self.cfg, {})['items']], [1])
+
     def test_correction_keeps_quality_gate_and_cannot_create_false_ready(self):
         self.seed(answer='仅管理员可以在控制台页面保存设置。');calls=[]
         def extract(cfg,source,candidates,limit):

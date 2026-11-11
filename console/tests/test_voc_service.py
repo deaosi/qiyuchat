@@ -130,6 +130,17 @@ class TestVocService(LocalFixture):
         self.assertEqual(result['status'],'failed');self.assertNotIn(self.cfg.llm.api_key,result['error'])
         self.assertFalse(S._profile_path(self.cfg,job['id']).exists())
 
+    def test_malformed_saved_request_fails_once_and_releases_queue(self):
+        job=S.start(self.cfg,{}, {},launch=False)['job']
+        profile=S._profile_path(self.cfg,job['id'])
+        with S._db(self.cfg) as db:
+            db.execute("UPDATE voc_service_job SET request_json=? WHERE id=?", ('{broken',job['id']))
+        result=S.execute(self.cfg,job['id'])
+        self.assertEqual(result['status'],'failed')
+        self.assertFalse(profile.exists())
+        self.fake.run.assert_not_called()
+        self.assertEqual(S.start(self.cfg,{}, {},launch=False)['job']['status'],'queued')
+
     def test_hourly_recompiles_changed_quality_without_new_sources(self):
         self.fake.check.return_value={'coverage':{'pending_pairs':0},'needs_compile':2}
         with patch('src.voc_service.load_settings',return_value=self.cfg),patch('src.voc_service.start',return_value={'job':{'id':'synthetic'}}) as start,patch('sys.argv',['voc_service','--hourly']),patch('builtins.print'):
@@ -361,6 +372,16 @@ class TestVocHttp(LocalFixture):
         with patch('src.web.server.voc_assistant.answer',side_effect=reply):
             status,raw=self.call('/api/voc2/assistant?source=local','POST',self.headers(),b'{"message":"test"}')
         self.assertEqual(status,200);self.assertEqual(json.loads(raw)['model'],'synthetic')
+
+    def test_voc_reads_do_not_hold_the_shared_dashboard_database_lock(self):
+        def read(*args):
+            self.assertFalse(DB_LOCK._is_owned())
+            return {"items": [], "total": 0}
+
+        with patch("src.web.server.voc_service.get", side_effect=read):
+            status, raw = self.call("/api/voc2/topics?limit=20", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw), {"items": [], "total": 0})
 
     def test_old_model_run_is_blocked_while_v2_is_active(self):
         with patch('src.web.server.voc_service.busy',return_value=True),patch('src.web.server.voc.handle_post') as old:

@@ -1,11 +1,12 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import QiyuApp from './QiyuApp'
 import type { Evidence, Knowledge } from '@/components/qiyu/voc-next-workspace'
-import type { VocConversationVerification } from '@/lib/api'
+import { downloadExport, type VocConversationVerification } from '@/lib/api'
 
 const query = vi.hoisted(() => vi.fn())
 vi.mock('@/hooks/use-api', () => ({ useApi: query }))
+vi.mock('@/lib/api', async importOriginal => ({ ...await importOriginal<typeof import('@/lib/api')>(), downloadExport: vi.fn().mockResolvedValue(undefined) }))
 
 const topic = {
   id: 'topic-1', question: '为什么保存后没有触发？', theme: '场景未触发', primary_intent: 'functional_anomaly',
@@ -37,6 +38,7 @@ beforeEach(() => {
   query.mockImplementation((endpoint: string, _filters: unknown, _key: number, enabled = true) => ({
     data: !enabled ? null : {
       meta: { total: 3, groups: [], staff: [] },
+      groups: { items: [{ group_name: '测试群', total_questions: 3, customer_count: 2, unanswered: 1, top: [] }] },
       'voc2/summary': { source_pairs: 6, total_events: 5, consultation_count: 3, topic_count: 1, coverage: { processed_pairs: 5, pending_pairs: 1 }, semantics: { ready: true }, latest_job: null },
       'voc2/topics': { items: [topic], total: 1 },
       'voc2/topic': { topic, events: [evidence] },
@@ -100,15 +102,46 @@ describe('VOC navigation', () => {
     expect(query.mock.calls.some(([endpoint]) => endpoint === 'voc2/topics')).toBe(false)
   })
 
-  it('keeps the date and staff scope when leaving chat and drops its private query filters', () => {
-    const params = new URLSearchParams({ days: '30', staff: '测试客服', q: '场景未触发', support_intent: 'functional_anomaly' })
+  it('keeps the visible scope and exports only the current overview table filters', async () => {
+    const readPairs = vi.fn(async (_input: string) => Response.json({ items: [], total: 0 }))
+    vi.stubGlobal('fetch', readPairs)
+    const params = new URLSearchParams({ days: '30', staff: '测试客服', q: '场景未触发', support_intent: 'functional_anomaly', cluster: '12', replied: 'unanswered' })
     window.history.replaceState(null, '', `#voc-chat?${params}`)
     render(<QiyuApp />)
+    const staffFilter = screen.getByRole('combobox', { name: '客服筛选' })
 
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
+    expect(screen.getByRole('combobox', { name: '客服筛选' })).toBe(staffFilter)
     const request = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/knowledge')
     expect(request?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
     expect(request?.[1]).not.toHaveProperty('q')
     expect(request?.[1]).not.toHaveProperty('support_intent')
+
+    fireEvent.click(screen.getByRole('button', { name: '会话概览' }))
+    const summary = query.mock.calls.find(([endpoint, , , enabled]) => endpoint === 'summary' && enabled)?.[1]
+    expect(summary).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
+    for (const field of ['q', 'support_intent', 'cluster', 'replied']) expect(summary).not.toHaveProperty(field)
+    const pairsParams = new URL(readPairs.mock.calls[0][0], location.origin).searchParams
+    for (const field of ['q', 'support_intent', 'cluster', 'replied']) expect(pairsParams.has(field)).toBe(false)
+    await screen.findByText(/共 0 条匹配记录/)
+
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索问答' }), { target: { value: '权限' } })
+    fireEvent.mouseDown(screen.getByRole('tab', { name: '有回复' }), { button: 0 })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '导出脱敏问答' })))
+    expect(downloadExport).toHaveBeenCalledWith(expect.objectContaining({ days: 30, staff: '测试客服', q: '权限', replied: 'answered' }))
+  })
+
+  it('clears an unrelated drill when browser navigation reopens the plain details route', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ items: [], total: 0 })))
+    window.history.replaceState(null, '', '#groups')
+    render(<QiyuApp />)
+    fireEvent.click(screen.getByRole('button', { name: '测试群' }))
+    expect(screen.getByText('限定条件')).toBeTruthy()
+
+    act(() => { window.history.replaceState(null, '', '#overview'); window.dispatchEvent(new PopStateEvent('popstate')) })
+    act(() => { window.history.replaceState(null, '', '#pairs'); window.dispatchEvent(new PopStateEvent('popstate')) })
+    expect(screen.getByRole('heading', { name: '问答明细' })).toBeTruthy()
+    expect(screen.queryByText('限定条件')).toBeNull()
+    await screen.findByText(/共 0 条匹配记录/)
   })
 })

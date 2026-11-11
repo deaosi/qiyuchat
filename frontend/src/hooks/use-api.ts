@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiGet, type ApiFilters } from '@/lib/api'
 
 /** A query never keeps rows from another source or filter scope on screen. */
@@ -17,10 +17,13 @@ export function useApi<T>(name: string, filters: ApiFilters, refreshKey = 0, ena
     if (!enabled) return () => controller.abort()
     // Revalidation keeps the mounted view. A different endpoint/filter scope
     // still hides the previous rows immediately, before the effect runs.
-    setState(previous => ({ key: scopeKey, data: previous.key === scopeKey ? previous.data : null, loading: true, error: null }))
-    apiGet<T>(name, JSON.parse(key) as ApiFilters, controller.signal, { background: latest.current.key === scopeKey && latest.current.data !== null })
+    const revalidating = latest.current.key === scopeKey
+    if (revalidating) setState(previous => previous.key === scopeKey ? { ...previous, loading: true, error: null } : previous)
+    apiGet<T>(name, JSON.parse(key) as ApiFilters, controller.signal, { background: revalidating && latest.current.data !== null })
       .then(data => {
-        if (current === revision.current && !controller.signal.aborted) setState({ key: scopeKey, data, loading: false, error: null })
+        if (current === revision.current && !controller.signal.aborted) {
+          startTransition(() => setState({ key: scopeKey, data, loading: false, error: null }))
+        }
       })
       .catch((error: unknown) => {
         const invalidated = error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429

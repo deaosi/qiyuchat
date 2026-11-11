@@ -155,6 +155,8 @@
 
 @keyframes qiyu-enter { from { opacity: .35; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 .qiyu-page-enter { animation: qiyu-enter .18s ease-out; }
+@keyframes qiyu-fade { from { opacity: .72; } to { opacity: 1; } }
+.qiyu-page-title, .qiyu-chart-enter { animation: qiyu-fade .15s ease-out; }
 @keyframes voc-chat-arrive { from { opacity: .45; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 .voc-chat-message { animation: voc-chat-arrive .22s ease-out; }
 .voc-chat-suggestion { transition: color .18s ease-out, transform .18s ease-out; }
@@ -162,19 +164,15 @@
 .voc-chat-composer { transition: border-color .18s ease-out, box-shadow .18s ease-out; }
 .voc-chat-composer:focus-within { border-color: color-mix(in oklch, var(--foreground) 35%, var(--input)); box-shadow: 0 0 0 3px color-mix(in oklch, var(--foreground) 5%, transparent); }
 .voc-chat-disclosure[open] > div { animation: qiyu-enter .16s ease-out; }
-@keyframes qiyu-skeleton { to { background-position: -200% 0; } }
+@keyframes qiyu-skeleton-pulse { 50% { opacity: .62; } }
 @keyframes qiyu-loading-turn { to { transform: rotate(360deg); } }
 @keyframes qiyu-request-travel { from { transform: translateX(-105%); } to { transform: translateX(405%); } }
-.qiyu-skeleton {
-  background-color: var(--muted);
-  background-image: linear-gradient(105deg, transparent 25%, color-mix(in oklch, var(--foreground) 6%, transparent) 45%, transparent 65%);
-  background-size: 200% 100%;
-  animation: qiyu-skeleton 1.6s ease-in-out infinite;
-}
-.qiyu-loading-mark { border: 1.5px solid color-mix(in oklch, var(--foreground) 15%, transparent); border-top-color: var(--foreground); border-radius: 50%; animation: qiyu-loading-turn .8s linear infinite; }
+.qiyu-skeleton { background-color: var(--muted); }
+.qiyu-skeleton-pulse { animation: qiyu-skeleton-pulse 1.4s ease-in-out .12s infinite; }
+.qiyu-loading-mark { border: 1.5px solid color-mix(in oklch, var(--foreground) 15%, transparent); border-top-color: var(--foreground); border-radius: 50%; animation: qiyu-loading-turn .8s linear .12s infinite; }
 .qiyu-request-progress { opacity: 0; background: color-mix(in oklch, var(--foreground) 5%, transparent); transition: opacity .15s ease; }
 .qiyu-request-progress[data-visible="true"] { opacity: 1; }
-.qiyu-request-progress-line { background: linear-gradient(90deg, transparent, var(--foreground), transparent); animation: qiyu-request-travel 1.15s ease-in-out infinite; animation-play-state: paused; }
+.qiyu-request-progress-line { background: linear-gradient(90deg, transparent, var(--foreground), transparent); animation: qiyu-request-travel 1.15s linear infinite; animation-play-state: paused; }
 .qiyu-request-progress[data-visible="true"] .qiyu-request-progress-line { animation-play-state: running; }
 [data-slot="tabs-content"][data-state="active"] { animation: qiyu-enter .18s ease-out; }
 [data-density="compact"] [data-slot="table-cell"] { padding-top: .5rem; padding-bottom: .5rem; }
@@ -189,7 +187,7 @@
   background-image: linear-gradient(180deg, var(--sidebar) 0%, color-mix(in oklch, var(--sidebar) 97%, var(--foreground) 3%) 100%);
 }
 [data-slot="sidebar-menu-button"] {
-  transition-property: width, height, padding, background-color, color, box-shadow;
+  transition-property: background-color, color;
   transition-duration: .15s;
   transition-timing-function: ease-out;
 }

@@ -188,10 +188,14 @@ def _bounds(filters: dict[str, Any]) -> tuple[int, int]:
     high = int(datetime.combine(last + timedelta(days=1), datetime.min.time()).timestamp() * 1000) if last else 0
     return low, high
 
-def _scope(conn: sqlite3.Connection, filters: dict[str, Any]) -> dict[int, dict[str, Any]]:
+def _scope(conn: sqlite3.Connection, filters: dict[str, Any], *, qa_id: int | None = None,
+           include_messages: bool = True) -> dict[int, dict[str, Any]]:
     low, high = _bounds(filters)
     try:
-        raw_rows = conn.execute("SELECT * FROM qa_pair ORDER BY asked_at DESC,qa_id DESC").fetchall()
+        if qa_id is None:
+            raw_rows = conn.execute("SELECT * FROM qa_pair ORDER BY asked_at DESC,qa_id DESC").fetchall()
+        else:
+            raw_rows = conn.execute("SELECT * FROM qa_pair WHERE qa_id=?", (qa_id,)).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return {}
@@ -225,6 +229,9 @@ def _scope(conn: sqlite3.Connection, filters: dict[str, Any]) -> dict[int, dict[
             continue
         query = str(filters.get("q") or "").casefold()
         if query and query not in " ".join(str(public[k]) for k in ("question", "answer", "customer_name", "session_id")).casefold():
+            continue
+        if not include_messages:
+            out[public["qa_id"]] = public
             continue
         if sid not in context_cache:
             try:
