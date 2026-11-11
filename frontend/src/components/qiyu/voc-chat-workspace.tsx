@@ -1,28 +1,37 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import { ArrowDown, ArrowUp, Check, Copy, History, Square, SquarePen, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { type ApiFilters, type GatewayConfig } from '@/lib/api'
 import { chatScopeKey, chatScopeLabel, citationFilters, getVocChatStore, type ChatCitation, type ChatMessage, type ChatThread, type VocChatStore } from '@/lib/voc-chat'
 import { Button } from '@/components/ui/button'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { VocSourceInspector } from './voc-source-inspector'
 import { LoadingMark, LoadingState } from './loading-state'
 
 type Selection = { threadId: string; citation: ChatCitation; message: ChatMessage; filters: ApiFilters }
+type Preset = { prompt: string; keywords: string[] }
 const draftLimit = 2000
-const suggestions = [
-  '当前范围的高频咨询有哪些？',
-  '客服通常怎么回复场景未触发的问题？',
-  '哪些答案已通过会话验证，可以直接复用？',
+const suggestions: Preset[] = [
+  { prompt: '当前范围的高频咨询有哪些？', keywords: ['高频问题', '高频咨询', '查高频'] },
+  { prompt: '客服通常怎么回复场景未触发的问题？', keywords: ['话术', '客服回复', '接待答复', '场景未触发'] },
+  { prompt: '哪些答案已通过会话验证，可以直接复用？', keywords: ['知识库', '可复用答案', '验证结果'] },
+  { prompt: '机器人不回复时应先检查哪些设置？请附上案例依据。', keywords: ['排查', '机器人不回复', '功能异常'] },
 ]
-const topicSuggestions = [
-  '这个问题怎么排查？给出适用条件和来源。',
-  '这个问题有哪些可以直接复用的客服答复？',
-  '只给数字，比较这个问题本期和上期的咨询量。',
+const topicSuggestions: Preset[] = [
+  { prompt: '这个问题怎么排查？给出适用条件和来源。', keywords: ['排查', '排查依据'] },
+  { prompt: '这个问题有哪些可以直接复用的客服答复？', keywords: ['话术', '客服回复', '知识库', '可复用答案'] },
+  { prompt: '只给数字，比较这个问题本期和上期的咨询量。', keywords: ['趋势', '对比', '咨询量', '高频问题'] },
 ]
+
+function matchPreset(draft: string, presets: Preset[]) {
+  const prefix = draft.trim()
+  if (prefix.length < 2 || /[\r\n]/.test(draft) || presets.some(({ prompt }) => prompt === prefix)) return
+  const matches = presets.filter(({ prompt, keywords }) => prompt.startsWith(prefix) || keywords.some(word => word.startsWith(prefix)))
+  if (matches.length === 1) return matches[0].prompt
+}
+
 const timestamp = (value: number) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value)
 
 export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store = getVocChatStore() }: { filters: ApiFilters; refreshKey?: number; onScopeChange: (filters: ApiFilters) => void; store?: VocChatStore }) {
@@ -37,13 +46,16 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
   const [deleting, setDeleting] = useState<ChatThread | null>(null)
   const [atBottom, setAtBottom] = useState(true)
   const [copied, setCopied] = useState('')
+  const [dismissedCompletion, setDismissedCompletion] = useState<{ threadId: string; draft: string } | null>(null)
   const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null), previousThread = useRef('')
   const nearBottom = useRef(true)
-  const focusAfterPreset = useRef(false)
+  const completionId = useId()
   const gateway = useApi<GatewayConfig>('gateway/config', { source: 'local' }, refreshKey)
   const focus = useApi<{ topic: { question: string } }>('voc2/topic', { ...filters, id: filters.focus_topic }, refreshKey, Boolean(filters.focus_topic))
   const topicTitle = filters.focus_topic ? focus.data?.topic.question || '当前问题' : ''
   const presets = filters.focus_topic ? topicSuggestions : suggestions
+  const completionDismissed = current && dismissedCompletion?.threadId === current.id && dismissedCompletion.draft === current.draft
+  const completion = current && !pending && !completionDismissed ? matchPreset(current.draft, presets) : undefined
 
   useEffect(() => { store.ensureScope(filters) }, [scopeKey, store])
   useEffect(() => { setSelection(null) }, [state.activeId])
@@ -83,6 +95,11 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
     }
     store.setDraft(current.id, draft)
   }
+  function acceptCompletion() {
+    if (!current || !completion) return
+    store.setDraft(current.id, completion)
+    input.current?.focus()
+  }
   function openSource(citation: ChatCitation, message: ChatMessage) {
     if (!current) return
     setSelection({ threadId: current.id, citation, message, filters: citationFilters(current.filters, message.queryFilters) })
@@ -114,7 +131,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
         {!current ? <LoadingState label="正在打开对话…" className="mx-auto h-full max-w-3xl px-6 md:px-10" /> : current.messages.length === 0 ? <div key={current.id} className="qiyu-page-enter mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-6 py-8 md:px-10">
           <h3 className="text-xl font-semibold tracking-tight">{topicTitle || '想了解哪些客户咨询？'}</h3>
           <p className="mt-3 text-sm leading-7 text-muted-foreground">{topicTitle ? chatScopeLabel(filters) : '查询高频问题、接待回复与知识依据。'}</p>
-          <div className="mt-5 max-w-xl">{presets.map(query => <button key={query} onClick={() => { fillPreset(query); input.current?.focus() }} className="voc-chat-suggestion block w-full rounded-md py-2.5 text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{query}</button>)}</div>
+          <div className="mt-5 max-w-xl">{presets.slice(0, 3).map(({ prompt }) => <button key={prompt} onClick={() => { fillPreset(prompt); input.current?.focus() }} className="voc-chat-suggestion block w-full rounded-md py-2.5 text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{prompt}</button>)}</div>
         </div> : <div key={current.id} className="qiyu-page-enter mx-auto w-full max-w-3xl space-y-8 px-5 py-8 md:px-9" role="log" aria-label="对话内容" aria-live="polite">
           {current.messages.map(message => <article key={message.id} className={`voc-chat-message ${message.role === 'user' ? 'flex justify-end' : 'space-y-3'}`}>
             {message.role === 'user' ? <p className="max-w-[88%] whitespace-pre-wrap break-words rounded-lg bg-muted/70 px-4 py-3 text-sm leading-7">{message.content}</p> : <>
@@ -132,30 +149,31 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
         {state.storageWarning && <p role="status" className="mb-2 text-xs text-muted-foreground">本窗口暂时无法保存聊天历史，刷新后可能无法恢复当前对话。</p>}
         {current?.error && <p role="alert" className="mb-2 text-sm text-destructive">{current.error}</p>}
         <form onSubmit={event => { event.preventDefault(); send() }} className="voc-chat-composer rounded-lg border border-input bg-background/75 p-3">
-          <textarea ref={input} rows={2} aria-label="向语海Voc提问" placeholder="询问高频问题、接待答复或排查依据…" maxLength={draftLimit} value={current?.draft || ''} disabled={!current || pending} onChange={event => current && store.setDraft(current.id, event.target.value)} onKeyDown={event => {
-            if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
+          <textarea ref={input} rows={2} aria-label="向语海Voc提问" aria-describedby={completion ? completionId : undefined} placeholder="输入问题，或用「高频」「排查」补全预设话术…" maxLength={draftLimit} value={current?.draft || ''} disabled={!current || pending} onChange={event => {
+            if (!current) return
+            setDismissedCompletion(null)
+            store.setDraft(current.id, event.target.value)
+          }} onKeyDown={event => {
+            if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
+            if (event.key === 'Escape' && completion && current) {
+              event.preventDefault()
+              setDismissedCompletion({ threadId: current.id, draft: current.draft })
+              return
+            }
+            if (event.key !== 'Enter' || event.shiftKey) return
             event.preventDefault()
-            if (!event.repeat) send()
+            if (event.repeat) return
+            if (completion) acceptCompletion()
+            else send()
           }} className="block min-h-14 max-h-40 w-full resize-none bg-transparent px-1 py-1 text-sm leading-6 outline-none placeholder:text-muted-foreground/70 disabled:opacity-60" />
+          <div id={completionId} aria-live="polite">
+            {completion && <button type="button" onClick={acceptCompletion} className="mt-1 flex w-full items-center justify-between gap-3 rounded-md bg-muted/55 px-2 py-1.5 text-left text-xs leading-5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring">
+              <span>{completion}</span><span className="shrink-0 text-[10px]">Enter 补全</span>
+            </button>}
+          </div>
           <div className="mt-2 flex items-center gap-2 sm:gap-3">
             <span className="min-w-0 max-w-[40%] truncate px-1 py-1 text-[11px] text-muted-foreground" title={gateway.data?.model ? `当前网关模型：${gateway.data.model}` : undefined}>{gateway.data?.model || (gateway.loading ? '正在读取模型' : '使用已配置模型')}</span>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button type="button" variant="ghost" size="sm" disabled={!current || pending} className="h-7 shrink-0 px-2 text-xs text-muted-foreground">预设话术</Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" sideOffset={8} className="max-w-[calc(100vw-2rem)]" onCloseAutoFocus={event => {
-                if (!focusAfterPreset.current) return
-                focusAfterPreset.current = false
-                event.preventDefault()
-                input.current?.focus()
-              }}>
-                {presets.map(prompt => <DropdownMenuItem key={prompt} onSelect={() => {
-                  focusAfterPreset.current = true
-                  fillPreset(prompt)
-                }} className="cursor-pointer px-3 py-2 leading-5">{prompt}</DropdownMenuItem>)}
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/70 sm:inline">Enter 发送 · Shift+Enter 换行</span>
+            <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/70 sm:inline">{completion ? 'Esc 取消补全' : 'Enter 发送'} · Shift+Enter 换行</span>
             {pending ? <Button type="button" size="icon-sm" className="ml-auto shrink-0 sm:ml-0" aria-label="停止等待" title="停止等待" onClick={() => current && store.stop(current.id)}><Square className="size-3.5 fill-current" /></Button> : <Button type="submit" size="icon-sm" className="ml-auto shrink-0 rounded-lg sm:ml-0" aria-label="发送问题" disabled={!current?.draft.trim()}><ArrowUp className="size-4" /></Button>}
           </div>
         </form>

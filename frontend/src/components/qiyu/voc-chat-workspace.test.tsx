@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ApiFilters } from '@/lib/api'
 import { createChatStore, type ChatAnswer } from '@/lib/voc-chat'
@@ -18,27 +18,20 @@ function setup(filters: ApiFilters) {
   return { transport, input: screen.getByRole<HTMLTextAreaElement>('textbox', { name: '向语海Voc提问' }) }
 }
 
-async function openPresets() {
-  const trigger = screen.getByRole('button', { name: '预设话术' })
-  trigger.focus()
-  fireEvent.keyDown(trigger, { key: 'Enter' })
-  const items = await screen.findAllByRole('menuitem')
-  await waitFor(() => expect(document.activeElement).toBe(items[0]))
-  return items
-}
-
-it('selects a preset with the keyboard, focuses the draft, and only sends on a fresh Enter', async () => {
+it('completes a typed keyword in place and only sends on a fresh Enter', async () => {
   const { transport, input } = setup({ source: 'local', days: 7 })
-  const [, replyPrompt] = await openPresets()
-  fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' })
-  await waitFor(() => expect(document.activeElement).toBe(replyPrompt))
-  fireEvent.keyDown(replyPrompt, { key: 'Enter' })
+  input.focus()
+  fireEvent.change(input, { target: { value: '话术' } })
+  expect(screen.getByRole('button', { name: /客服通常怎么回复场景未触发的问题.*Enter 补全/ })).toBeTruthy()
 
-  await waitFor(() => expect(document.activeElement).toBe(input))
-  expect(input.value).toBe('客服通常怎么回复场景未触发的问题？')
-  fireEvent.keyDown(input, { key: 'Enter', repeat: true })
   fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
   fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+  expect(input.value).toBe('话术')
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(input.value).toBe('客服通常怎么回复场景未触发的问题？')
+  expect(document.activeElement).toBe(input)
+  expect(screen.queryByText('Enter 补全')).toBeNull()
+  fireEvent.keyDown(input, { key: 'Enter', repeat: true })
   expect(transport).not.toHaveBeenCalled()
 
   fireEvent.change(input, { target: { value: '补充平台范围：' + input.value } })
@@ -46,16 +39,25 @@ it('selects a preset with the keyboard, focuses the draft, and only sends on a f
   expect(transport).toHaveBeenCalledTimes(1)
   expect(transport.mock.calls[0][1].message).toBe('补充平台范围：客服通常怎么回复场景未触发的问题？')
   await screen.findByText('示例答复')
-  expect(screen.getByRole('button', { name: '预设话术' })).toBeTruthy()
+  fireEvent.change(input, { target: { value: '高频' } })
+  expect(screen.getByRole('button', { name: /当前范围的高频咨询有哪些.*Enter 补全/ })).toBeTruthy()
 })
 
-it('offers topic-specific presets without replacing an existing draft', async () => {
+it('uses topic-specific completions and lets Escape dismiss a suggestion for the current draft', async () => {
   const { transport, input } = setup({ source: 'local', days: 7, focus_topic: 't_' + 'a'.repeat(24) })
-  fireEvent.change(input, { target: { value: '只看抖音的咨询。' } })
-  const [diagnose] = await openPresets()
-  fireEvent.keyDown(diagnose, { key: 'Enter' })
+  fireEvent.change(input, { target: { value: '这个问题' } })
+  expect(screen.queryByText('Enter 补全')).toBeNull()
 
-  await waitFor(() => expect(document.activeElement).toBe(input))
-  expect(input.value).toBe('只看抖音的咨询。\n这个问题怎么排查？给出适用条件和来源。')
+  fireEvent.change(input, { target: { value: '这个问题怎么' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(input.value).toBe('这个问题怎么排查？给出适用条件和来源。')
   expect(transport).not.toHaveBeenCalled()
+
+  fireEvent.change(input, { target: { value: '排查' } })
+  expect(screen.getByRole('button', { name: /这个问题怎么排查.*Enter 补全/ })).toBeTruthy()
+  fireEvent.keyDown(input, { key: 'Escape' })
+  expect(screen.queryByText('Enter 补全')).toBeNull()
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(transport.mock.calls[0][1].message).toBe('排查')
+  await screen.findByText('示例答复')
 })
