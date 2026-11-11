@@ -330,3 +330,26 @@ Missing/changed citations withhold reuse. Feedback changes are re-evaluated at
 read time without changing extraction cache identity. This conservative first
 version leaves unbound language unknown; it is conversation evidence, not a
 claim of universal product truth or perfect natural-language classification.
+
+## Multi-turn VOC replay
+
+`voc_episode_replay` samples completed official sessions by session end date and
+rechecks their source snapshots. Each run groups the messages of one verified
+visitor segment, masks source identifiers, display names, links and existing PII
+patterns, and outputs aggregate counts. The current comparison is restricted to
+the same successfully replayed source segments and their active question anchors.
+
+```sh
+python -m src.voc_episode_replay --days 7 --limit 12 --require-staff
+python -m src.voc_episode_replay --days 7 --limit 12 --require-staff \
+  --with-existing-topics --execute --max-calls 3
+```
+
+The first command inspects coverage without inference. `--execute` uses the
+configured gateway and existing local BGE embeddings. `--reranker /local/model`
+enables an optional locally cached cross-encoder for candidate pairs. The report
+includes the cohort digest, completed and rejected segments, old and new topic
+counts, and case-level evidence grades. Topic IDs are reproducible within a
+fixed cohort. Replays run outside the dashboard worker and do not publish their
+results. Case success records an observed result tied to one action in one
+episode. Promotion to reusable knowledge requires separate release evaluation.
