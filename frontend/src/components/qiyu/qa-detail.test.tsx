@@ -40,17 +40,19 @@ function deferred<T>() {
 describe('embedded case conversation details', () => {
   const noStaffNotice = '这段已保存的会话记录中没有客服消息。'
 
-  it('renders all retained messages with roles, original time and question without a second dialog', async () => {
+  it('keeps the original question only in the timeline with all messages, roles and timestamps', async () => {
     const messages = Array.from({ length: 260 }, (_, index) => message(index))
+    messages[0] = { ...messages[0], content: '案例21完整客户原问题' }
     messages[259] = { ...messages[259], source_message_id: '', is_question: true }
     vi.mocked(apiGet).mockResolvedValue(response('21', messages, { availability: 'available', can_lookup_replies: true }))
     render(<QADetail pair={pair()} embedded onClose={vi.fn()} />)
 
     await screen.findByText('完整消息259')
     expect(screen.queryByRole('dialog')).toBeNull()
-    expect(screen.getByText('案例21完整客户原问题')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: '客户原问题' })).toBeNull()
     expect(screen.getByText('2026-11-11 09:00:11', { selector: 'dd' })).toBeTruthy()
     const transcript = screen.getByRole('list', { name: '会话消息' })
+    expect(screen.getByText('案例21完整客户原问题')).toBe(within(transcript).getByText('案例21完整客户原问题'))
     expect(within(transcript).getAllByRole('listitem')).toHaveLength(260)
     expect(within(transcript).getAllByText('客户 · 合成客户')).toHaveLength(130)
     expect(within(transcript).getAllByText('客服 · 合成客服')).toHaveLength(130)
@@ -69,6 +71,7 @@ describe('embedded case conversation details', () => {
     expect(await screen.findByRole('dialog', { name: '问答与相关会话上下文' })).toBeTruthy()
     expect(screen.getByText('归一化问题')).toBeTruthy()
     expect(screen.getByRole('heading', { name: '客服回复' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: '客户原问题' })).toBeNull()
     expect(apiPost).not.toHaveBeenCalled()
   })
 
@@ -87,7 +90,7 @@ describe('embedded case conversation details', () => {
     await act(async () => { oldRequest.resolve(response('22', [message(0, '迟到的其他案例记录')])) })
     expect(screen.getByText('当前案例记录')).toBeTruthy()
     expect(screen.queryByText('迟到的其他案例记录')).toBeNull()
-    expect(screen.getByText('案例23完整客户原问题')).toBeTruthy()
+    expect(screen.getByText('session-23')).toBeTruthy()
     expect(vi.mocked(apiGet).mock.calls[1][2]?.aborted).toBe(true)
   })
 
@@ -117,7 +120,9 @@ describe('embedded case conversation details', () => {
     expect(screen.getByText(first.content)).toBeTruthy()
     expect(apiPost).toHaveBeenCalledWith('detail/replies', { source: 'local', id: '21' }, undefined, undefined, expect.any(AbortSignal))
     await act(async () => {
-      lookup.resolve({ status: 'found', messages: [officialReply(2, '补取的同一时刻回复'), officialReply(1, '补取的第一条回复')] })
+      lookup.resolve({ status: 'found', messages: [officialReply(2, '补取的同一时刻回复'), {
+        ...officialReply(1, '补取的第一条回复'), images: [{ url: 'https://ysf.nosdn.127.net/official-reply.png' }],
+      }] })
     })
     expect(screen.getByText('已补充七鱼返回的人工客服回复。')).toBeTruthy()
     expect(screen.getByText(next.content)).toBe(saved)
@@ -126,7 +131,33 @@ describe('embedded case conversation details', () => {
     expect(bodies).toEqual([first.content, '补取的第一条回复', next.content, sameTime.content, '补取的同一时刻回复'])
     expect(within(transcript).getAllByText('人工客服')).toHaveLength(2)
     expect(within(transcript).getByText('2026-11-11 09:00:01')).toBeTruthy()
+    expect(within(transcript).getByAltText('会话图片').getAttribute('src')).toBe('https://ysf.nosdn.127.net/official-reply.png')
     expect(screen.queryByText(noStaffNotice)).toBeNull()
+  })
+
+  it('renders inline attachments, supports enlargement and keeps readable text when an image fails', async () => {
+    const url = 'https://ysf.nosdn.127.net/customer-photo.png'
+    const messages = [
+      { ...message(0, '[图片]'), images: [{ url }] },
+      { ...message(1, '请看客服发来的截图。'), images: [{ url: 'https://ysf.nosdn.127.net/staff-photo.png' }] },
+    ]
+    vi.mocked(apiGet).mockResolvedValue(response('21', messages))
+    render(<QADetail pair={pair()} embedded onClose={vi.fn()} />)
+
+    const [thumbnail] = await screen.findAllByRole('button', { name: '放大会话图片' })
+    const firstImage = within(thumbnail).getByAltText('会话图片')
+    expect(firstImage.getAttribute('src')).toBe(url)
+    expect(firstImage.getAttribute('referrerpolicy')).toBe('no-referrer')
+    expect(screen.queryByText('[图片]')).toBeNull()
+    fireEvent.click(thumbnail)
+    expect(screen.getByRole('button', { name: '缩小会话图片' }).getAttribute('aria-expanded')).toBe('true')
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '缩小会话图片' }))
+    const [, secondImage] = screen.getAllByAltText('会话图片')
+    fireEvent.error(secondImage)
+    expect(screen.getByText('图片暂不可查看')).toBeTruthy()
+    expect(screen.getByText('请看客服发来的截图。')).toBeTruthy()
+    expect(screen.getAllByAltText('会话图片')).toHaveLength(1)
   })
 
   it('aborts an old case lookup and ignores late replies after switching cases', async () => {

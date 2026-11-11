@@ -78,6 +78,15 @@ class TestOutcome(unittest.TestCase):
         self.assertTrue(result["auto_reusable"])
         self.assertEqual((result["acceptance"],result["effect"]),("understood","not_established"))
 
+    def test_automated_reply_cannot_be_certified_as_human_knowledge(self):
+        def mark_automated(messages, _metadata):
+            messages[1]["autoReply"] = 1
+
+        row = self.seed([(1, "明白了，谢谢。")], changes=mark_automated)
+        result = O.evaluate(self.cfg, [row])
+        self.assertFalse(result["auto_reusable"])
+        self.assertIn("incomplete_source_coverage", result["reason_codes"])
+
     def test_hopes_guesses_conditions_and_future_attempts_are_not_success(self):
         for index,text in enumerate(("希望这下可以了","应该可以了","那我试试应该可以了","如果恢复了就好了","等会试试","准备试一下","现在正常了吗")):
             with self.subTest(text=text):

@@ -16,9 +16,9 @@ from ..clean.rules import mask_pii
 from ..config import Settings, settings
 from ..extract.concepts import concept_signature
 from ..extract.identity import HIDDEN_ROLES, SOURCE_IDENTITY_ROLE, sender_context
-from ..extract.text import _attachment, _structured, clean_visible_text
+from ..extract.text import clean_visible_text
 from ..local import csv_bytes
-from . import case_replies
+from . import case_media, case_replies
 
 try:
     _DETAIL_ZONE = ZoneInfo('Asia/Shanghai')
@@ -217,50 +217,9 @@ def _detail_time(value: Any) -> tuple[int, str]:
         return 0, '时间未知'
 
 
-def _media_kinds(value: Any, depth: int = 0) -> list[str]:
-    if depth > 8:
-        return []
-    if isinstance(value, str):
-        try:
-            return _media_kinds(json.loads(value), depth + 1)
-        except (ValueError, RecursionError):
-            return []
-    if isinstance(value, list):
-        return [kind for item in value for kind in _media_kinds(item, depth + 1)]
-    if not isinstance(value, dict):
-        return []
-    keys = {str(key).lower(): item for key, item in value.items()}
-    if _attachment(value):
-        kind = str(keys.get('type') or keys.get('msgtype') or '').lower()
-        mime = str(keys.get('mimetype') or keys.get('mime') or keys.get('contenttype') or '').lower()
-        image = kind in ('image', 'picture', 'photo') or mime.startswith('image/')
-        if not kind and not mime:
-            suffixes = [str(keys.get(name) or '').lower().split('?', 1)[0].rsplit('.', 1)[-1]
-                        for name in ('ext', 'url', 'downloadurl', 'name', 'filename')]
-            image = any(ext in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'heic', 'avif') for ext in suffixes)
-        return ['image' if image else 'attachment']
-    return [kind for key in ('attach', 'attachment', 'attachments')
-            for kind in _media_kinds(keys.get(key), depth + 1)]
-
-
 def _detail_content(value: Any) -> str:
-    raw = str(value or '')
-    content = clean_visible_text(raw)
-    if content:
-        return mask_pii(content)
-    # Only a recognized, text-empty media object gets a placeholder. Ordinary
-    # customer JSON remains ordinary text; transport/identity rows stay hidden.
-    try:
-        payload = json.loads(raw)
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        recognized, _text = _structured(payload)
-        kinds = _media_kinds(payload) if recognized else []
-        if kinds:
-            return '[图片]' if all(kind == 'image' for kind in kinds) else '[附件]'
-    except (ValueError, TypeError, RecursionError):
-        pass
-    return ''
+    content, _ = case_media.project(value)
+    return mask_pii(content)
 
 
 def _detail_origin(db: Any, raw: dict[str, Any]) -> tuple[set[str], set[str], bool]:
@@ -322,8 +281,12 @@ def case_reply_response(result: dict[str, Any]) -> dict[str, Any]:
         content = _detail_content(message["content"])
         if content:
             stamp, display_time = _detail_time(message["ts"])
-            messages.append({"role": "staff", "content": content, "time": display_time, "ts": stamp,
-                             "source_message_id": message["source_message_id"], "is_question": False, "is_answer": False})
+            public = {"role": "staff", "content": content, "time": display_time, "ts": stamp,
+                      "source_message_id": message["source_message_id"], "is_question": False, "is_answer": False}
+            images = case_media.safe_images(message.get("images"))
+            if images:
+                public["images"] = images
+            messages.append(public)
     status = "unmatched" if result["status"] == "found" and not messages else result["status"]
     return {"status": status, "messages": messages}
 
@@ -343,14 +306,17 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
     for message in sender_context(messages, raw["session_id"], str(raw.get("customer_id") or "")):
         if message['role'] in HIDDEN_ROLES:
             continue
-        content = _detail_content(message['content'])
+        content, images = case_media.project(message['content'])
         if content:
             stamp, display_time = _detail_time(message.get('ts'))
             source_id = str(message.get('source_message_id') or '')
-            visible_messages.append({'role': message['role'], 'content': content, 'time': display_time,
-                                     'ts': stamp, 'source_message_id': source_id,
-                                     'is_question': message['role'] == 'user' and source_id in question_ids,
-                                     'is_answer': message['role'] == 'staff' and source_id in answer_ids})
+            public = {'role': message['role'], 'content': mask_pii(content), 'time': display_time,
+                      'ts': stamp, 'source_message_id': source_id,
+                      'is_question': message['role'] == 'user' and source_id in question_ids,
+                      'is_answer': message['role'] == 'staff' and source_id in answer_ids}
+            if images:
+                public['images'] = images
+            visible_messages.append(public)
     archived = not bool(messages)
     availability = 'archived' if archived else 'empty' if not visible_messages else 'partial' if partial else 'available'
     roles = {message["role"] for message in visible_messages}

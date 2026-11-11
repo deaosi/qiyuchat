@@ -119,6 +119,48 @@ class CaseContext(unittest.TestCase):
         self.assertNotIn('example.invalid', str(result))
         self.assertNotIn('private.jpg', str(result))
 
+    def test_cdn_images_keep_the_original_message_time_text_and_order(self):
+        identity = self.pair()
+        first_url = 'https://ysf.nosdn.127.net/synthetic-photo.jpg?imageView'
+        second_url = 'https://ysf.nosdn.127.net/synthetic-steps.png'
+        first = {'ext': 'jpg', 'size': 42, 'name': 'internal-name.jpg', 'url': first_url}
+        second = {'type': 'image', 'url': second_url, 'caption': '第二张是权限设置'}
+        mixed = '这是店铺首页 ' + json.dumps(first) + json.dumps({'attach': second}, ensure_ascii=False)
+        rows = [{'role': 'user', 'content': json.dumps(json.dumps(first)), 'ts': 1},
+                {'role': 'staff', 'content': mixed, 'ts': 2}]
+        self.messages(rows)
+        messages = self.detail(identity)['messages']
+        self.assertEqual([(m['role'], m['ts']) for m in messages], [('user', 1), ('staff', 2)])
+        self.assertEqual(messages[0]['content'], '[图片]')
+        self.assertEqual(messages[0]['images'], [{'url': first_url}])
+        self.assertEqual(messages[1]['content'], '这是店铺首页\n第二张是权限设置')
+        self.assertEqual(messages[1]['images'], [{'url': first_url}, {'url': second_url}])
+        self.assertNotIn('internal-name.jpg', str(messages))
+        self.assertEqual(self.db.get_messages('session-local'), rows)
+
+    def test_only_recognized_raster_attachments_on_exact_https_cdn_are_renderable(self):
+        identity = self.pair()
+        bad_urls = [
+            'http://ysf.nosdn.127.net/photo.jpg',
+            'https://ysf.nosdn.127.net.example.invalid/photo.jpg',
+            'https://ysf.nosdn.127.net@another.example.invalid/photo.jpg',
+            'https://user@ysf.nosdn.127.net/photo.jpg',
+            'https://ysf.nosdn.127.net:8080/photo.jpg',
+            'https://ysf.nosdn.127.net/active.svg',
+            'https://ysf.nosdn.127.net/not-an-image?file=photo.jpg',
+            'https://ysf.nosdn.127.net/photo.jpg\n',
+        ]
+        rows = [{'role': 'user', 'content': json.dumps({'type': 'image', 'url': url}), 'ts': index + 1}
+                for index, url in enumerate(bad_urls)]
+        literal_link = 'https://ysf.nosdn.127.net/photo.jpg'
+        literal_json = json.dumps({'customer_note': {'type': 'image', 'url': literal_link}})
+        rows.extend([{'role': 'user', 'content': literal_link, 'ts': 20},
+                     {'role': 'user', 'content': literal_json, 'ts': 21}])
+        self.messages(rows)
+        messages = self.detail(identity)['messages']
+        self.assertEqual([m['content'] for m in messages], ['[图片]'] * len(bad_urls) + [literal_link, literal_json])
+        self.assertTrue(all('images' not in m for m in messages))
+
     def test_only_exact_role_correct_origin_ids_are_highlighted(self):
         identity = self.pair()
         self.messages([{'role': 'user', 'content': '锚点问题', 'ts': 1, 'source_message_id': 'q1'},

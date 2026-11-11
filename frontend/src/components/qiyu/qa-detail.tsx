@@ -1,8 +1,8 @@
 import * as React from 'react'
-import { AlertCircle, Archive, ArrowDownLeft, ArrowUpRight, CircleCheck, CircleDashed, Layers2, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
+import { AlertCircle, Archive, ArrowUpRight, CircleCheck, CircleDashed, Layers2, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
 import { LoadingState } from './loading-state'
 import type { QAPair } from '@/lib/demo-data'
-import { ApiError, apiGet, apiPost, normalizePair, type DetailRepliesResponse } from '@/lib/api'
+import { ApiError, apiGet, apiPost, normalizePair, type DetailMessageImage, type DetailRepliesResponse } from '@/lib/api'
 import { customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -12,7 +12,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean }
 
 type Availability = 'available' | 'partial' | 'archived' | 'empty'
-type RawContextMessage = { role?: unknown; content?: unknown; time?: unknown; source_message_id?: unknown; ts?: unknown; is_question?: unknown; is_answer?: unknown }
+type RawContextMessage = { role?: unknown; content?: unknown; time?: unknown; source_message_id?: unknown; ts?: unknown; is_question?: unknown; is_answer?: unknown; images?: DetailMessageImage[] }
 interface ContextMessage {
   key: string
   role: string
@@ -21,6 +21,7 @@ interface ContextMessage {
   sourceMessageId: string
   ts?: number
   isQuestion: boolean
+  images: DetailMessageImage[]
   official?: true
 }
 interface DetailResponse {
@@ -53,13 +54,14 @@ function retainedMessage(message: RawContextMessage, index: number): ContextMess
     sourceMessageId,
     ts: typeof message.ts === 'number' && Number.isFinite(message.ts) ? message.ts : undefined,
     isQuestion: message.is_question === true,
+    images: message.images ?? [],
   }
 }
 
 function mergeOfficialReplies(retained: ContextMessage[], replies: DetailRepliesResponse['messages']): ContextMessage[] {
   const official = replies.map((reply): ContextMessage => ({
     key: `official-${reply.source_message_id}`, role: reply.role, content: reply.content, time: reply.time,
-    sourceMessageId: reply.source_message_id, ts: reply.ts, isQuestion: false, official: true,
+    sourceMessageId: reply.source_message_id, ts: reply.ts, isQuestion: false, images: reply.images ?? [], official: true,
   }))
   // Stable sort retains the saved message order for equal timestamps.
   return [...retained, ...official].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))
@@ -73,6 +75,19 @@ function fullTime(value: string) {
 function messageRole(message: ContextMessage, pair: QAPair) {
   if (message.official) return '人工客服'
   return ({ user: `客户 · ${customerLabel(pair.customerName, pair.customerId)}`, staff: `客服 · ${pair.staffName || '未记录'}`, bot: '机器人', system: '系统' })[message.role] || '消息'
+}
+
+function ConversationImage({ url }: DetailMessageImage) {
+  const [expanded, setExpanded] = React.useState(false)
+  const [failed, setFailed] = React.useState(false)
+
+  if (failed) return <p className="text-xs opacity-75">图片暂不可查看</p>
+  return <button type="button" aria-expanded={expanded} aria-label={expanded ? '缩小会话图片' : '放大会话图片'}
+    className={`block w-fit overflow-hidden rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 ${expanded ? 'max-w-full cursor-zoom-out' : 'max-w-[min(100%,14rem)] cursor-zoom-in'}`}
+    onClick={() => setExpanded(value => !value)}>
+    <img src={url} alt="会话图片" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)}
+      className={`block h-auto max-w-full object-contain ${expanded ? 'max-h-[65vh]' : 'max-h-36'}`} />
+  </button>
 }
 
 export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false }: QADetailProps) {
@@ -157,13 +172,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
             <div><dt className="mb-1.5 text-xs text-muted-foreground">提问时间</dt><dd className="tabular-nums">{fullTime(pair.askedAt)}</dd></div>
             <div><dt className="mb-1.5 text-xs text-muted-foreground">会话 ID</dt><dd className="break-all text-xs leading-6">{pair.sessionId}</dd></div>
           </dl>
-          <Separator />
-
-          <section className="py-6">
-            <h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><ArrowDownLeft className="size-3.5" />客户原问题</h3>
-            <p className={`min-w-0 whitespace-pre-wrap font-semibold leading-relaxed tracking-tight [overflow-wrap:anywhere] ${embedded ? 'text-base' : 'text-xl'}`}>{pair.question}</p>
-          </section>
-          {!embedded && <><div className="rounded-lg border bg-muted/30 p-4">
+          {!embedded && <><Separator /><div className="mt-5 rounded-lg border bg-muted/30 p-4">
             <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground"><span className="inline-flex items-center gap-1.5"><Layers2 className="size-3.5" />归一化问题</span><span>{pair.clusterId ? `问题簇 ${pair.clusterId}` : '未归类'}</span></div>
             <p className="whitespace-pre-wrap text-sm font-medium [overflow-wrap:anywhere]">{normalizedQuestion}</p>
           </div>
@@ -195,7 +204,10 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
                       <div className={message.role === 'staff'
                         ? 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tr-sm bg-foreground px-4 py-3 text-sm leading-7 text-background'
                         : 'min-w-0 whitespace-pre-wrap rounded-2xl [overflow-wrap:anywhere] rounded-tl-sm border bg-muted/35 px-4 py-3 text-sm leading-7'}>
-                        {message.content}
+                        {(!message.images.length || message.content.trim() !== '[图片]') && <p>{message.content}</p>}
+                        {message.images.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
+                          {message.images.map((image, index) => <ConversationImage key={`${message.key}-${image.url}-${index}`} url={image.url} />)}
+                        </div>}
                       </div>
                     </li>
                   ))}</ol>

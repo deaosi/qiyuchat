@@ -10,10 +10,11 @@ import time
 from ..config import Settings
 from ..extract import extract_pairs
 from ..extract.identity import sender_context
-from ..extract.text import _attachment, clean_visible_text
+from ..extract.text import clean_visible_text
 from ..push_sync import _expired, _numeric_identity, _project, _sender
-from ..qiyu.message import source_integer
+from ..qiyu.message import source_auto_reply, source_integer
 from ..qiyu.session import SessionExporter
+from . import case_media
 
 
 _GATE = threading.Lock()
@@ -59,29 +60,6 @@ def _local_session(cfg: Settings, session: dict) -> tuple[int, str] | None:
 def eligible(cfg: Settings, session: dict) -> bool:
     """Only native, retained sessions with an official channel and counts."""
     return _local_session(cfg, session) is not None
-
-
-def _automated(row: dict) -> bool:
-    flag = row.get('autoReply')
-    # A missing flag is supported by the verified API schema. Unknown values
-    # cannot prove that a response was manually sent.
-    return not (flag is None or flag is False or type(flag) is int and flag == 0
-                or isinstance(flag, str) and flag.strip().lower() in ('', '0', 'false'))
-
-
-def _staff_content(row: dict) -> str:
-    content = clean_visible_text(row['msg'])
-    if content:
-        return content
-    if row['mType'] != 2:
-        return ''
-    try:
-        data = json.loads(row['msg'])
-        if isinstance(data, str):
-            data = json.loads(data)
-        return '[图片]' if isinstance(data, dict) and _attachment(data) else ''
-    except (ValueError, TypeError, RecursionError):
-        return ''
 
 
 def _retained_key(message: dict) -> tuple[int, str]:
@@ -158,11 +136,15 @@ def _lookup(cfg: Settings, pair: dict, retained: list[dict], sid: int, channel: 
     projected = _project(metadata, official, metadata, sid)
     rows = {f"source:{sid}:{row['id']}": row for row in official}
     for message in projected:
-        if message['role'] == 'staff' and _automated(rows[message['source_message_id']]):
+        if message['role'] == 'staff' and source_auto_reply(rows[message['source_message_id']]):
             message['role'] = 'bot'
-    staff = {message['source_message_id']: _staff_content(rows[message['source_message_id']])
-             for message in projected if message['role'] == 'staff'}
-    staff = {mid: content for mid, content in staff.items() if content}
+    staff = {}
+    for message in projected:
+        if message['role'] != 'staff':
+            continue
+        content, images = case_media.project(message['content'])
+        if content:
+            staff[message['source_message_id']] = (content, images)
     if not staff:
         return _result('no_reply')
     customer = _customer(pair, retained, projected, rows, metadata, sid)
@@ -191,7 +173,11 @@ def _lookup(cfg: Settings, pair: dict, retained: list[dict], sid: int, channel: 
         if legacy_staff[key]:
             legacy_staff[key] -= 1
             continue
-        supplemental.append({**message, 'content': staff[mid]})
+        content, images = staff[mid]
+        supplement = {**message, 'content': content}
+        if images:
+            supplement['images'] = images
+        supplemental.append(supplement)
     return _result('found', supplemental) if supplemental else _result('unmatched')
 
 

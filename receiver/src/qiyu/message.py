@@ -8,6 +8,14 @@ def source_integer(value: Any, *, positive: bool = False) -> bool:
     return type(value) is int and (0 < value < 2**63 if positive else -(2**63) <= value < 2**63)
 
 
+def source_auto_reply(row: dict[str, Any]) -> bool:
+    flag = row.get("autoReply")
+    # Older official records can omit the flag. A present but unknown value
+    # cannot be used as proof that the message was sent manually.
+    return not (flag is None or flag is False or type(flag) is int and flag == 0
+                or isinstance(flag, str) and flag.strip().lower() in ("", "0", "false"))
+
+
 def validate_messages(data: Any, session_id: int) -> list[dict[str, Any]]:
     """Keep original content/metadata; never guess unverified wrapper keys.
 

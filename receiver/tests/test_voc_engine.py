@@ -121,6 +121,18 @@ class TestEngine(unittest.TestCase):
         self.assertFalse(engine.path(self.cfg).exists())
         self.assertEqual(Path(self.cfg.runtime.db_path).read_bytes(), before)
 
+    def test_shared_budget_advances_verified_replies_and_older_consultations(self):
+        self.seed(1, answer="")
+        self.seed(2, answer="")
+        self.seed(3, answer="", anchored=False)
+        self.seed(4)
+        self.seed(5)
+        self.sql("UPDATE qa_pair SET asked_at=1000+qa_id")
+        self.sql("UPDATE qa_pair SET answer='未核实来源的文字' WHERE qa_id=3")
+        self.run_engine(limit=4)
+        self.assertEqual([source["qa_id"] for source, _ in self.provider.seen], [4, 1, 5, 2])
+        self.assertEqual(engine.summary(self.cfg, {})["coverage"]["pending_pairs"], 1)
+
     def test_single_source_low_risk_ready_and_business_unchanged(self):
         self.seed()
         before = self.sql("SELECT * FROM qa_pair")

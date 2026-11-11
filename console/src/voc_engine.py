@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import importlib.util
+from itertools import zip_longest
 import json
 import logging
 import sqlite3
@@ -712,10 +713,20 @@ def run(cfg: Settings, filters: dict, limit: int = 20, max_calls: int = 20,
                     attempt = conn.execute("SELECT MAX(updated_at) FROM v2_exception WHERE qa_id=? AND fingerprint=? AND kind='extraction_failed'",
                                            (pair["qa_id"], pair["_fingerprint"])).fetchone()[0]
                     pending.append((bool(attempt), attempt or 0, pair["asked_at"], pair["qa_id"], pair))
-            # A malformed/oversized source cannot starve all later new sources.
-            # Fresh work comes first; failed sources rotate by oldest attempt.
+            # Fresh work stays ahead of retries. Alternate verified answers
+            # with other consultations so both outputs advance under the same
+            # model budget, keeping the existing order within each group.
             pending.sort(key=lambda item: item[:4])
-            selected = [item[4] for item in pending[:limit]]
+            with_reply, other, retries = [], [], []
+            for retry, _, _, _, pair in pending:
+                if retry:
+                    retries.append(pair)
+                elif pair["_staff_verified"] and pair["answer"]:
+                    with_reply.append(pair)
+                else:
+                    other.append(pair)
+            fresh = [pair for group in zip_longest(with_reply, other) for pair in group if pair is not None]
+            selected = (fresh + retries)[:limit]
             now = time.time()
             job_id = conn.execute("INSERT INTO v2_job(status,total,model,pipeline,owner,filters,created_at,updated_at) VALUES ('running',?,?,?,?,?,?,?)",
                 (len(selected), cfg.llm.model_main, variants.pipeline(cfg) + "/" + variants.quality_version(cfg), voc._OWNER, assets.dump(filters), now, now)).lastrowid

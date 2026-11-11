@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from src.config import QiyuConfig, Settings
-from src.web import case_replies as C
+from src.web import api, case_replies as C
 
 
 SID = 6789031
@@ -71,6 +71,18 @@ class CaseReplies(unittest.TestCase):
             {'role': 'staff', 'content': ANSWER, 'ts': self.staff['time'], 'source_message_id': f'source:{SID}:2'},
             {'role': 'staff', 'content': '[图片]', 'ts': media['time'], 'source_message_id': f'source:{SID}:3'},
         ]})
+
+    def test_official_staff_image_and_caption_reach_public_timeline_with_no_metadata(self):
+        image_url = 'https://ysf.nosdn.127.net/synthetic-installation.jpg'
+        raw = json.dumps({'type': 'image', 'url': image_url, 'name': 'internal-name.jpg', 'caption': ANSWER})
+        media = source(2, 0, raw, mType=2)
+        lookup = self.lookup(Exporter([self.question, media]))
+        self.assertEqual(lookup['status'], 'found')
+        public = api.case_reply_response(lookup)
+        self.assertEqual(public['messages'][0]['content'], ANSWER)
+        self.assertEqual(public['messages'][0]['images'], [{'url': image_url}])
+        self.assertEqual(public['messages'][0]['ts'], media['time'])
+        self.assertNotIn('internal-name.jpg', str(public))
 
     def test_visitor_positive_staff_id_and_automatic_system_or_withdrawn_messages_are_not_replies(self):
         for rows in ([self.question], [self.question, source(2, 0, '自动回复', autoReply=1),

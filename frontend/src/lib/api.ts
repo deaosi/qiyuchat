@@ -29,6 +29,7 @@ export type VocQueryFilters = {
 }
 
 const detailRepliesStatuses = ['found', 'no_reply', 'unmatched', 'unavailable', 'busy'] as const
+export type DetailMessageImage = { url: string }
 export interface DetailRepliesResponse {
   status: typeof detailRepliesStatuses[number]
   messages: {
@@ -39,6 +40,7 @@ export interface DetailRepliesResponse {
     source_message_id: string
     is_question: false
     is_answer: false
+    images?: DetailMessageImage[]
   }[]
 }
 
@@ -91,6 +93,19 @@ function hasCounts(value: Record<string, unknown>, keys: string[]): boolean {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string')
+}
+
+function validDetailImages(value: unknown): boolean {
+  if (value === undefined) return true
+  return Array.isArray(value) && value.every(image => {
+    if (!isRecord(image) || typeof image.url !== 'string') return false
+    try {
+      const url = new URL(image.url)
+      return url.origin === 'https://ysf.nosdn.127.net' && !url.username && !url.password
+    } catch {
+      return false
+    }
+  })
 }
 
 const vocKnowledgeKinds = ['configuration_guide', 'troubleshooting_advice', 'verified_workaround', 'capability_fact'] as const
@@ -322,7 +337,8 @@ function validateGetResponse(name: string, data: unknown): void {
             && (message.ts === undefined || isCount(message.ts))
             && (message.source_message_id === undefined || message.source_message_id === null || typeof message.source_message_id === 'string' || typeof message.source_message_id === 'number')
             && (message.is_question === undefined || typeof message.is_question === 'boolean')
-            && (message.is_answer === undefined || typeof message.is_answer === 'boolean'))
+            && (message.is_answer === undefined || typeof message.is_answer === 'boolean')
+            && validDetailImages(message.images))
           && (data.message_count === undefined || isCount(data.message_count) && data.message_count === (data.messages as unknown[]).length)
           && (data.availability === undefined || ['available', 'partial', 'archived', 'empty'].includes(String(data.availability)))
           && (data.context_scope === undefined || ['session_customer', 'legacy_session'].includes(String(data.context_scope)))
@@ -346,7 +362,8 @@ function validateDetailRepliesResponse(data: unknown): void {
       && isCount(message.ts) && message.ts > 0
       && typeof message.time === 'string' && Boolean(message.time.trim())
       && typeof message.source_message_id === 'string' && Boolean(message.source_message_id.trim())
-      && message.is_question === false && message.is_answer === false)
+      && message.is_question === false && message.is_answer === false
+      && validDetailImages(message.images))
     && new Set(data.messages.map(message => message.source_message_id)).size === data.messages.length
   if (!valid) throw new ApiError('七鱼回复接口返回的数据格式不完整，请稍后重试。', 502)
 }

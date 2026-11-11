@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useTransition, type CSSProperties, type ReactNode } from 'react'
-import { ArrowDownToLine, ArrowRight, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
+import { ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
@@ -17,8 +17,7 @@ import { QiyuSectionCards } from '@/components/qiyu/section-cards'
 import { QiyuAreaChart } from '@/components/qiyu/area-chart'
 import { QATable } from '@/components/qiyu/qa-table'
 import { QADetail } from '@/components/qiyu/qa-detail'
-import { VocWorkspace } from '@/components/qiyu/voc-workspace'
-import { VocNextWorkspace } from '@/components/qiyu/voc-next-workspace'
+import { VocFrequencyWorkspace, VocKnowledgeWorkspace } from '@/components/qiyu/voc-next-workspace'
 import { VocChatWorkspace } from '@/components/qiyu/voc-chat-workspace'
 import { chatHref, normalizeChatFilters, readChatFilters } from '@/lib/voc-chat'
 import { ImportDialog } from '@/components/qiyu/import-dialog'
@@ -31,9 +30,9 @@ import { customerLabel } from '@/lib/utils'
 
 const navigation = [
   { id: 'overview', title: '会话概览', icon: LayoutDashboard, group: '分析工作台' },
-  { id: 'voc-next', title: '知汇鸽使用支持', icon: ChartNoAxesCombined, group: '问题洞察' },
-  { id: 'voc-chat', title: '问问数据', icon: MessageSquareText, group: '问题洞察' },
   { id: 'questions', title: 'VOC高频问题', icon: ChartNoAxesCombined, group: '问题洞察' },
+  { id: 'voc-next', title: '沉淀知识库', icon: BookOpen, group: '问题洞察' },
+  { id: 'voc-chat', title: '问问数据', icon: MessagesSquare, group: '问题洞察' },
   { id: 'clusters', title: '规则问题簇', icon: Layers3, group: '问题洞察' },
   { id: 'groups', title: '客户群', icon: UsersRound, group: '客户洞察' },
   { id: 'customers', title: '客户', icon: ContactRound, group: '客户洞察' },
@@ -98,6 +97,8 @@ function Workspace() {
   const status = useApi<LocalStatus>('status', { source }, refreshKey, view === 'cleaning')
   const recent = useMemo(() => summary.data?.recent?.map(normalizePair) ?? [], [summary.data])
   const page = navigation.find(item => item.id === view)!
+  const vocScope = { source, days: filters.days, start: filters.start, end: filters.end, group: filters.group, staff: filters.staff }
+  const showQaExport = view !== 'questions' && view !== 'voc-next'
   const rangeLabel = filters.start || filters.end ? '自定义日期' : filters.days ? `近 ${filters.days} 天` : '全部时间'
   const scopeLabel = trend.data?.series.length ? `${trend.data.series[0].date} — ${trend.data.series.at(-1)!.date}` : rangeLabel
 
@@ -125,7 +126,7 @@ function Workspace() {
     <SidebarInset data-density={compact ? 'compact' : 'normal'} data-motion={motion ? 'on' : 'off'}>
       <header className="relative flex h-(--header-height) shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear"><PageActivity navigating={navigating} /><div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6"><SidebarTrigger className="-ml-1" /><Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" /><h1 className="text-base font-medium">{page.title}</h1><div className="ml-auto flex items-center gap-2">
         <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="显示设置"><Settings2 className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-48"><DropdownMenuLabel>显示设置</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuCheckboxItem checked={motion} onCheckedChange={setMotion}>切换动画</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={compact} onCheckedChange={setCompact}>紧凑表格</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun /> : <Moon />}切换{theme === 'dark' ? '浅色' : '深色'}外观</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
-        {view !== 'settings' && view !== 'voc-chat' && <Button size="sm" onClick={openImport} disabled={busy}><CirclePlus /><span className="hidden sm:inline">导入会话</span></Button>}
+        {view !== 'settings' && view !== 'voc-chat' && view !== 'voc-next' && <Button size="sm" onClick={openImport} disabled={busy}><CirclePlus /><span className="hidden sm:inline">导入会话</span></Button>}
       </div></div></header>
       <div className="flex flex-1 flex-col"><div className="@container/main flex flex-1 flex-col gap-2"><div key={view} className={`flex flex-col ${view === 'voc-chat' ? 'min-h-0 gap-3 h-[calc(100svh-var(--header-height))] overflow-hidden md:h-[calc(100svh-var(--header-height)-1rem)]' : 'gap-4 py-4 md:gap-6 md:py-6'} ${motion ? 'qiyu-page-enter' : ''}`}>
         {meta.error && view !== 'settings' && <div className="px-4 lg:px-6"><QueryState error={meta.error} retry={meta.retry} /></div>}
@@ -134,7 +135,7 @@ function Workspace() {
           <Select value={filters.group || 'all'} onValueChange={value => { setFilters(current => ({ ...current, group: value === 'all' ? '' : value })); setDrillFilters({}) }}><SelectTrigger size="sm" className="w-[156px]" aria-label="客户群筛选"><UsersRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客户群</SelectItem>{meta.data?.groups.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}</SelectContent></Select>
           <Select value={filters.staff || 'all'} onValueChange={value => { setFilters(current => ({ ...current, staff: value === 'all' ? '' : value })); setDrillFilters({}) }}><SelectTrigger size="sm" className="w-[134px]" aria-label="客服筛选"><ContactRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客服</SelectItem>{meta.data?.staff.map(staff => <SelectItem key={staff} value={staff}>{staff}</SelectItem>)}</SelectContent></Select>
           <Select value={range} onValueChange={value => { setRange(value); if (value !== 'custom') changeDays(Number(value)) }}><SelectTrigger size="sm" className="w-[128px]" aria-label="时间筛选"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="7">最近 7 天</SelectItem><SelectItem value="30">最近 30 天</SelectItem><SelectItem value="90">最近 90 天</SelectItem><SelectItem value="0">全部时间</SelectItem><SelectItem value="custom">自定义日期</SelectItem></SelectContent></Select>
-          <Button variant="ghost" size="sm" onClick={reset}>重置</Button>{view !== 'voc-chat' && <><RefreshDataButton onRefresh={() => setRefreshKey(key => key + 1)} /><Button variant="outline" size="sm" onClick={exportCsv} disabled={exporting} aria-busy={exporting}>{exporting ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowDownToLine className="size-3.5" />}<span className="hidden sm:inline">导出脱敏问答</span></Button></>}
+          <Button variant="ghost" size="sm" onClick={reset}>重置</Button>{view !== 'voc-chat' && <><RefreshDataButton onRefresh={() => setRefreshKey(key => key + 1)} />{showQaExport && <Button variant="outline" size="sm" onClick={exportCsv} disabled={exporting} aria-busy={exporting}>{exporting ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowDownToLine className="size-3.5" />}<span className="hidden sm:inline">导出脱敏问答</span></Button>}</>}
         </div>}
         {range === 'custom' && view !== 'cleaning' && view !== 'settings' && <form className="flex flex-wrap items-center gap-3 px-4 text-sm lg:px-6" onSubmit={event => { event.preventDefault(); applyCustom() }}><label className="flex items-center gap-2">开始日期<Input type="date" value={customStart} onChange={event => setCustomStart(event.target.value)} min="2000-01-01" max="2100-12-31" className="w-40" /></label><label className="flex items-center gap-2">结束日期<Input type="date" value={customEnd} onChange={event => setCustomEnd(event.target.value)} min="2000-01-01" max="2100-12-31" className="w-40" /></label><Button size="sm" type="submit">应用日期</Button></form>}
         {view === 'overview' && <>
@@ -145,8 +146,8 @@ function Workspace() {
         </>}
         {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={() => { setDrillFilters({}); setInitialReply('all') }}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={setSelected} initialReply={initialReply} onFiltersChange={setExportFilters} /></div>}
         {view === 'settings' && <div className="px-4 lg:px-6"><GatewaySettings onSaved={() => setRefreshKey(key => key + 1)} /></div>}
-        {view === 'questions' && <div className="px-4 lg:px-6"><VocWorkspace key={source} filters={filters} refreshKey={refreshKey} onOpenPair={setSelected} onRuleClusters={() => sideNavigate('clusters')} /></div>}
-        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocNextWorkspace filters={filters} refreshKey={refreshKey} onOpenPair={setSelected} onOpenChat={openChat} /></div>}
+        {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace filters={vocScope} refreshKey={refreshKey} onOpenPair={setSelected} onOpenChat={openChat} /></div>}
+        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={vocScope} refreshKey={refreshKey} onOpenPair={setSelected} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
         {listEnabled && <div className="px-4 lg:px-6"><QueryState loading={list.loading} error={list.error} retry={list.retry} empty={!list.data?.items.length}>
           {view === 'clusters' && <div className="grid gap-4 lg:grid-cols-2">{(list.data?.items as ClusterItem[] | undefined)?.map(item => <Card key={item.cluster_id} className="min-w-0"><CardHeader className="min-w-0"><div className="mb-1 flex flex-wrap items-center justify-between gap-2"><Badge variant="outline">问题簇 {item.cluster_id}</Badge><span className="text-xs text-muted-foreground">{item.variants} 种问法</span></div><CardTitle className="min-w-0 whitespace-normal text-lg leading-relaxed [overflow-wrap:anywhere]">{item.question}</CardTitle><CardDescription>{item.count} 条问答 · {item.customers} 位客户 · {item.groups} 个客户群</CardDescription></CardHeader><CardContent className="min-w-0"><ul className="space-y-2 text-sm text-muted-foreground">{item.samples.map(sample => <li key={sample} className="flex min-w-0 gap-2"><MessageSquareText className="mt-0.5 size-4 shrink-0 opacity-50" /><span className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{sample}</span></li>)}</ul></CardContent><CardFooter className="flex-wrap justify-between gap-2"><Badge variant="secondary">{item.unanswered} 条未发现回复</Badge><Button variant="outline" size="sm" onClick={() => drill({ cluster: item.cluster_id })}>追溯问答<ArrowRight /></Button></CardFooter></Card>)}</div>}

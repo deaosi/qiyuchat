@@ -16,8 +16,9 @@ import sqlite3
 from .clean.rules import mask_pii
 from .extract.identity import SOURCE_IDENTITY_ROLE, decode_identity
 from .extract.text import clean_visible_text
+from .qiyu.message import source_auto_reply
 
-VERSION = "conversation-outcome-v1"
+VERSION = "conversation-outcome-v2"
 WEAK_THRESHOLD = 2
 MAX_WINDOW_MESSAGES = 80
 MAX_WINDOW_MS = 30 * 60 * 1000
@@ -72,6 +73,7 @@ def _snapshot(conn, sid: str) -> dict:
     if any(r["time"] > metadata_end for r in official):
         raise ValueError("invalid_end_coverage")
     kinds = {f"source:{sid}:{r['id']}": r["mType"] for r in official}
+    automated = {f"source:{sid}:{r['id']}" for r in official if r["from"] == 0 and source_auto_reply(r)}
     owner, segment = None, 0
     for message in raw:
         if message["role"] == SOURCE_IDENTITY_ROLE:
@@ -82,7 +84,9 @@ def _snapshot(conn, sid: str) -> dict:
             owner = None
             segment += 1
         message["_owner"], message["_segment"] = owner, segment
-        message["_is_text"] = kinds.get(message.get("source_message_id")) == 1
+        source_id = message.get("source_message_id")
+        message["_is_text"] = kinds.get(source_id) == 1
+        message["_automated"] = source_id in automated
     return {"messages": raw, "version": state["source_version"], "end": metadata_end}
 
 
@@ -127,7 +131,8 @@ def _assess(conn, row: dict, all_events: list[dict], snapshots: dict) -> dict:
         segment = answers[-1][1]["_segment"]
         if any(m["role"] != "user" or m["_owner"] != cid or m["_segment"] != segment or not m["_is_text"] for _,m in questions):
             raise ValueError("question_identity_unbound")
-        if any(m["role"] != "staff" or m["_owner"] != cid or m["_segment"] != segment or not m["_is_text"] for _,m in answers):
+        if any(m["role"] != "staff" or m["_owner"] != cid or m["_segment"] != segment
+               or not m["_is_text"] or m["_automated"] for _,m in answers):
             raise ValueError("answer_role_unbound")
         if max(i for i,_ in questions) >= min(i for i,_ in answers):
             raise ValueError("invalid_anchor_order")
@@ -158,7 +163,7 @@ def _assess(conn, row: dict, all_events: list[dict], snapshots: dict) -> dict:
         if message["_owner"] != cid or message["_segment"] != segment:
             # Do not join disjoint visitor segments, even if a customer reenters.
             break
-        if message["role"] in ("bot", "boundary") or not message["_is_text"]:
+        if message["role"] in ("bot", "boundary") or not message["_is_text"] or message["_automated"]:
             partial = True
             break
         relevant += 1
