@@ -43,7 +43,7 @@ export function QueryPanel({ loading, error, retry, children, hasData = false }:
   return <>{error && <div role="status" className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground"><CircleAlert className="size-4" /><span>自动更新暂时失败，正在显示上次结果。{error}</span><Button variant="ghost" size="xs" onClick={retry}>重试</Button></div>}{children}</>
 }
 
-export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onOpenChat }: WorkspaceProps & { onOpenChat: (filters: ApiFilters) => void }) {
+export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onOpenChat, initialTopic = null, onCloseLinkedTopic }: WorkspaceProps & { onOpenChat: (filters: ApiFilters) => void; initialTopic?: string | null; onCloseLinkedTopic?: () => void }) {
   const [supportIntent, setSupportIntent] = useState<NonNullable<ApiFilters['support_intent']>>('all')
   const [diagnosisStatus, setDiagnosisStatus] = useState<NonNullable<ApiFilters['diagnosis_status']>>('all')
   const [trend, setTrend] = useState<TrendFilter>('all')
@@ -54,7 +54,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const rankingHeading = useRef<HTMLDivElement>(null)
   const resultFilters: ApiFilters = { ...filters, support_intent: supportIntent, diagnosis_status: diagnosisStatus }
   const scopeKey = JSON.stringify({ ...resultFilters, trend })
-  const [ranking, setRanking] = useState<{ scopeKey: string; page: number; selectedId: string | null }>({ scopeKey, page: 0, selectedId: null })
+  const [ranking, setRanking] = useState<{ scopeKey: string; page: number; selectedId: string | null }>({ scopeKey, page: 0, selectedId: initialTopic })
   const { page, selectedId } = ranking.scopeKey === scopeKey ? ranking : { page: 0, selectedId: null }
   const offset = page * topicPageSize
   const key = refreshKey + revision
@@ -177,7 +177,11 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
         </nav>
       </CardFooter>}
     </Card>
-    <Sheet open={selectedId !== null} onOpenChange={open => { if (!open) setRanking(current => ({ ...current, selectedId: null })) }}>
+    <Sheet open={selectedId !== null} onOpenChange={open => {
+      if (open) return
+      setRanking(current => ({ ...current, selectedId: null }))
+      if (initialTopic) onCloseLinkedTopic?.()
+    }}>
       <SheetContent className="w-full gap-0 sm:max-w-3xl xl:max-w-4xl">
         <SheetHeader className="shrink-0 border-b px-4 sm:px-6"><SheetTitle>问题与原句依据</SheetTitle><SheetDescription className="sr-only">查看问题的处理判断、办法和会话依据。</SheetDescription></SheetHeader>
         <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
@@ -201,15 +205,36 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
 }
 
 export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: WorkspaceProps) {
+  const levels = [
+    { value: 'all', label: '全部' },
+    { value: 'verified', label: '效果已验证' },
+    { value: 'guidance', label: '已核验指引' },
+    { value: 'reference', label: '来源记录' },
+  ] as const
   const [revision, setRevision] = useState(0)
   const [referencesOpen, setReferencesOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [level, setLevel] = useState<typeof levels[number]['value']>('all')
   const key = refreshKey + revision
   const knowledge = useApi<ResultList<Knowledge>>('voc2/knowledge', filters, key)
   const refreshResults = useCallback(() => setRevision(value => value + 1), [])
   useBackgroundRefresh(refreshResults, false, knowledge.loading || knowledge.refreshing, key)
-  const readyItems = knowledge.data?.items.filter(item => item.status === 'ready') ?? []
-  const reusableItems = readyItems.filter(item => knowledgeReuseLevel(item) !== 'reference')
-  const referenceItems = readyItems.filter(item => item.knowledge_reuse?.level === 'reference')
+  const terms = search.normalize('NFKC').toLowerCase().split(/\s+/).filter(Boolean)
+  const filtered = terms.length > 0 || level !== 'all'
+  const matches = (knowledge.data?.items ?? []).filter(item => {
+    if (item.status !== 'ready') return false
+    const reuse = knowledgeReuseLevel(item)
+    if (reuse === 'reference' && item.knowledge_reuse?.level !== 'reference') return false
+    if (level !== 'all' && reuse !== level) return false
+    if (terms.length === 0) return true
+    const content = [item.question, item.answer, item.scope, ...item.steps].join('\n').normalize('NFKC').toLowerCase()
+    return terms.every(term => content.includes(term))
+  })
+  const reusableItems = matches.filter(item => knowledgeReuseLevel(item) !== 'reference')
+  const referenceItems = matches.filter(item => item.knowledge_reuse?.level === 'reference')
+  const referenceCards = <div className="mt-4 grid gap-4 lg:grid-cols-2">{referenceItems.map(item =>
+    <article key={item.id} className="min-w-0 rounded-lg border p-4"><KnowledgeContent item={item} onOpenPair={onOpenPair} /></article>
+  )}</div>
 
   return <Card>
     <CardHeader>
@@ -218,22 +243,39 @@ export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: W
     </CardHeader>
     <CardContent>
       <QueryPanel hasData={knowledge.data !== null} loading={knowledge.loading} error={knowledge.error} retry={knowledge.retry}>
+        <div className="mb-4 flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center lg:justify-between">
+          <Input type="search" value={search} onChange={event => setSearch(event.target.value)} maxLength={200}
+            placeholder="搜索问题、答复、适用范围或步骤" aria-label="搜索知识" className="w-full lg:max-w-sm" />
+          <div className="flex flex-wrap gap-1" role="group" aria-label="知识证据等级">
+            {levels.map(option => <Button key={option.value} type="button" variant={level === option.value ? 'secondary' : 'ghost'}
+              size="sm" aria-pressed={level === option.value} onClick={() => setLevel(option.value)}>{option.label}</Button>)}
+          </div>
+        </div>
+        {filtered && matches.length > 0 && <p role="status" className="mb-3 text-sm text-muted-foreground">找到 {count(matches.length)} 条知识</p>}
+        {filtered && matches.length === 0 && <div className="flex min-h-44 flex-col items-center justify-center gap-3 py-8 text-center text-sm text-muted-foreground">
+          <p className="font-medium text-foreground">未找到符合条件的知识</p>
+          <Button variant="outline" size="sm" onClick={() => {
+            setSearch('')
+            setLevel('all')
+          }}>清除筛选</Button>
+        </div>}
         {reusableItems.length ? <div className="grid gap-4 lg:grid-cols-2">{reusableItems.map(item =>
           <article key={item.id} className="min-w-0 space-y-3 rounded-lg border p-4">
             <div className="flex justify-end"><Button variant="outline" size="sm" onClick={() => copyKnowledge(item)}><Copy />{knowledgeReuseLevel(item) === 'guidance' ? '复制指引' : '复制处理办法'}</Button></div>
             <KnowledgeContent item={item} onOpenPair={onOpenPair} />
           </article>
-        )}</div> : <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground">
+        )}</div> : !filtered && <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground">
           <BookOpen aria-hidden="true" className="mb-1 size-5" />
           <p className="font-medium text-foreground">当前范围暂无可复用答案</p>
           <p>有足够证据的指引和处理方法会自动出现。</p>
         </div>}
-        {referenceItems.length > 0 && <details className="mt-4 rounded-lg border p-4" open={referencesOpen} onToggle={event => setReferencesOpen(event.currentTarget.open)}>
+        {referenceItems.length > 0 && (filtered ? <section className="mt-4 rounded-lg border p-4" aria-label="来源记录">
+          <h3 className="text-sm font-medium">来源记录（{count(referenceItems.length)}）</h3>
+          {referenceCards}
+        </section> : <details className="mt-4 rounded-lg border p-4" open={referencesOpen} onToggle={event => setReferencesOpen(event.currentTarget.open)}>
           <summary className="w-fit cursor-pointer text-sm font-medium">来源记录（{count(referenceItems.length)}）</summary>
-          {referencesOpen && <div className="mt-4 grid gap-4 lg:grid-cols-2">{referenceItems.map(item =>
-            <article key={item.id} className="min-w-0 rounded-lg border p-4"><KnowledgeContent item={item} onOpenPair={onOpenPair} /></article>
-          )}</div>}
-        </details>}
+          {referencesOpen && referenceCards}
+        </details>)}
       </QueryPanel>
     </CardContent>
   </Card>

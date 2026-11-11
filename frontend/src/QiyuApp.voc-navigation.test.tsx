@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import QiyuApp from './QiyuApp'
 import type { Evidence, Knowledge } from '@/components/qiyu/voc-next-workspace'
 import { downloadExport, type VocConversationVerification } from '@/lib/api'
+import { readTopicLink, topicHref } from '@/lib/voc-topic-link'
 
 const query = vi.hoisted(() => vi.fn())
 vi.mock('@/hooks/use-api', () => ({ useApi: query }))
@@ -55,6 +56,23 @@ afterEach(() => {
 })
 
 describe('VOC navigation', () => {
+  it('opens a shared topic at the fixed dates and omits customer and staff identifiers from its link', () => {
+    const id = 't_' + 'a'.repeat(24)
+    const href = topicHref(id, { source: 'local', start: '2026-11-01', end: '2026-11-07', group: '测试群', staff: '测试客服' })
+    expect(readTopicLink(href)).toEqual({ id, filters: { source: 'local', days: 0, start: '2026-11-01', end: '2026-11-07' } })
+    expect(readTopicLink('#questions?topic=unexpected')).toBeUndefined()
+    expect(new URLSearchParams(href.split('?')[1]).has('group')).toBe(false)
+    expect(new URLSearchParams(href.split('?')[1]).has('staff')).toBe(false)
+    window.history.replaceState(null, '', href)
+    render(<QiyuApp />)
+
+    expect(screen.getByRole('dialog', { name: '问题与原句依据' })).toBeTruthy()
+    expect(query.mock.calls.some(([endpoint, scope, , enabled]) => endpoint === 'voc2/topic' && enabled
+      && scope.id === id && scope.start === '2026-11-01' && scope.end === '2026-11-07')).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(window.location.hash).toBe('#questions')
+  })
+
   it('loads the high-frequency ranking on the original questions route and opens the source', () => {
     window.history.replaceState(null, '', '#questions')
     render(<QiyuApp />)

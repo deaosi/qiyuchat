@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
+import { ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, FileText, History, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
@@ -19,7 +19,10 @@ import { QATable } from '@/components/qiyu/qa-table'
 import { QADetail } from '@/components/qiyu/qa-detail'
 import { VocFrequencyWorkspace, VocKnowledgeWorkspace } from '@/components/qiyu/voc-next-workspace'
 import { VocChatWorkspace } from '@/components/qiyu/voc-chat-workspace'
+import { VocBriefingDialog } from '@/components/qiyu/voc-briefing-dialog'
+import { VocJobHistory } from '@/components/qiyu/voc-job-history'
 import { chatHref, normalizeChatFilters, readChatFilters } from '@/lib/voc-chat'
+import { readTopicLink } from '@/lib/voc-topic-link'
 import { ImportDialog } from '@/components/qiyu/import-dialog'
 import { GatewaySettings } from '@/components/qiyu/gateway-settings'
 import { LoadingState, PageActivity, RefreshDataButton } from '@/components/qiyu/loading-state'
@@ -67,7 +70,10 @@ function QueryState({ loading, error, empty, retry, children }: { loading?: bool
 
 function Workspace() {
   const [view, setView] = useState<View>(readView)
-  const [filters, setFilters] = useState<ApiFilters>(() => readChatFilters(location.hash) || { source: 'local', days: 7 })
+  const [filters, setFilters] = useState<ApiFilters>(() => readChatFilters(location.hash) || readTopicLink(location.hash)?.filters || { source: 'local', days: 7 })
+  const [linkedTopic, setLinkedTopic] = useState(() => readTopicLink(location.hash)?.id ?? null)
+  const [briefingOpen, setBriefingOpen] = useState(false)
+  const [jobsOpen, setJobsOpen] = useState(false)
   const [drillFilters, setDrillFilters] = useState<Partial<ApiFilters>>({})
   const [drillCustomerName, setDrillCustomerName] = useState('')
   const [tableExport, setTableExport] = useState<{ key: string; filters: ApiFilters } | null>(null)
@@ -129,7 +135,11 @@ function Workspace() {
       clearDrill()
       setSelected(null)
       setTableExport(null)
-      const scope = readChatFilters(location.hash)
+      const topic = readTopicLink(location.hash)
+      setLinkedTopic(topic?.id ?? null)
+      setBriefingOpen(false)
+      setJobsOpen(false)
+      const scope = readChatFilters(location.hash) || topic?.filters
       if (scope) {
         const href = chatHref(scope)
         setFilters(current => chatHref(current) === href ? current : scope)
@@ -148,10 +158,17 @@ function Workspace() {
   const navigate = useCallback((next: View, scope = filters) => {
     setView(next)
     setSelected(null)
+    setLinkedTopic(null)
+    setBriefingOpen(false)
+    setJobsOpen(false)
     if (next !== view) setTableExport(null)
     const href = next === 'voc-chat' ? chatHref(scope) : `#${next}`
     if (location.hash !== href) history.pushState(null, '', href)
   }, [filters, view])
+  const clearLinkedTopic = useCallback(() => {
+    setLinkedTopic(null)
+    if (readTopicLink(location.hash)) history.replaceState(null, '', '#questions')
+  }, [])
   const setChatScope = (next: ApiFilters) => { const scope = normalizeChatFilters(next); setFilters(scope); setRange(scope.start || scope.end ? 'custom' : String(scope.days)); setCustomStart(scope.start || ''); setCustomEnd(scope.end || ''); setDrillFilters({}) }
   const openChat = (next: ApiFilters) => { setChatScope(next); navigate('voc-chat', next) }
   const sideNavigate = useCallback((next: View) => { clearDrill(); navigate(next) }, [clearDrill, navigate])
@@ -177,6 +194,7 @@ function Workspace() {
     <SidebarInset data-density={compact ? 'compact' : 'normal'} data-motion={motion ? 'on' : 'off'}>
       <header className="relative flex h-(--header-height) shrink-0 items-center gap-2 border-b"><PageActivity /><div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6"><SidebarTrigger className="-ml-1" /><Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" /><h1 key={view} className="qiyu-page-title text-base font-medium">{page.title}</h1><div className="ml-auto flex items-center gap-2">
         <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="显示设置"><Settings2 className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-48"><DropdownMenuLabel>显示设置</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuCheckboxItem checked={motion} onCheckedChange={setMotion}>切换动画</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={compact} onCheckedChange={setCompact}>紧凑表格</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun /> : <Moon />}切换{theme === 'dark' ? '浅色' : '深色'}外观</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+        {view === 'cleaning' && <VocJobHistory open={jobsOpen} onOpenChange={setJobsOpen} trigger={<Button variant="outline" size="sm"><History />模型整理记录</Button>} />}
         {view !== 'settings' && view !== 'voc-chat' && view !== 'voc-next' && <Button size="sm" onClick={openImport} disabled={busy}><CirclePlus /><span className="hidden sm:inline">导入会话</span></Button>}
       </div></div></header>
       <div className="flex flex-1 flex-col"><div className="@container/main flex flex-1 flex-col gap-2"><div className={`flex flex-col ${view === 'voc-chat' ? 'min-h-0 gap-3 h-[calc(100svh-var(--header-height))] overflow-hidden md:h-[calc(100svh-var(--header-height)-1rem)]' : 'gap-4 py-4 md:gap-6 md:py-6'}`}>
@@ -187,6 +205,7 @@ function Workspace() {
           <Select value={filters.staff || 'all'} onValueChange={value => { setFilters(current => ({ ...current, staff: value === 'all' ? '' : value })); setDrillFilters({}) }}><SelectTrigger size="sm" className="w-[134px]" aria-label="客服筛选"><ContactRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客服</SelectItem>{meta.data?.staff.map(staff => <SelectItem key={staff} value={staff}>{staff}</SelectItem>)}</SelectContent></Select>
           <Select value={range} onValueChange={value => { setRange(value); if (value !== 'custom') changeDays(Number(value)) }}><SelectTrigger size="sm" className="w-[128px]" aria-label="时间筛选"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="7">最近 7 天</SelectItem><SelectItem value="30">最近 30 天</SelectItem><SelectItem value="90">最近 90 天</SelectItem><SelectItem value="0">全部时间</SelectItem><SelectItem value="custom">自定义日期</SelectItem></SelectContent></Select>
           <Button variant="ghost" size="sm" onClick={reset}>重置</Button>{view !== 'voc-chat' && <><RefreshDataButton onRefresh={() => setRefreshKey(key => key + 1)} />{showQaExport && <Button variant="outline" size="sm" onClick={exportCsv} disabled={exporting} aria-busy={exporting}>{exporting ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowDownToLine className="size-3.5" />}<span className="hidden sm:inline">导出脱敏问答</span></Button>}</>}
+          {(view === 'questions' || view === 'voc-next') && <VocBriefingDialog open={briefingOpen} onOpenChange={setBriefingOpen} filters={sharedScope} trigger={<Button variant="outline" size="sm"><FileText />飞书成果预览</Button>} />}
         </div>}
         {range === 'custom' && view !== 'cleaning' && view !== 'settings' && <form className="flex flex-wrap items-center gap-3 px-4 text-sm lg:px-6" onSubmit={event => { event.preventDefault(); applyCustom() }}><label className="flex items-center gap-2">开始日期<Input type="date" value={customStart} onChange={event => setCustomStart(event.target.value)} min="2000-01-01" max="2100-12-31" className="w-40" /></label><label className="flex items-center gap-2">结束日期<Input type="date" value={customEnd} onChange={event => setCustomEnd(event.target.value)} min="2000-01-01" max="2100-12-31" className="w-40" /></label><Button size="sm" type="submit">应用日期</Button></form>}
         {view === 'overview' && <>
@@ -197,7 +216,7 @@ function Workspace() {
         </>}
         {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={clearDrill}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={openPair} initialReply={initialReply} onFiltersChange={captureTableFilters} /></div>}
         {view === 'settings' && <div className="px-4 lg:px-6"><GatewaySettings onSaved={() => setRefreshKey(key => key + 1)} /></div>}
-        {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} onOpenChat={openChat} /></div>}
+        {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace key={linkedTopic ?? 'ranking'} initialTopic={linkedTopic} onCloseLinkedTopic={clearLinkedTopic} filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} onOpenChat={openChat} /></div>}
         {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
         {listEnabled && <div className="px-4 lg:px-6"><QueryState loading={list.loading} error={list.error} retry={list.retry} empty={!list.data?.items.length}>
