@@ -130,6 +130,16 @@ class EvidenceDialogue(unittest.TestCase):
         self.assertEqual(result['answer_mode'], 'computed')
         self.assertIn('原始来源共 100 条', result['answer'])
 
+    def test_metric_words_are_not_mistaken_for_a_software_scenario(self):
+        for planned in (self.plan('coverage', query='会话验证通过的可复用答案'),
+                        self.plan('new_knowledge', query='会话验证通过的可复用答案')):
+            with self.subTest(planned=planned), patch.object(A, '_plan', return_value=(planned, 1)), patch.object(W, 'compose') as compose:
+                result = A.answer(self.cfg, {}, {'message': '其中会话验证通过的可复用答案有多少条？只查数字。'})
+            compose.assert_not_called()
+            self.assertEqual(result['tools'][0]['name'], 'get_coverage')
+            self.assertIn('原始来源共 100 条', result['answer'])
+        self.engine.relevant_items.assert_not_called()
+
     def test_specific_comparison_never_substitutes_global_volume(self):
         self.engine.relevant_topics.side_effect = [[{'id': 't1', 'consultation_count': 3}], []]
         self.engine.topics.side_effect = [{'items':[{'id':'t1','consultation_count':3},{'id':'unrelated','consultation_count':999}]},

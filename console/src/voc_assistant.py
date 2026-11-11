@@ -438,6 +438,29 @@ def _context_topic_ids(engine, cfg, scoped, refs):
     return ids
 
 
+def _normalize_metric_plan(plan, message):
+    """A metric name is not a software scenario or a knowledge search term."""
+    plan = dict(plan)
+    count_only = bool(re.search(r'只(?:查|给|要|看)(?:数字|数量|条数)|仅(?:查|给|要|看)(?:数字|数量|条数)', message))
+    if count_only and plan['intent'] not in ('unsupported_action', 'out_of_scope'):
+        if (plan['intent'] not in ('compare', 'top_topics', 'defects')
+                and not re.search(r'对比|比较|环比|同比|相比', message)
+                and re.search(r'来源问答|已整理|待整理|会话验证|可(?:直接)?复用答案|覆盖量', message)):
+            plan['intent'] = 'coverage'
+        if plan['intent'] in ('coverage', 'compare', 'top_topics'):
+            plan['explain'] = False
+    if plan['intent'] in ('coverage', 'compare', 'top_topics', 'defects', 'new_knowledge'):
+        query = re.sub(r'(?:最近|近|过去)?\s*\d+\s*(?:天|日|周|个月)', '', plan['query'])
+        query = re.sub(r'来源问答|会话验证通过|会话验证|可直接复用|可复用|有来源|已整理|待整理|未整理|'
+                       r'已处理|待处理|高频咨询|高频问题|已确认缺陷|新增知识|知识库|覆盖率|覆盖量|'
+                       r'当前|全部|总体|其中|所选|范围|总量|总数|数量|多少|条数|数据|统计|排名|对比|环比|'
+                       r'问答|咨询|来源|知识|答案|验证|通过|整理|分别|本期|上期|知汇鸽|语海Voc|七鱼|只查数字|只给数量|'
+                       r'[的和与及或有共条次项个]|[\W\d_]+', '', query)
+        if not query:
+            plan['query'] = ''
+    return plan
+
+
 def _focused_search(engine, cfg, scoped, plan, refs):
     if not plan.get('use_context') or len(refs) != 1:
         return None
@@ -480,8 +503,9 @@ def answer(cfg: Settings, filters: dict, body: object) -> dict:
     message = mask_pii(message.strip())
     history = _history(body)
     inherited, prior_refs = context_scope(filters, body)
-    prepared = _plan(cfg, message, history, inherited)
-    plan = prepared[0]
+    raw_plan, plan_tokens = _plan(cfg, message, history, inherited)
+    plan = _normalize_metric_plan(raw_plan, message)
+    prepared = plan, plan_tokens
     ordinal = re.search(r'(?:上面|前面|刚才|刚刚|其中)(?:的)?\s*第\s*(10|[1-9一二两三四五六七八九十])\s*(?:个|条|项)', message)
     if ordinal and prior_refs:
         value = ordinal.group(1)
