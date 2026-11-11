@@ -10,6 +10,7 @@ import re
 import socket
 import threading
 import time
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -23,6 +24,8 @@ from . import api
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
+LOGIN_PAGE = Path(__file__).with_name("login.html")
+LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
 # app.get_db() 切库时会关闭旧连接；查询和写入必须持有同一把锁。
 DB_LOCK = threading.RLock()
 
@@ -209,35 +212,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _login_html(self, error: str = "") -> bytes:
-        err = f'<p class="err">{error}</p>' if error else ""
-        return (
-            '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            "<title>语海Voc · 登录</title><style>"
-            ":root{color-scheme:light}"
-            "body{margin:0;min-height:100vh;display:flex;align-items:center;"
-            "justify-content:center;background:#f5f6f8;"
-            "font:14px/1.6 -apple-system,'Microsoft YaHei',sans-serif;color:#1f2329}"
-            ".card{width:320px;padding:28px 26px;background:#fff;border-radius:12px;"
-            "box-shadow:0 4px 24px rgba(31,35,41,.08)}"
-            "h1{margin:0 0 4px;font-size:17px;font-weight:600}"
-            ".sub{margin:0 0 18px;color:#646a73;font-size:13px}"
-            "input{width:100%;box-sizing:border-box;padding:10px 12px;font-size:14px;"
-            "border:1px solid #d0d3d6;border-radius:8px;outline:none}"
-            "input:focus{border-color:#3370ff;box-shadow:0 0 0 3px rgba(51,112,255,.12)}"
-            "button{width:100%;margin-top:14px;padding:10px;font-size:14px;"
-            "border:0;border-radius:8px;background:#3370ff;color:#fff;cursor:pointer}"
-            "button:hover{background:#245bdb}"
-            ".err{margin:12px 0 0;color:#d83931;font-size:13px}"
-            "</style></head><body><main class=\"card\">"
-            "<h1>语海Voc</h1><p class=\"sub\">请输入管理员密钥</p>"
-            '<form method="post" action="/login">'
-            '<input type="password" name="key" autofocus required '
-            'autocomplete="current-password" placeholder="管理员密钥">'
-            "<button type=\"submit\">进入</button></form>"
-            + err +
-            "</main></body></html>"
-        ).encode("utf-8")
+        template = LOGIN_PAGE.read_text(encoding="utf-8")
+        return template.replace("<!--LOGIN_ERROR-->", escape(error)).encode("utf-8")
 
     def _send_login(self, error: str = "", status: int = 401) -> None:
         self._send(self._login_html(error), "text/html; charset=utf-8", status)
@@ -282,6 +258,9 @@ class Handler(BaseHTTPRequestHandler):
             path, qs = unquote(u.path), parse_qs(u.query, max_num_fields=30)
             if path == "/login":
                 self._send_login(status=200)
+                return
+            if path == "/login-landscape.js":
+                self._send(LOGIN_LANDSCAPE.read_bytes(), "text/javascript; charset=utf-8")
                 return
             if path == "/logout":
                 self._redirect("/login", f"{self.COOKIE}=; Path=/; Max-Age=0; HttpOnly")

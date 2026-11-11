@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#e4ded2">
+  <title>汇沙成海 · 语海 VOC</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #171410;
+      --muted: #655b4d;
+      --line: rgba(120, 102, 76, .24);
+      --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", STSong, SimSun, serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #e4ded2;
+      font-family: var(--serif);
+    }
+    h1, h2, p { margin: 0; }
+    button, input { font: inherit; }
+
+    .scene {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+      background: linear-gradient(#e9e4d9, #d9d0bf 43%, #70604a);
+    }
+    #landscape { display: block; width: 100%; height: 100%; }
+    .veil {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at 13% 43%, rgba(248, 243, 230, .64), rgba(247, 242, 229, .27) 27%, transparent 65%);
+      mask-image: linear-gradient(#000 4%, #000 44%, transparent 69%);
+      opacity: 1;
+      transition: opacity .85s ease;
+    }
+    .intro .veil { opacity: .54; }
+
+    .wrap {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) clamp(304px, 28vw, 372px);
+      align-items: center;
+      gap: 64px;
+      min-height: 100vh;
+      min-height: 100svh;
+      max-width: 1400px;
+      margin-inline: auto;
+      padding: 58px clamp(48px, 9vw, 126px) 70px;
+    }
+    .intro .wrap { visibility: hidden; }
+    .brand h1 {
+      font-size: clamp(40px, 4.25vw, 62px);
+      text-wrap: balance;
+      font-weight: 600;
+      letter-spacing: .075em;
+      line-height: 1.15;
+    }
+    .wordmark {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-top: 22px;
+      color: #4c453b;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: .38em;
+    }
+    .wordmark::before { content: ""; width: 46px; height: 1px; background: rgba(76, 69, 59, .38); }
+    .tagline {
+      margin-top: 19px;
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.8;
+      letter-spacing: .12em;
+    }
+
+    .entered .brand h1 { animation: title-in .38s cubic-bezier(.2, .75, .28, 1) both; }
+    .entered .wordmark { animation: detail-in .34s ease-out .09s both; }
+    .entered .wordmark::before { transform-origin: left; animation: draw-rule .36s ease-out .09s both; }
+    .entered .tagline { animation: detail-in .36s ease-out .17s both; }
+    .entered .panel { animation: panel-in .5s cubic-bezier(.2, .65, .3, 1) .4s both; }
+
+    @keyframes title-in {
+      0% { opacity: .14; transform: translateY(9px) scale(.95); }
+      62% { opacity: 1; transform: translateY(-1px) scale(1.016); }
+      100% { opacity: 1; transform: none; }
+    }
+    @keyframes detail-in {
+      from { opacity: 0; transform: translateY(5px); }
+      to { opacity: 1; transform: none; }
+    }
+    @keyframes draw-rule { from { transform: scaleX(.15); } to { transform: scaleX(1); } }
+    @keyframes panel-in {
+      from { visibility: hidden; opacity: 0; transform: translateY(8px); filter: blur(2px); }
+      to { visibility: visible; opacity: 1; transform: none; filter: none; }
+    }
+    .panel {
+      min-width: 0;
+      padding: 30px 28px 22px;
+      border: 1px solid rgba(165, 133, 76, .43);
+      border-radius: 13px;
+      background: linear-gradient(180deg, rgba(253, 251, 245, .94), rgba(244, 237, 225, .9));
+      box-shadow: inset 0 1px 0 rgba(255, 248, 218, .94), 0 22px 48px -26px rgba(44, 32, 18, .6), 0 2px 8px rgba(44, 32, 18, .07);
+      -webkit-backdrop-filter: blur(20px) saturate(106%);
+      backdrop-filter: blur(20px) saturate(106%);
+    }
+    .panel h2 { font-size: 19px; font-weight: 600; letter-spacing: .1em; }
+    .panel .subtitle { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .field { margin-top: 23px; }
+    .field label {
+      display: block;
+      margin-bottom: 9px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: .12em;
+    }
+    .field input {
+      width: 100%;
+      min-height: 44px;
+      padding: 0 13px;
+      border: 1px solid rgba(126, 104, 74, .4);
+      border-radius: 7px;
+      background: rgba(255, 253, 248, .36);
+      box-shadow: inset 0 1px 2px rgba(60, 46, 30, .05);
+      color: #221d16;
+      font-size: 16px;
+      letter-spacing: .1em;
+    }
+    .field input::placeholder { color: #938470; }
+    .field input:focus {
+      outline: 2px solid transparent;
+      border-color: #887358;
+      background: rgba(255, 253, 248, .72);
+      box-shadow: 0 0 0 2.5px rgba(150, 124, 86, .15);
+    }
+    .submit {
+      width: 100%;
+      min-height: 44px;
+      margin-top: 17px;
+      border: 0;
+      border-radius: 7px;
+      background: linear-gradient(#2a251e, #181410);
+      color: #f6f1e6;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: .1em;
+      cursor: pointer;
+    }
+    .submit:hover { background: linear-gradient(#373027, #262019); }
+    .submit:active { transform: translateY(1px); }
+    button:focus-visible { outline: 2px solid #826847; outline-offset: 3px; }
+    .status {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .status:not(:empty) { margin-top: 12px; }
+    .hint {
+      margin-top: 17px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.7;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        grid-template-columns: minmax(0, 420px);
+        align-content: center;
+        justify-content: center;
+        gap: 34px;
+        padding-inline: 25px;
+      }
+      .panel { grid-row: 1; }
+      .brand h1 { font-size: clamp(34px, 9vw, 44px); }
+      .wordmark { margin-top: 15px; }
+      .tagline { margin-top: 12px; }
+      .veil {
+        background: linear-gradient(180deg, rgba(248, 244, 235, .28) 0%, rgba(248, 244, 235, .68) 58%, rgba(248, 244, 235, .5) 68%, transparent 84%);
+        mask-image: none;
+      }
+    }
+    @media (max-height: 560px) {
+      .wrap { padding-block-start: 28px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .veil { transition: none; }
+      .entered .brand h1, .entered .wordmark, .entered .wordmark::before,
+      .entered .tagline, .entered .panel { animation: none; }
+    }
+    @media (forced-colors: active) {
+      .field input:focus { outline-color: Highlight; }
+    }
+  </style>
+</head>
+<body>
+  <div class="scene" aria-hidden="true">
+    <canvas id="landscape"></canvas>
+    <div class="veil"></div>
+  </div>
+
+  <main class="wrap">
+    <header class="brand">
+      <h1>汇沙成海</h1>
+      <p class="wordmark">语海 VOC</p>
+      <p class="tagline">客服会话 · 智能质检 · 客户之声</p>
+    </header>
+
+    <form class="panel" method="post" action="/login" aria-labelledby="login-title">
+      <h2 id="login-title">管理员登录</h2>
+      <p class="subtitle">请输入管理员密钥</p>
+      <div class="field">
+        <label for="key">管理员密钥</label>
+        <input id="key" name="key" type="password" placeholder="••••••••••" autocomplete="current-password" aria-describedby="login-status" required autofocus>
+      </div>
+      <button class="submit" type="submit">进入看板</button>
+      <p class="status" id="login-status" role="alert"><!--LOGIN_ERROR--></p>
+      <p class="hint">遇到登录问题，请联系系统管理员。</p>
+    </form>
+  </main>
+
+  <script src="/login-landscape.js" defer></script>
+</body>
+</html>

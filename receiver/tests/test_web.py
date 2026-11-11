@@ -237,6 +237,25 @@ class TestAdminKey(LocalFixture):
         self.assertEqual(self.call("/app.js")[0], 401)
         self.assertEqual(self.call("/api/summary")[0], 401)
 
+    def test_login_template_and_canvas_script_are_available_before_authentication(self):
+        status, body, headers = self.call("/login")
+        self.assertEqual(status, 200)
+        self.assertIn("汇沙成海".encode("utf-8"), body)
+        self.assertIn(b'method="post" action="/login"', body)
+        self.assertIn(b'name="key" type="password"', body)
+        self.assertIn(b'src="/login-landscape.js"', body)
+        self.assertNotIn(b"<!--LOGIN_ERROR-->", body)
+        self.assertNotIn(self.KEY.encode(), body)
+        script_policy = next(part for part in headers["Content-Security-Policy"].split(";")
+                             if part.strip().startswith("script-src "))
+        self.assertEqual(script_policy.strip(), "script-src 'self'")
+        status, animation, headers = self.call("/login-landscape.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertIn(b"requestAnimationFrame", animation)
+        self.assertNotIn(b"preventDefault", animation)
+        self.assertEqual(self.call("/login-landscape.js/extra")[0], 401)
+
     def test_query_key_sets_cookie_and_redirects(self):
         status, _, headers = self.call("/?key=" + self.KEY)
         self.assertEqual(status, 302)
