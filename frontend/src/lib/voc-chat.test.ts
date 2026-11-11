@@ -2,6 +2,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CHAT_STORAGE_KEY, chatHref, chatScopeKey, citationFilters, createChatStore, normalizeChatFilters, readChatFilters, type ChatAnswer } from './voc-chat'
 import { apiPost, type ApiFilters } from './api'
 
+it('preserves the selected topic in links and cannot switch topic through a citation', () => {
+  const focus = 't_' + 'a'.repeat(24)
+  const other = 't_' + 'b'.repeat(24)
+  const scoped = normalizeChatFilters({ days: 7, focus_topic: focus, workbench: 1, trend: 'rising' })
+
+  expect(readChatFilters(chatHref(scoped))).toEqual(scoped)
+  expect(scoped).not.toHaveProperty('trend')
+  expect(scoped).not.toHaveProperty('workbench')
+  expect(citationFilters(scoped, { days: 30, focus_topic: other })).toMatchObject({ days: 30, focus_topic: focus })
+  expect(normalizeChatFilters({ focus_topic: 'unbounded' })).not.toHaveProperty('focus_topic')
+})
 afterEach(() => vi.unstubAllGlobals())
 
 function memoryStorage() {

@@ -29,6 +29,7 @@ except ZoneInfoNotFoundError:
     DISPLAY_ZONE = timezone(timedelta(hours=8), 'Asia/Shanghai')
 ACTIVE = ('queued', 'running')
 STATES = frozenset((*ACTIVE, 'completed', 'partial', 'failed', 'skipped'))
+WORKBENCH_TRENDS = frozenset(('all', 'new', 'rising', 'persistent'))
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS voc_service_job (
  id TEXT PRIMARY KEY,status TEXT NOT NULL,total INTEGER NOT NULL DEFAULT 0,
@@ -281,8 +282,11 @@ def execute(cfg: Settings, job_id: str) -> dict:
     return next(item for item in jobs(cfg)['items'] if item['id']==job_id)
 
 
-def get(cfg: Settings, name: str, filters: dict, identity: str = '') -> dict:
+def get(cfg: Settings, name: str, filters: dict, identity: str = '', *,
+        workbench: bool = False, trend: str = 'all') -> dict:
     engine=_engine()
+    if workbench and name=='topics':return engine.topics(cfg,filters,workbench=True,trend=trend)
+    if workbench and name=='topic':return engine.topic_detail(cfg,filters,identity,workbench=True)
     if name=='summary':
         result=engine.summary(cfg,filters)
         all_jobs=jobs(cfg)['items']

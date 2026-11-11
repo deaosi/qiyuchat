@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
-export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean }
+export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean; anchorMessageId?: string; onCloseAutoFocus?: (event: Event) => void }
 
 type Availability = 'available' | 'partial' | 'archived' | 'empty'
 type RawContextMessage = { role?: unknown; content?: unknown; time?: unknown; source_message_id?: unknown; ts?: unknown; is_question?: unknown; is_answer?: unknown; images?: DetailMessageImage[] }
@@ -102,19 +102,19 @@ const messageLayout = {
   center: { row: 'justify-center', group: 'items-center', bubble: 'border-transparent bg-foreground/5 text-muted-foreground' },
 } as const
 
-function ConversationMessage({ message, pair }: { message: ContextMessage; pair: QAPair }) {
+function ConversationMessage({ message, pair, anchored }: { message: ContextMessage; pair: QAPair; anchored: boolean }) {
   const side = message.role === 'staff' ? 'right' : message.role === 'user' ? 'left' : 'center'
   const layout = messageLayout[side]
 
   return (
-    <li data-side={side} className={cn('flex min-w-0', layout.row)}>
+    <li data-side={side} data-evidence-anchor={anchored ? '' : undefined} className={cn('flex min-w-0 scroll-my-6', layout.row)}>
       <div className={cn('flex w-fit min-w-0 max-w-[88%] flex-col gap-1.5 sm:max-w-[80%]', layout.group)}>
         <div className={cn('flex max-w-full flex-wrap items-baseline gap-x-2 gap-y-0.5 px-1 text-xs leading-5 text-muted-foreground', layout.row)}>
           <span className="min-w-0">{messageRole(message, pair)}</span>
           <time className="tabular-nums">{message.time}</time>
           {message.sourceMessageId && message.isQuestion && <span className="text-[11px] font-medium text-foreground">本次咨询</span>}
         </div>
-        <div className={cn('w-fit min-w-0 max-w-full whitespace-pre-wrap rounded-xl border px-3.5 py-2.5 text-sm leading-6 [overflow-wrap:anywhere]', layout.bubble)}>
+        <div className={cn('w-fit min-w-0 max-w-full whitespace-pre-wrap rounded-xl border px-3.5 py-2.5 text-sm leading-6 [overflow-wrap:anywhere]', layout.bubble, anchored && 'ring-2 ring-foreground/35 ring-offset-2 ring-offset-surface')}>
           {(!message.images.length || message.content.trim() !== '[图片]') && <p>{message.content}</p>}
           {message.images.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
             {message.images.map((image, index) => <ConversationImage key={`${image.url}-${index}`} url={image.url} />)}
@@ -125,13 +125,14 @@ function ConversationMessage({ message, pair }: { message: ContextMessage; pair:
   )
 }
 
-export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false }: QADetailProps) {
+export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false, anchorMessageId, onCloseAutoFocus }: QADetailProps) {
   const [retry, setRetry] = React.useState(0)
   const [request, setRequest] = React.useState<{ key: string; loading: boolean; data: DetailData | null; error: string | null }>({ key: '', loading: false, data: null, error: null })
   const [lookupRequestedFor, setLookupRequestedFor] = React.useState<DetailData | null>(null)
   const [replyRevision, setReplyRevision] = React.useState(0)
   const [replyLookup, setReplyLookup] = React.useState<{ detail: DetailData; revision: number; result: DetailRepliesResponse } | null>(null)
   const sequence = React.useRef(0)
+  const transcript = React.useRef<HTMLOListElement>(null)
   const requestedId = requestedPair?.id
   const requestKey = requestedPair && source ? JSON.stringify([source, requestedPair.id]) : ''
   React.useEffect(() => {
@@ -193,6 +194,10 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   const archived = Boolean(loaded?.archived)
   const officialFound = officialResult?.status === 'found'
   const messages = officialFound ? mergeOfficialReplies(retainedMessages, officialResult.messages) : retainedMessages
+  const anchoredKey = anchorMessageId ? messages.find(message => message.sourceMessageId === anchorMessageId)?.key : undefined
+  React.useEffect(() => {
+    if (anchoredKey) transcript.current?.querySelector('[data-evidence-anchor]')?.scrollIntoView?.({ block: 'nearest' })
+  }, [anchoredKey, anchorMessageId, requestKey])
   const availability = loaded?.availability || (archived ? 'archived' : undefined)
   const noStaffMessages = embedded && !lookupStatus && retainedMessages.length > 0 && (availability === 'available' || availability === 'partial') && !hasRetainedStaff
   const content = pair && <div className={embedded ? 'min-w-0 [overflow-wrap:anywhere]' : 'min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-8 [overflow-wrap:anywhere]'}>
@@ -234,8 +239,9 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
                     {(lookupStatus === 'busy' || lookupStatus === 'unavailable') && <Button variant="ghost" size="xs" onClick={() => setReplyRevision(value => value + 1)}>重试查询</Button>}
                   </div>}
                   {availability === 'archived' && <div role="status" className="mb-4 flex items-start gap-3 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><Archive className="mt-1 size-4 shrink-0" /><p>原始聊天记录已归档。</p></div>}
-                  {messages.length ? <ol className="space-y-4 rounded-xl border border-border/70 bg-surface px-3 py-4 sm:space-y-5 sm:px-5 sm:py-5" aria-label="会话消息">
-                    {messages.map(message => <ConversationMessage key={message.key} message={message} pair={pair} />)}
+                  {anchorMessageId && !anchoredKey && lookupStatus !== 'loading' && <p role="status" className="mb-4 text-sm text-muted-foreground">当前保留的会话记录中无法定位这条证据。</p>}
+                  {messages.length ? <ol ref={transcript} className="space-y-4 rounded-xl border border-border/70 bg-surface px-3 py-4 sm:space-y-5 sm:px-5 sm:py-5" aria-label="会话消息">
+                    {messages.map(message => <ConversationMessage key={message.key} message={message} pair={pair} anchored={message.key === anchoredKey} />)}
                   </ol>
                     : availability !== 'archived' && <p className="rounded-lg border bg-muted/20 p-4 text-sm leading-6 text-muted-foreground">当前会话没有可展示的聊天记录。</p>}
                 </>}
@@ -246,7 +252,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   if (embedded) return content
   return (
     <Sheet open={Boolean(pair)} onOpenChange={open => { if (!open) onClose() }}>
-      <SheetContent className="w-full gap-0 sm:max-w-[560px] data-[state=open]:duration-250 data-[state=closed]:duration-200">
+      <SheetContent onCloseAutoFocus={onCloseAutoFocus} className="w-full gap-0 sm:max-w-[560px] data-[state=open]:duration-250 data-[state=closed]:duration-200">
         <SheetHeader className="shrink-0 border-b p-6 pr-12">
           <SheetTitle className="text-lg">问答与相关会话上下文</SheetTitle>
           <SheetDescription>查看与当前客户相关的会话片段，核对原话、客服回复与咨询背景。</SheetDescription>

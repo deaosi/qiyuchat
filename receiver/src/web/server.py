@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import mimetypes
+import re
 import socket
 import threading
 import time
@@ -143,6 +144,11 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("未知知汇鸽咨询类型")
         if len(qs.get("diagnosis_status", [])) > 1 or diagnosis not in ("all", "reported", "pending", "config_cause_confirmed", "platform_limit_confirmed", "defect_confirmed", "not_applicable"):
             raise ValueError("未知问题诊断状态")
+        if "focus_topic" in qs:
+            topic = _str(qs, "focus_topic")
+            if len(qs["focus_topic"]) != 1 or not re.fullmatch(r"t_[a-f0-9]{24}", topic):
+                raise ValueError("问题范围无效。")
+            filters["focus_topic"] = topic
         return {**filters,"support_intent":support,"diagnosis_status":diagnosis}
 
     # ---------- 单管理员密钥鉴权 ----------
@@ -312,7 +318,19 @@ class Handler(BaseHTTPRequestHandler):
                     limit, offset = _int(qs, "limit", 20), _int(qs, "offset", 0)
                     if not 1 <= limit <= 20 or offset < 0:
                         raise ValueError("高频问题每页须为 1–20 条，起始位置须为非负整数。")
-                result = voc_service.get(cfg, name[5:], self._voc_filters(qs), _str(qs, "id"))
+                voc_filters = self._voc_filters(qs)
+                if name in ("voc2/topics", "voc2/topic") and ("workbench" in qs or "trend" in qs):
+                    workbench = _str(qs, "workbench", "0")
+                    trend = _str(qs, "trend", "all")
+                    if len(qs.get("workbench", [])) > 1 or workbench not in ("0", "1"):
+                        raise ValueError("工作台视图参数无效。")
+                    if (len(qs.get("trend", [])) > 1 or trend not in voc_service.WORKBENCH_TRENDS
+                            or trend != "all" and (name != "voc2/topics" or workbench != "1")):
+                        raise ValueError("高频问题趋势筛选无效。")
+                    result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"),
+                                             workbench=workbench == "1", trend=trend)
+                else:
+                    result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"))
                 if paged:
                     result = {**result, "items": result["items"][offset:offset + limit]}
                 self._json(result)
@@ -447,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise voc_service.ServiceError("新整理请求不是有效 JSON。") from None
                     filters=self._filters(qs)
                     if path=="/api/voc2/run":
+                        if "focus_topic" in qs:
+                            raise voc_service.ServiceError("单个问题范围仅用于查询，请从高频问题页整理当前数据范围。")
                         self._json(voc_service.start(cfg,filters,body))
                     elif path=="/api/voc2/assistant":
                         self._json(voc_assistant.answer(cfg,self._voc_filters(qs),body))

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, CircleAlert, LoaderCircle, MessagesSquare, RefreshCw, Sparkles } from 'lucide-react'
+import { ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, CircleAlert, Copy, LoaderCircle, MessagesSquare, RefreshCw, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
-import { apiPost, normalizePair, type ApiFilters, type VocConversationVerification, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
+import { apiPost, type ApiFilters, type VocConversationVerification, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -14,134 +14,54 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Progress } from '@/components/ui/progress'
 import { LoadingMark, LoadingState, LoadingValue } from './loading-state'
+import { diagnosisLabels, displayTime, intentLabels, KnowledgeContent, knowledgeReuseLevel } from './voc-topic-evidence'
+import { copyKnowledge, TopicWorkbench, TrendComparison, trendBadgeText, trendLabels, type TrendComparisonData, type TrendFilter, type TopicTrend } from './voc-topic-detail'
 
-type PrimaryIntent = 'configuration_guidance' | 'functional_anomaly' | 'unclear'
-type DiagnosisStatus = 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
-type Ref = { source: 'question' | 'answer'; quote: string; start: number; end: number; role: string; alignment: 'exact' }
-type Domain = { primary_intent: PrimaryIntent; fragment_role: 'request' | 'follow_up' | 'reproduction_context'; platforms: Ref[]; modules: Ref[]; merchant_goal: Ref | null; expected: Ref | null; actual: Ref | null; reproduction_context: Ref[]; prerequisites: Ref[]; operation_path: Ref[]; diagnosis: { status: DiagnosisStatus; cause_code: string; cause: Ref | null; evidence: Ref[] }; actions: { method_code: string; instruction: Ref; effect_status: 'suggested' | 'verified'; verification: Ref | null }[]; tags: string[] }
-type Topic = { id: string; question: string; theme: string; primary_intent?: PrimaryIntent; consultation_count?: number; event_count: number; customer_count: number; session_count: number; mention_count: number; last_seen: string; samples: string[] }
-export type Knowledge = { id: string; topic_id: string; variant_id?: string; kind?: VocKnowledgeKind; diagnosis_status?: DiagnosisStatus; effect_status?: 'suggested' | 'verified'; applicability?: Ref[]; confirmed_cause?: Ref | null; conversation_verification?: VocConversationVerification; knowledge_reuse?: VocKnowledgeReuse; question: string; answer: string; scope: string; steps: string[]; cautions: string[]; reply_patterns: string[]; evidence_count: number; status: 'ready'; version: number; updated_at: string; evidence: Evidence[] }
-export type Evidence = { id: string; event_id: string; qa_id?: number | string; question: string; answer: string; question_quote?: string; customer_name?: string; customer_id?: string; group_name?: string; staff_name?: string; asked_at?: string | number; asked_at_text?: string; session_id?: string; domain?: Domain; staff_source_verified: boolean; claims: { role: string; quote: string; start: number; end: number; source_refs: { message_id: string | number; start: number; end: number }[] }[] }
+export type PrimaryIntent = 'configuration_guidance' | 'functional_anomaly' | 'unclear'
+export type DiagnosisStatus = 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
+type SourceRef = { message_id: string | number; start: number; end: number }
+export type Ref = { source: 'question' | 'answer'; quote: string; start: number; end: number; role: string; alignment: 'exact'; source_refs?: SourceRef[] }
+export type Domain = { primary_intent: PrimaryIntent; fragment_role: 'request' | 'follow_up' | 'reproduction_context'; platforms: Ref[]; modules: Ref[]; merchant_goal: Ref | null; expected: Ref | null; actual: Ref | null; reproduction_context: Ref[]; prerequisites: Ref[]; operation_path: Ref[]; diagnosis: { status: DiagnosisStatus; cause_code: string; cause: Ref | null; evidence: Ref[] }; actions: { method_code: string; instruction: Ref; effect_status: 'suggested' | 'verified'; verification: Ref | null }[]; tags: string[] }
+export type Topic = { id: string; question: string; theme: string; primary_intent?: PrimaryIntent; consultation_count?: number; event_count: number; customer_count: number; session_count: number; mention_count: number; last_seen: string; samples: string[]; platforms?: string[]; merchant_count?: number; unknown_merchant_sessions?: number; trend?: TopicTrend }
+export type KnowledgeReuse = 'direct' | 'reference' | 'history' | 'blocked'
+export type Knowledge = { reuse_level?: KnowledgeReuse; id: string; topic_id: string; variant_id?: string; kind?: VocKnowledgeKind; diagnosis_status?: DiagnosisStatus; effect_status?: 'suggested' | 'verified'; applicability?: Ref[]; confirmed_cause?: Ref | null; conversation_verification?: VocConversationVerification; knowledge_reuse?: VocKnowledgeReuse; question: string; answer: string; scope: string; steps: string[]; cautions: string[]; reply_patterns: string[]; evidence_count: number; status: 'ready'; version: number; updated_at: string; evidence: Evidence[] }
+export type Evidence = { id: string; event_id: string; qa_id?: number | string; question: string; answer: string; question_quote?: string; customer_name?: string; customer_id?: string; group_name?: string; staff_name?: string; asked_at?: string | number; asked_at_text?: string; session_id?: string; domain?: Domain; staff_source_verified: boolean; question_message_ids?: (string | number)[]; workbench?: { commerce_settings: Ref[]; scenario_conditions: Ref[]; actual: Ref[]; question_message_id?: string; suspected_report_ready?: boolean }; claims: { role: string; quote: string; start: number; end: number; source_refs: SourceRef[] }[] }
 type ResultList<T> = { items: T[]; total: number }
+type TopicList = ResultList<Topic> & { comparison?: TrendComparisonData }
 type Job = { id: string; status: string; total: number; failed: number; skipped: number; processed: number; error: string; created_at: string; updated_at: string; usage_tokens: number }
 type Summary = { source_pairs: number; total_events: number; consultation_count?: number; topic_count: number; coverage: { processed_pairs: number; pending_pairs: number }; semantics: { ready: boolean; error?: string }; latest_job: Job | null }
-type WorkspaceProps = { filters: ApiFilters; refreshKey?: number; onOpenPair: (pair: QAPair) => void }
-export type TopicDetail = { topic: Topic; events: Evidence[] }
+export type OpenEvidencePair = (pair: QAPair, messageId?: string) => void
+type WorkspaceProps = { filters: ApiFilters; refreshKey?: number; onOpenPair: OpenEvidencePair }
+export type TopicDetail = { topic: Topic; events: Evidence[]; workbench?: { comparison: TrendComparisonData; knowledge: Knowledge[]; gaps: { code: string; count: number }[] } }
 const topicPageSize = 20
 const count = (n: number | undefined) => typeof n === 'number' ? n.toLocaleString('zh-CN') : '—'
 const active = (job: Job | null | undefined) => job?.status === 'queued' || job?.status === 'running'
 const labels: Record<string, string> = { queued: '排队中', running: '整理中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '已跳过' }
-const intentLabels: Record<PrimaryIntent, string> = { configuration_guidance: '场景配置与使用指导', functional_anomaly: '功能异常与排障', unclear: '待识别背景' }
-const diagnosisLabels: Record<DiagnosisStatus, string> = { reported: '商家报告', pending: '待定位', config_cause_confirmed: '配置原因已确认', platform_limit_confirmed: '平台约束已确认', defect_confirmed: '缺陷已确认', not_applicable: '不适用' }
-const knowledgeLabels: Record<VocKnowledgeKind, string> = { configuration_guide: '配置指引', troubleshooting_advice: '排查建议', verified_workaround: '绕行方案', capability_fact: '功能说明' }
-const reuseLabels: Record<VocKnowledgeReuse['level'], string> = { verified: '操作效果已验证', guidance: '来源已核验', reference: '来源记录' }
-
-function knowledgeReuseLevel(item: Knowledge): VocKnowledgeReuse['level'] {
-  if (item.knowledge_reuse) return item.knowledge_reuse.level
-  const closure = item.conversation_verification
-  return closure?.auto_reusable && closure.status === 'accepted' && closure.acceptance === 'resolved'
-    && closure.effect === 'customer_reported_success' ? 'verified' : 'reference'
-}
-
-function displayTime(input?: string | number): string {
-  if (!input) return ''
-  const value = String(input)
-  if (!/^\d+$/.test(value)) return value
-  const parsed = Number(value)
-  const date = new Date(parsed < 100_000_000_000 ? parsed * 1000 : parsed)
-  return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date).replaceAll('/', '-')
-}
-
 export function QueryPanel({ loading, error, retry, children, hasData = false }: { loading: boolean; error: string | null; retry: () => void; children: ReactNode; hasData?: boolean }) {
   if (loading) return <LoadingState />
   if (error && !hasData) return <div role="alert" className="flex min-h-40 flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground"><CircleAlert className="size-5" /><p>{error}</p><Button variant="outline" size="sm" onClick={retry}><RefreshCw />重试</Button></div>
   return <>{error && <div role="status" className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground"><CircleAlert className="size-4" /><span>自动更新暂时失败，正在显示上次结果。{error}</span><Button variant="ghost" size="xs" onClick={retry}>重试</Button></div>}{children}</>
 }
 
-function SourceQuotes({ label, refs }: { label: string; refs: (Ref | null | undefined)[] }) {
-  const present = refs.filter((ref): ref is Ref => Boolean(ref?.quote))
-  if (!present.length) return null
-  return <div className="space-y-1"><div className="text-xs font-medium text-foreground">{label}</div>{present.map((ref, index) => <p key={index} className="whitespace-pre-wrap break-words text-sm text-muted-foreground">“{ref.quote}” <span className="text-xs">· {ref.source === 'question' ? '商家原话' : '回复原话'}</span></p>)}</div>
-}
-
-function DomainEvidence({ domain }: { domain?: Domain }) {
-  if (!domain) return null
-  const status = domain.diagnosis?.status
-  return <div className="mt-3 space-y-3 border-t pt-3">
-    <div className="flex flex-wrap gap-2"><Badge variant="secondary" className="font-normal">{intentLabels[domain.primary_intent] || '待识别背景'}</Badge>{status && status !== 'not_applicable' && <Badge variant="outline" className="font-normal">{diagnosisLabels[status] || '待核对'}</Badge>}{domain.fragment_role === 'reproduction_context' && <Badge variant="outline" className="font-normal">复现背景</Badge>}{domain.fragment_role === 'follow_up' && <Badge variant="outline" className="font-normal">后续补充</Badge>}</div>
-    <SourceQuotes label="涉及平台" refs={domain.platforms || []} />
-    <SourceQuotes label="涉及模块" refs={domain.modules || []} />
-    <SourceQuotes label="商家诉求" refs={[domain.merchant_goal]} />
-    <SourceQuotes label="期望结果" refs={[domain.expected]} />
-    <SourceQuotes label="实际表现" refs={[domain.actual]} />
-    <SourceQuotes label="诊断原因" refs={[domain.diagnosis?.cause]} />
-    <SourceQuotes label="诊断依据" refs={domain.diagnosis?.evidence || []} />
-    <SourceQuotes label="前置条件" refs={domain.prerequisites || []} />
-    <SourceQuotes label="原文操作步骤" refs={domain.operation_path || []} />
-    <SourceQuotes label="复现背景" refs={domain.reproduction_context || []} />
-    {(domain.actions || []).map((action, index) => <div key={index} className="space-y-1"><SourceQuotes label={action.effect_status === 'verified' && action.verification?.quote ? '已验证操作' : '建议操作（效果未验证）'} refs={[action.instruction]} /><SourceQuotes label="验证依据" refs={[action.verification]} /></div>)}
-  </div>
-}
-
-export function EvidenceList({ evidence, onOpenPair }: { evidence: Evidence[]; onOpenPair: (pair: QAPair) => void }) {
-  if (!evidence.length) return <p className="text-sm text-muted-foreground">暂无可展示的原句依据。</p>
-  return <div className="space-y-3">{evidence.map(item => {
-    const quotes = [...new Set(item.claims.filter(claim => claim.role === 'staff' && claim.quote.trim()).map(claim => claim.quote))]
-    return <div key={item.id} className="rounded-lg border bg-muted/20 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{item.qa_id ? `问答 ${item.qa_id} · ` : ''}{item.customer_name || '匿名客户'}{displayTime(item.asked_at) ? ` · ${displayTime(item.asked_at)}` : ''}</span>{item.qa_id && <Button variant="ghost" size="xs" onClick={() => onOpenPair(normalizePair(item))}>查看会话上下文 <ArrowUpRight /></Button>}</div>
-      <p className="mt-2 whitespace-pre-wrap break-words text-sm">{item.question_quote || item.question}</p>
-      <DomainEvidence domain={item.domain} />
-      <div className="mt-3 space-y-1.5 text-sm"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{quotes.length && item.staff_source_verified ? '本意图客服原句' : '本意图回复依据'}</span>{(!item.staff_source_verified || quotes.length > 0) && <Badge variant="outline" className="font-normal">{item.staff_source_verified ? '客服来源已核验' : '客服来源未核验'}</Badge>}</div>{quotes.length ? quotes.map((quote, index) => <p key={index} className="whitespace-pre-wrap break-words text-muted-foreground">{quote}</p>) : <p className="text-muted-foreground">暂无本意图的回复片段。</p>}</div>
-    </div>
-  })}</div>
-}
-
-export function KnowledgeContent({ item, onOpenPair }: { item: Knowledge; onOpenPair: (pair: QAPair) => void }) {
-  const kind = item.kind ? knowledgeLabels[item.kind] : '类型待识别'
-  const confirmed = item.diagnosis_status && ['config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed'].includes(item.diagnosis_status)
-  const closure = item.conversation_verification
-  const feedbackEvidence = item.knowledge_reuse?.evidence ?? closure?.evidence
-  const level = knowledgeReuseLevel(item)
-  const guidanceDescription = item.kind === 'configuration_guide'
-    ? '客服原话和适用条件已核验，可按所列条件使用。'
-    : '客服原话和适用条件已核验，可用于排查。操作效果待验证。'
-  const reuseDescription = level === 'verified' ? '客户明确反馈操作成功，可按所列条件复用。'
-    : level === 'guidance' ? guidanceDescription : '保留此记录供查阅原始会话。'
-  return <div className="space-y-3">
-    <div className="flex flex-wrap items-center gap-2"><Badge variant="secondary" className="font-normal">{kind}</Badge><Badge variant={level === 'verified' ? 'default' : 'outline'} className="font-normal">{reuseLabels[level]}</Badge>{item.diagnosis_status && item.diagnosis_status !== 'not_applicable' && <Badge variant="outline" className="font-normal">{diagnosisLabels[item.diagnosis_status] || '待核对'}</Badge>}</div>
-    <div className="rounded-lg border bg-muted/20 p-3 text-sm">
-      <p>{reuseDescription}</p>
-      {closure?.acceptance === 'understood' && <p className="mt-1 text-muted-foreground">客户已接受解释。</p>}
-      {feedbackEvidence?.map((ref, index) => <p key={index} className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">“{ref.quote}” · {ref.role === 'user' || ref.role === 'merchant' ? '客户反馈' : '会话证据'}{ref.ts ? ` · ${displayTime(ref.ts)}` : ''}{ref.message_id ? ` · 消息 ${ref.message_id}` : ''}</p>)}
-    </div>
-    <h3 className="font-medium">{item.question}</h3><p className="whitespace-pre-wrap break-words text-sm">{item.answer}</p>
-    {item.steps.length > 0 && <div className="text-sm"><span className="font-medium">步骤</span><ol className="mt-1 list-inside list-decimal space-y-1">{item.steps.map((step, i) => <li key={i}>{step}</li>)}</ol></div>}
-    {item.scope && <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">适用范围：{item.scope}</p>}
-    <SourceQuotes label="适用条件依据" refs={item.applicability || []} />
-    {confirmed && <SourceQuotes label="已确认原因依据" refs={[item.confirmed_cause]} />}
-    {item.reply_patterns.length > 0 && <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">日常话术：{item.reply_patterns.join('；')}</p>}
-    {item.cautions.length > 0 && <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">注意事项：{item.cautions.join('；')}</p>}
-    <div><h4 className="mb-2 text-sm font-medium">来源依据</h4><EvidenceList evidence={item.evidence} onOpenPair={onOpenPair} /></div>
-  </div>
-}
-
 export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onOpenChat }: WorkspaceProps & { onOpenChat: (filters: ApiFilters) => void }) {
   const [supportIntent, setSupportIntent] = useState<NonNullable<ApiFilters['support_intent']>>('all')
   const [diagnosisStatus, setDiagnosisStatus] = useState<NonNullable<ApiFilters['diagnosis_status']>>('all')
+  const [trend, setTrend] = useState<TrendFilter>('all')
   const [revision, setRevision] = useState(0)
   const [runOpen, setRunOpen] = useState(false)
   const [running, setRunning] = useState(false)
   const [limit, setLimit] = useState('100')
   const rankingHeading = useRef<HTMLDivElement>(null)
   const resultFilters: ApiFilters = { ...filters, support_intent: supportIntent, diagnosis_status: diagnosisStatus }
-  const scopeKey = JSON.stringify(resultFilters)
+  const scopeKey = JSON.stringify({ ...resultFilters, trend })
   const [ranking, setRanking] = useState<{ scopeKey: string; page: number; selectedId: string | null }>({ scopeKey, page: 0, selectedId: null })
   const { page, selectedId } = ranking.scopeKey === scopeKey ? ranking : { page: 0, selectedId: null }
   const offset = page * topicPageSize
   const key = refreshKey + revision
   const summary = useApi<Summary>('voc2/summary', resultFilters, key)
-  const topics = useApi<ResultList<Topic>>('voc2/topics', { ...resultFilters, limit: topicPageSize, offset }, key)
-  const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
+  const topics = useApi<TopicList>('voc2/topics', { ...resultFilters, workbench: 1, trend, limit: topicPageSize, offset }, key)
+  const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, workbench: 1, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
+  const comparison = topics.data?.comparison
   const lastPage = topics.data ? Math.max(0, Math.ceil(topics.data.total / topicPageSize) - 1) : null
   const pageLoading = topics.loading || (lastPage !== null && page > lastPage)
   const job = summary.data?.latest_job
@@ -216,22 +136,36 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
     <Card>
       <CardHeader>
         <CardTitle ref={rankingHeading} role="heading" aria-level={2} tabIndex={-1} className="scroll-mt-4">咨询主题排行</CardTitle>
-        <CardDescription>按咨询次数排序。同一次咨询的多次提及可能产生多个片段。</CardDescription>
-        {summary.data && <p className="text-xs text-muted-foreground">当前日期、客户群和客服范围已整理 {count(summary.data.coverage.processed_pairs)} / {count(summary.data.source_pairs)} 条问答，待整理 {count(summary.data.coverage.pending_pairs)} 条。</p>}
+        <CardDescription>按咨询次数排序，同一会话的同一主题去重。</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        <div role="group" aria-label="趋势筛选" className="flex w-fit max-w-full flex-wrap gap-1 rounded-lg border bg-muted/35 p-1">
+          {(Object.entries(trendLabels) as [TrendFilter, string][]).map(([value, label]) => <Button key={value} type="button" size="sm" variant={trend === value ? 'default' : 'ghost'} aria-pressed={trend === value}
+            disabled={value !== 'all' && value !== trend && comparison?.comparable === false} onClick={() => setTrend(value)}>{label}</Button>)}
+        </div>
+        {comparison ? <TrendComparison comparison={comparison} /> : summary.data && <p className="text-xs text-muted-foreground">当前范围已整理 {count(summary.data.coverage.processed_pairs)} / {count(summary.data.source_pairs)} 条问答，待整理 {count(summary.data.coverage.pending_pairs)} 条。</p>}
         <QueryPanel hasData={topics.data !== null} loading={pageLoading} error={topics.error} retry={topics.retry}>
-          {topics.data?.items.length ? <div className="divide-y">{topics.data.items.map((item, index) => <button key={item.id} onClick={() => setRanking({ scopeKey, page, selectedId: item.id })} className="flex w-full flex-wrap items-center justify-between gap-3 rounded-sm py-4 text-left hover:bg-muted/30 focus-visible:outline-2 focus-visible:outline-ring">
-            <span className="flex min-w-0 items-start gap-3">
-              <span className="w-7 shrink-0 text-right text-sm tabular-nums text-muted-foreground"><span className="sr-only">排名 </span>{count(offset + index + 1)}</span>
-              <span className="min-w-0 break-words">
-                <span className="block font-medium">{item.theme.trim() || item.question}</span>
-                {item.theme.trim() && item.theme.trim() !== item.question.trim() && <span className="mt-1 block text-xs text-muted-foreground">代表问法：{item.question}</span>}
-                <span className="mt-1 block text-xs text-muted-foreground">{intentLabels[item.primary_intent || 'unclear']} · 最近 {item.last_seen || '时间未知'}</span>
+          {topics.data?.items.length ? <div className="divide-y">{topics.data.items.map((item, index) => {
+            const badge = trendBadgeText(item.trend)
+            const platforms = item.platforms?.slice(0, 3).join('、')
+            return <button type="button" key={item.id} onClick={() => setRanking({ scopeKey, page, selectedId: item.id })} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-sm px-1 py-4 text-left transition-colors hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring sm:px-2">
+              <span className="flex min-w-0 items-start gap-3">
+                <span className="w-7 shrink-0 text-right text-sm tabular-nums text-muted-foreground"><span className="sr-only">排名 </span>{count(offset + index + 1)}</span>
+                <span className="min-w-0 [overflow-wrap:anywhere]">
+                  <span className="flex flex-wrap items-center gap-1.5"><span className="font-medium">{item.theme.trim() || item.question}</span>{badge && <Badge variant="outline" className="font-normal">{badge}</Badge>}</span>
+                  {item.theme.trim() && item.theme.trim() !== item.question.trim() && <span className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.question}</span>}
+                  <span className="mt-1 block text-xs leading-5 text-muted-foreground">{[intentLabels[item.primary_intent || 'unclear'], platforms, item.last_seen && `最近 ${displayTime(item.last_seen)}`].filter(Boolean).join(' · ')}</span>
+                </span>
               </span>
-            </span>
-            <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground"><span>{count(item.consultation_count)} 次咨询</span><span>{count(item.event_count)} 个咨询片段</span><span>{count(item.customer_count)} 客户</span><span>{count(item.session_count)} 会话</span><ArrowUpRight aria-hidden="true" className="size-4" /></span>
-          </button>)}</div> : <p className="py-10 text-center text-sm text-muted-foreground">当前范围暂无高频问题。</p>}
+              <span className="flex items-center gap-3 sm:gap-4">
+                <span className="grid justify-items-end gap-1 text-right text-xs tabular-nums text-muted-foreground">
+                  <span className="font-medium text-foreground">{count(item.consultation_count)} 次咨询</span>
+                  <span className="flex flex-col items-end gap-x-1 sm:flex-row"><span>{count(item.session_count)} 个会话</span>{item.merchant_count !== undefined && <><span aria-hidden="true" className="hidden sm:inline">·</span><span>识别 {count(item.merchant_count)} 家商家</span></>}</span>
+                </span>
+                <ArrowUpRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+              </span>
+            </button>
+          })}</div> : <p className="py-10 text-center text-sm text-muted-foreground">{trend === 'all' ? '当前范围暂无高频问题。' : comparison?.comparable === false ? '当前覆盖不足，暂无法筛选趋势。' : `当前范围暂无「${trendLabels[trend]}」问题。`}</p>}
         </QueryPanel>
       </CardContent>
       {(pageLoading || page > 0 || Boolean(topics.data?.total)) && <CardFooter className="flex-wrap justify-between gap-3 border-t text-xs text-muted-foreground">
@@ -244,17 +178,15 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
       </CardFooter>}
     </Card>
     <Sheet open={selectedId !== null} onOpenChange={open => { if (!open) setRanking(current => ({ ...current, selectedId: null })) }}>
-      <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
-        <SheetHeader><SheetTitle>问题与原句依据</SheetTitle><SheetDescription>按对应查询范围展示相关会话。</SheetDescription></SheetHeader>
-        <div className="space-y-5 px-4 pb-6">
-          <QueryPanel hasData={detail.data !== null} loading={detail.loading} error={detail.error} retry={detail.retry}>{detail.data && <>
-            <div>
-              <h3 className="text-lg font-semibold">{detail.data.topic.theme.trim() || detail.data.topic.question}</h3>
-              <p className="mt-2 text-sm text-muted-foreground">代表问法：{detail.data.topic.question}</p>
-              <p className="mt-3 text-sm tabular-nums">{count(detail.data.topic.consultation_count)} 次咨询 · {count(detail.data.topic.event_count)} 个咨询片段 · {count(detail.data.topic.customer_count)} 客户 · {count(detail.data.topic.session_count)} 会话</p>
-            </div>
-            <div><h4 className="mb-3 font-medium">原句依据</h4><EvidenceList evidence={detail.data.events} onOpenPair={onOpenPair} /></div>
-          </>}</QueryPanel>
+      <SheetContent className="w-full gap-0 sm:max-w-3xl xl:max-w-4xl">
+        <SheetHeader className="shrink-0 border-b px-4 sm:px-6"><SheetTitle>问题与原句依据</SheetTitle><SheetDescription className="sr-only">查看问题的处理判断、办法和会话依据。</SheetDescription></SheetHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+          <QueryPanel hasData={detail.data !== null} loading={detail.loading} error={detail.error} retry={detail.retry}>{detail.data &&
+            <TopicWorkbench key={detail.data.topic.id} detail={detail.data} onOpenPair={onOpenPair} onAskTopic={() => {
+              const focusTopic = detail.data?.topic.id
+              if (focusTopic) onOpenChat({ ...resultFilters, focus_topic: focusTopic })
+            }} />
+          }</QueryPanel>
         </div>
       </SheetContent>
     </Sheet>
@@ -287,7 +219,10 @@ export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: W
     <CardContent>
       <QueryPanel hasData={knowledge.data !== null} loading={knowledge.loading} error={knowledge.error} retry={knowledge.retry}>
         {reusableItems.length ? <div className="grid gap-4 lg:grid-cols-2">{reusableItems.map(item =>
-          <article key={item.id} className="min-w-0 rounded-lg border p-4"><KnowledgeContent item={item} onOpenPair={onOpenPair} /></article>
+          <article key={item.id} className="min-w-0 space-y-3 rounded-lg border p-4">
+            <div className="flex justify-end"><Button variant="outline" size="sm" onClick={() => copyKnowledge(item)}><Copy />{knowledgeReuseLevel(item) === 'guidance' ? '复制指引' : '复制处理办法'}</Button></div>
+            <KnowledgeContent item={item} onOpenPair={onOpenPair} />
+          </article>
         )}</div> : <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground">
           <BookOpen aria-hidden="true" className="mb-1 size-5" />
           <p className="font-medium text-foreground">当前范围暂无可复用答案</p>

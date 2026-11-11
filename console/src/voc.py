@@ -189,11 +189,20 @@ def _bounds(filters: dict[str, Any]) -> tuple[int, int]:
     return low, high
 
 def _scope(conn: sqlite3.Connection, filters: dict[str, Any], *, qa_id: int | None = None,
-           include_messages: bool = True) -> dict[int, dict[str, Any]]:
-    low, high = _bounds(filters)
+           include_messages: bool = True, _bounds_override: tuple[int, int] | None = None) -> dict[int, dict[str, Any]]:
+    low, high = _bounds(filters) if _bounds_override is None else _bounds_override
     try:
         if qa_id is None:
-            raw_rows = conn.execute("SELECT * FROM qa_pair ORDER BY asked_at DESC,qa_id DESC").fetchall()
+            query, args = "SELECT * FROM qa_pair", []
+            if _bounds_override and (low or high):
+                query += " WHERE asked_at>0"
+                if low:
+                    query += " AND asked_at>=?"
+                    args.append(low)
+                if high:
+                    query += " AND asked_at<?"
+                    args.append(high)
+            raw_rows = conn.execute(query + " ORDER BY asked_at DESC,qa_id DESC", args).fetchall()
         else:
             raw_rows = conn.execute("SELECT * FROM qa_pair WHERE qa_id=?", (qa_id,)).fetchall()
     except sqlite3.OperationalError as exc:

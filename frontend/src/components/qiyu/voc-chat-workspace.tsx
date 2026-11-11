@@ -16,6 +16,11 @@ const suggestions = [
   '客服通常怎么回复场景未触发的问题？',
   '哪些答案已通过会话验证，可以直接复用？',
 ]
+const topicSuggestions = [
+  '这个问题怎么排查？给出适用条件和来源。',
+  '这个问题有哪些可以直接复用的客服答复？',
+  '只给数字，比较这个问题本期和上期的咨询量。',
+]
 const timestamp = (value: number) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value)
 
 export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store = getVocChatStore() }: { filters: ApiFilters; refreshKey?: number; onScopeChange: (filters: ApiFilters) => void; store?: VocChatStore }) {
@@ -33,6 +38,8 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
   const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null), previousThread = useRef('')
   const nearBottom = useRef(true)
   const gateway = useApi<GatewayConfig>('gateway/config', { source: 'local' }, refreshKey)
+  const focus = useApi<{ topic: { question: string } }>('voc2/topic', { ...filters, id: filters.focus_topic }, refreshKey, Boolean(filters.focus_topic))
+  const topicTitle = filters.focus_topic ? focus.data?.topic.question || '当前问题' : ''
 
   useEffect(() => { store.ensureScope(filters) }, [scopeKey, store])
   useEffect(() => { setSelection(null) }, [state.activeId])
@@ -81,7 +88,8 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
 
   return <section className="qiyu-surface relative mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border lg:mx-6 lg:mb-6" aria-label="独立数据聊天窗口">
       <div className="flex min-h-14 shrink-0 items-center gap-3 border-b px-3 md:px-5">
-        <h2 className="min-w-0 flex-1 truncate text-sm font-medium text-muted-foreground" title={current?.title}>{current?.messages.length ? current.title : '新对话'}</h2>
+        <h2 className="min-w-0 flex-1 truncate text-sm font-medium text-muted-foreground" title={topicTitle || current?.title}>{topicTitle || (current?.messages.length ? current.title : '新对话')}</h2>
+        {filters.focus_topic && <Button variant="ghost" size="sm" onClick={() => onScopeChange({ ...filters, focus_topic: undefined })}>切回全部问题</Button>}
         <Button variant="ghost" size="sm" aria-label="打开对话记录" onClick={() => setHistoryOpen(true)}><History className="size-3.5" />历史</Button>
         <Button variant="ghost" size="sm" aria-label="新建对话" onClick={newThread}><SquarePen className="size-3.5" />新建</Button>
       </div>
@@ -91,9 +99,9 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
         if (panel) { const next = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 100; nearBottom.current = next; setAtBottom(next) }
       }} aria-label="聊天消息">
         {!current ? <LoadingState label="正在打开对话…" className="mx-auto h-full max-w-3xl px-6 md:px-10" /> : current.messages.length === 0 ? <div key={current.id} className="qiyu-page-enter mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-6 py-8 md:px-10">
-          <h3 className="text-xl font-semibold tracking-tight">想了解哪些客户咨询？</h3>
-          <p className="mt-3 text-sm leading-7 text-muted-foreground">查询高频问题、接待回复与知识依据。</p>
-          <div className="mt-5 max-w-xl">{suggestions.map(query => <button key={query} onClick={() => { store.setDraft(current.id, query); input.current?.focus() }} className="voc-chat-suggestion block w-full rounded-md py-2.5 text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{query}</button>)}</div>
+          <h3 className="text-xl font-semibold tracking-tight">{topicTitle || '想了解哪些客户咨询？'}</h3>
+          <p className="mt-3 text-sm leading-7 text-muted-foreground">{topicTitle ? chatScopeLabel(filters) : '查询高频问题、接待回复与知识依据。'}</p>
+          <div className="mt-5 max-w-xl">{(topicTitle ? topicSuggestions : suggestions).map(query => <button key={query} onClick={() => { store.setDraft(current.id, query); input.current?.focus() }} className="voc-chat-suggestion block w-full rounded-md py-2.5 text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{query}</button>)}</div>
         </div> : <div key={current.id} className="qiyu-page-enter mx-auto w-full max-w-3xl space-y-8 px-5 py-8 md:px-9" role="log" aria-label="对话内容" aria-live="polite">
           {current.messages.map(message => <article key={message.id} className={`voc-chat-message ${message.role === 'user' ? 'flex justify-end' : 'space-y-3'}`}>
             {message.role === 'user' ? <p className="max-w-[88%] whitespace-pre-wrap break-words rounded-lg bg-muted/70 px-4 py-3 text-sm leading-7">{message.content}</p> : <>

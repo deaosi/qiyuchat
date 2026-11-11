@@ -20,12 +20,15 @@ export interface ApiFilters {
   topic_q?: string
   evidence_status?: 'all' | 'pending' | 'confirmed'
   topic_id?: number
+  focus_topic?: string
+  workbench?: 1
+  trend?: 'all' | 'new' | 'rising' | 'persistent'
   support_intent?: 'all' | 'configuration_guidance' | 'functional_anomaly' | 'unclear'
   diagnosis_status?: 'all' | 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
 }
 
 export type VocQueryFilters = {
-  [K in 'days' | 'start' | 'end' | 'group' | 'staff' | 'customer' | 'q' | 'support_intent' | 'diagnosis_status' | 'replied' | 'cluster']?: ApiFilters[K] | null
+  [K in 'days' | 'start' | 'end' | 'group' | 'staff' | 'customer' | 'q' | 'support_intent' | 'diagnosis_status' | 'replied' | 'cluster' | 'focus_topic']?: ApiFilters[K] | null
 }
 
 const detailRepliesStatuses = ['found', 'no_reply', 'unmatched', 'unavailable', 'busy'] as const
@@ -125,10 +128,14 @@ export type VocConversationVerification = {
   fingerprint: string
 }
 
-function validateVoc2Response(name: string, data: unknown): void {
+function validateVoc2Response(name: string, data: unknown, workbench = false): void {
   if (!name.startsWith('voc2/')) return
+  const messageRefs = (v: unknown) => Array.isArray(v) && v.every(item => isRecord(item)
+    && (typeof item.message_id === 'string' || Number.isSafeInteger(item.message_id))
+    && isCount(item.start) && isCount(item.end) && item.start < item.end)
   const ref = (v: unknown) => isRecord(v) && ['question', 'answer'].includes(String(v.source))
     && typeof v.quote === 'string' && isCount(v.start) && isCount(v.end) && typeof v.role === 'string' && v.alignment === 'exact'
+    && (v.source_refs === undefined || messageRefs(v.source_refs))
   const nullableRef = (v: unknown) => v === null || v === undefined || ref(v)
   const refs = (v: unknown) => Array.isArray(v) && v.every(ref)
   const verificationEvidence = (v: unknown) => Array.isArray(v) && v.every(item => isRecord(item)
@@ -172,12 +179,26 @@ function validateVoc2Response(name: string, data: unknown): void {
     && (v.kind === undefined || (typeof v.kind === 'string' && vocKnowledgeKinds.some(kind => kind === v.kind)))
     && (v.diagnosis_status === undefined || diagnoses.includes(String(v.diagnosis_status)))
     && (v.applicability === undefined || refs(v.applicability)) && nullableRef(v.confirmed_cause)
+    && (v.reuse_level === undefined || ['direct', 'reference', 'history', 'blocked'].includes(String(v.reuse_level)))
     && (v.conversation_verification === undefined || closure(v.conversation_verification))
     && (v.knowledge_reuse === undefined || reuse(v.knowledge_reuse))
   const job = (v: unknown) => isRecord(v) && typeof v.id === 'string'
     && ['queued', 'running', 'completed', 'partial', 'failed', 'skipped'].includes(String(v.status))
     && hasCounts(v, ['total', 'processed', 'failed', 'skipped', 'usage_tokens'])
     && typeof v.error === 'string'
+  const period = (v: unknown) => isRecord(v) && typeof v.start === 'string' && typeof v.end === 'string'
+    && hasCounts(v, ['source_pairs', 'processed_pairs'])
+  const comparison = (v: unknown) => isRecord(v) && period(v.current) && (v.previous === null || period(v.previous))
+    && typeof v.comparable === 'boolean' && typeof v.note === 'string' && typeof v.last_synced_at === 'string'
+  const enrichedTopic = (v: unknown) => isRecord(v) && topic(v) && isStringArray(v.platforms)
+    && hasCounts(v, ['merchant_count', 'unknown_merchant_sessions']) && isRecord(v.trend)
+    && ['new', 'rising', 'persistent', 'stable', 'unknown'].includes(String(v.trend.status))
+    && (v.trend.previous_consultation_count === null || isCount(v.trend.previous_consultation_count))
+    && (v.trend.delta === null || (typeof v.trend.delta === 'number' && Number.isFinite(v.trend.delta)))
+  const enrichedEvidence = (v: unknown) => isRecord(v) && evidence(v) && (v.workbench === undefined
+    || isRecord(v.workbench) && refs(v.workbench.commerce_settings) && refs(v.workbench.scenario_conditions)
+    && refs(v.workbench.actual) && (v.workbench.question_message_id === undefined || typeof v.workbench.question_message_id === 'string')
+    && (v.workbench.suspected_report_ready === undefined || typeof v.workbench.suspected_report_ready === 'boolean'))
   let valid = isRecord(data)
   if (valid && isRecord(data)) switch (name) {
     case 'voc2/summary': valid = hasCounts(data, ['source_pairs', 'total_events', 'answered_events', 'topic_count', 'ready_knowledge', 'exception_count'])
@@ -185,11 +206,16 @@ function validateVoc2Response(name: string, data: unknown): void {
       && isRecord(data.semantics) && typeof data.semantics.ready === 'boolean' && typeof data.semantics.model === 'string'
       && isRecord(data.coverage) && hasCounts(data.coverage, ['processed_pairs', 'pending_pairs', 'answered_pairs'])
       && (data.latest_job === null || job(data.latest_job)); break
-    case 'voc2/topics': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(topic); break
+    case 'voc2/topics': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(workbench ? enrichedTopic : topic)
+      && (!workbench || comparison(data.comparison)); break
     case 'voc2/knowledge': valid = data.item !== undefined ? knowledge(data.item) : isCount(data.total) && Array.isArray(data.items) && data.items.every(knowledge); break
     case 'voc2/exceptions': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => isRecord(item)
       && ['id', 'kind', 'question', 'reason', 'created_at'].every(key => typeof item[key] === 'string')); break
-    case 'voc2/topic': valid = topic(data.topic) && Array.isArray(data.events) && data.events.every(evidence); break
+    case 'voc2/topic': valid = (workbench ? enrichedTopic(data.topic) : topic(data.topic))
+      && Array.isArray(data.events) && data.events.every(workbench ? enrichedEvidence : evidence)
+      && (!workbench || isRecord(data.workbench) && comparison(data.workbench.comparison)
+        && Array.isArray(data.workbench.knowledge) && data.workbench.knowledge.every(knowledge)
+        && Array.isArray(data.workbench.gaps) && data.workbench.gaps.every(gap => isRecord(gap) && typeof gap.code === 'string' && isCount(gap.count))); break
     case 'voc2/event': valid = evidence(data.event) && (data.topic === undefined || topic(data.topic)); break
     case 'voc2/defects': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => evidence(item)
       && isRecord(item) && isRecord(item.domain) && isRecord(item.domain.diagnosis) && item.domain.diagnosis.status === 'defect_confirmed'); break
@@ -417,7 +443,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
     }))
     validateGetResponse(name, data)
     validateVocResponse(name, data)
-    validateVoc2Response(name, data)
+    validateVoc2Response(name, data, filters.workbench === 1)
     validateGatewayResponse(name, data)
     return data as T
   }, activity.background)

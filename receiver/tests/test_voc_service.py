@@ -418,3 +418,31 @@ class TestVocHttp(LocalFixture):
             for query in ("?limit=21", "?limit=0", "?offset=-1", "?limit=all"):
                 self.assertEqual(self.call("/api/voc2/topics" + query, headers=self.headers())[0], 400)
             get.assert_not_called()
+
+    def test_workbench_options_reach_ranker_before_pagination(self):
+        comparison = {"comparable": True}
+        matches = [{"id": f"topic-{index}"} for index in range(23)]
+        with patch("src.web.server.voc_service.get", return_value={"items": matches, "total": 23, "comparison": comparison}) as get:
+            status, raw = self.call("/api/voc2/topics?workbench=1&trend=rising&limit=20&offset=20", headers=self.headers())
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw), {"items": matches[20:], "total": 23, "comparison": comparison})
+            self.assertEqual(get.call_args.kwargs, {"workbench": True, "trend": "rising"})
+            get.reset_mock()
+            for query in ("workbench=2", "workbench=1&workbench=0", "trend=rising", "workbench=1&trend=guessed"):
+                self.assertEqual(self.call("/api/voc2/topics?" + query, headers=self.headers())[0], 400)
+            get.assert_not_called()
+
+    def test_assistant_carries_only_a_single_valid_focus_topic(self):
+        topic = "t_" + "a" * 24
+        with patch("src.web.server.voc_assistant.answer", return_value={}) as answer:
+            path = "/api/voc2/assistant?focus_topic="
+            self.assertEqual(self.call(path + topic, "POST", self.headers(), b'{}')[0], 200)
+            self.assertEqual(answer.call_args.args[1]["focus_topic"], topic)
+            answer.reset_mock()
+            for value in ("unknown", f"{topic}&focus_topic={topic}"):
+                self.assertEqual(self.call(path + value, "POST", self.headers(), b'{}')[0], 400)
+            answer.assert_not_called()
+
+        with patch("src.web.server.voc_service.start") as start:
+            self.assertEqual(self.call("/api/voc2/run?focus_topic=" + topic, "POST", self.headers(), b'{}')[0], 400)
+            start.assert_not_called()

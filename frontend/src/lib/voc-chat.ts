@@ -11,7 +11,7 @@ type ChatSnapshot = { threads: ChatThread[]; activeId: string; pending: Record<s
 type Transport = (filters: ApiFilters, body: ChatRequest, signal: AbortSignal) => Promise<ChatAnswer>
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
 export const CHAT_STORAGE_KEY = 'qiyu-voc-chat-v1'
-const projectionKeys = ['days', 'start', 'end', 'group', 'staff', 'customer', 'q', 'support_intent', 'diagnosis_status', 'replied', 'cluster'] as const
+const projectionKeys = ['days', 'start', 'end', 'group', 'staff', 'customer', 'q', 'support_intent', 'diagnosis_status', 'replied', 'cluster', 'focus_topic'] as const
 const intents = ['all', 'configuration_guidance', 'functional_anomaly', 'unclear'] as const
 const diagnoses = ['all', 'reported', 'pending', 'config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed', 'not_applicable'] as const
 const answerModes = ['grounded_model', 'computed', 'source_reference', 'insufficient'] as const
@@ -24,12 +24,14 @@ export function normalizeChatFilters(value: unknown): ApiFilters {
   const start = validDate(raw.start), end = validDate(raw.end)
   const n = raw.days === null ? 0 : Number(raw.days ?? 7)
   const cluster = Number(raw.cluster)
+  const focusTopic = typeof raw.focus_topic === 'string' && /^t_[a-f0-9]{24}$/.test(raw.focus_topic) ? raw.focus_topic : undefined
   const days = start || end ? 0 : Number.isInteger(n) && n >= 0 && n <= 365 ? n : 7
   return { source: 'local', days, start, end, group: text(raw.group), staff: text(raw.staff), customer: text(raw.customer), q: text(raw.q),
     replied: ['answered', 'unanswered'].includes(String(raw.replied)) ? String(raw.replied) : '',
     cluster: Number.isSafeInteger(cluster) && cluster > 0 ? cluster : 0,
     support_intent: intents.includes(raw.support_intent as typeof intents[number]) ? raw.support_intent as ApiFilters['support_intent'] : 'all',
-    diagnosis_status: diagnoses.includes(raw.diagnosis_status as typeof diagnoses[number]) ? raw.diagnosis_status as ApiFilters['diagnosis_status'] : 'all' }
+    diagnosis_status: diagnoses.includes(raw.diagnosis_status as typeof diagnoses[number]) ? raw.diagnosis_status as ApiFilters['diagnosis_status'] : 'all',
+    ...(focusTopic ? { focus_topic: focusTopic } : {}) }
 }
 export const chatScopeKey = (filters: ApiFilters) => JSON.stringify(normalizeChatFilters(filters))
 export function chatHref(filters: ApiFilters): string {
@@ -46,7 +48,7 @@ export function readChatFilters(hash: string): ApiFilters | undefined {
 export function citationFilters(base: ApiFilters, projection?: VocQueryFilters): ApiFilters {
   if (!projection) return normalizeChatFilters(base)
   const allowed = Object.fromEntries(projectionKeys.filter(key => Object.hasOwn(projection, key)).map(key => [key, projection[key] ?? (key === 'days' ? 0 : '')]))
-  return normalizeChatFilters({ ...base, ...allowed })
+  return normalizeChatFilters({ ...base, ...allowed, focus_topic: base.focus_topic })
 }
 function readProjection(value: Record<string, unknown>): VocQueryFilters {
   const normalized = normalizeChatFilters(value)
@@ -74,7 +76,7 @@ export function chatScopeLabel(filters: ApiFilters): string {
   return [f.start || f.end ? `${f.start || '不限'} 至 ${f.end || '不限'}` : f.days ? `最近 ${f.days} 天` : '全部时间',
     f.group ? `客户群：${f.group}` : '全部客户群', f.staff ? `客服：${f.staff}` : '全部客服', f.customer ? '指定客户' : '',
     f.support_intent === 'configuration_guidance' ? '配置与使用' : f.support_intent === 'functional_anomaly' ? '功能异常与排障' : '',
-    f.diagnosis_status && f.diagnosis_status !== 'all' ? '已限定诊断状态' : ''].filter(Boolean).join(' · ')
+    f.diagnosis_status && f.diagnosis_status !== 'all' ? '已限定诊断状态' : '', f.focus_topic ? '仅当前问题' : ''].filter(Boolean).join(' · ')
 }
 
 function loadHistory(storage?: StorageLike): { threads: ChatThread[]; activeId: string } {

@@ -75,6 +75,19 @@ describe('embedded case conversation details', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  it('locates the exact evidence message and explains when it is no longer available', async () => {
+    vi.mocked(apiGet).mockResolvedValue(response('21', [message(0, '咨询原话'), message(1, '人工回复')]))
+    const view = render(<QADetail pair={pair()} embedded onClose={vi.fn()} anchorMessageId="source-1" />)
+
+    const reply = await screen.findByText('人工回复')
+    expect(reply.closest('li')?.hasAttribute('data-evidence-anchor')).toBe(true)
+    expect(screen.getByText('咨询原话').closest('li')?.hasAttribute('data-evidence-anchor')).toBe(false)
+
+    view.rerender(<QADetail pair={pair()} embedded onClose={vi.fn()} anchorMessageId="expired-message" />)
+    expect(screen.getByText('当前保留的会话记录中无法定位这条证据。')).toBeTruthy()
+    expect(reply.closest('li')?.hasAttribute('data-evidence-anchor')).toBe(false)
+  })
+
   it.each([true, false])('aligns customer, staff and other messages by sender (embedded=%s)', async embedded => {
     vi.mocked(apiGet).mockResolvedValue(response('21', [
       message(0, '客户提问'),

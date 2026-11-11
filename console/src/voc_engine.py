@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from datetime import datetime
 import importlib.util
 from itertools import zip_longest
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import voc, voc_assets as assets, voc_quality as quality, voc_variants as variants
+from . import voc_topic_insights as insights
 from .clean.rules import mask_pii
 from .config import Settings, load_settings
 from .extract.text import clean_visible_text
@@ -68,7 +70,8 @@ def _anchored_text(conn: sqlite3.Connection, session_id: str, ids: list[str], ro
     return "\n".join(chunks), parts
 
 
-def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None) -> dict[int, dict]:
+def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
+             identify_merchants: bool = False, time_bounds: tuple[int, int] | None = None) -> dict[int, dict]:
     source_path = Path(cfg.runtime.db_path).resolve()
     if not source_path.is_file():
         return {}
@@ -76,8 +79,14 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None) -> 
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("BEGIN")  # Consistent read snapshot, closed before any model work.
-        source = voc._scope(conn, filters, qa_id=only_qa_id, include_messages=False)
+        source = voc._scope(conn, filters, qa_id=only_qa_id, include_messages=False, _bounds_override=time_bounds)
         tables = _tables(conn)
+        official_sessions = set()
+        if identify_merchants and "push_sync_state" in tables:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(push_sync_state)")}
+            if {"session_id", "status", "source_json", "source_version", "version"} <= columns:
+                official_sessions = {row[0] for row in conn.execute("""SELECT session_id FROM push_sync_state
+                    WHERE status='completed' AND source_json<>'' AND source_version=version""")}
         anchored_column = "raw_message" in tables and "source_message_id" in {row[1] for row in conn.execute("PRAGMA table_info(raw_message)")}
         for qa_id in list(source):
             row = source[qa_id]
@@ -110,6 +119,10 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None) -> 
                 if question == row["question"] and question_parts:
                     row["_question_parts"] = question_parts
                     row["source_kind"] = "source-anchored"
+            if identify_merchants:
+                known = (bool(row["_question_parts"]) and raw_sid in official_sessions
+                         and raw_customer.startswith(("qiyu-external:", "qiyu-external-sha256:", "qiyu-user:")))
+                row["_known_merchant"] = assets.digest(["verified-merchant", raw_customer]) if known else ""
             row["_answer_parts"] = []
             row["_staff_verified"] = False
             if row["answer"] and row["_question_parts"] and answer_ids and anchored_column:
@@ -220,23 +233,32 @@ def _events(cfg: Settings, filters: dict, *, _current: dict | None = None) -> li
     if not store.is_file():
         return []
     with assets.connection(store) as conn:
-        if "v2_intent" not in _tables(conn):
-            return []
-        result = []
-        for raw in conn.execute("""SELECT i.* FROM v2_intent i JOIN v2_topic t ON t.id=i.topic_id
-          JOIN v2_source s ON s.qa_id=i.qa_id AND s.fingerprint=i.fingerprint
-          WHERE i.active=1 AND t.status!='ignored' AND s.pipeline=? AND s.state='done'""", (variants.pipeline(cfg),)):
-            source = current.get(raw["qa_id"])
-            if source and source["_fingerprint"] == raw["fingerprint"]:
-                data = json.loads(raw["payload"])
-                domain = data.get("domain", {})
-                if variants.mode(cfg):
-                    if filters.get("support_intent", "all") not in ("", "all", domain.get("primary_intent")):
-                        continue
-                    if filters.get("diagnosis_status", "all") not in ("", "all", domain.get("diagnosis", {}).get("status")):
-                        continue
-                result.append({**dict(raw), "data": data, "source": source})
-        return sorted(result, key=lambda row: (-row["source"]["asked_at"], row["id"]))
+        return _read_events(cfg, filters, current, conn)
+
+
+def _read_events(cfg: Settings, filters: dict, current: dict, conn: sqlite3.Connection) -> list[dict]:
+    if "v2_intent" not in _tables(conn):
+        return []
+    query = """SELECT i.* FROM v2_intent i JOIN v2_topic t ON t.id=i.topic_id
+      JOIN v2_source s ON s.qa_id=i.qa_id AND s.fingerprint=i.fingerprint
+      WHERE i.active=1 AND t.status!='ignored' AND s.pipeline=? AND s.state='done'"""
+    params = [variants.pipeline(cfg)]
+    if filters.get("focus_topic"):
+        query += " AND i.topic_id=?"
+        params.append(filters["focus_topic"])
+    result = []
+    for raw in conn.execute(query, params):
+        source = current.get(raw["qa_id"])
+        if source and source["_fingerprint"] == raw["fingerprint"]:
+            data = json.loads(raw["payload"])
+            domain = data.get("domain", {})
+            if variants.mode(cfg):
+                if filters.get("support_intent", "all") not in ("", "all", domain.get("primary_intent")):
+                    continue
+                if filters.get("diagnosis_status", "all") not in ("", "all", domain.get("diagnosis", {}).get("status")):
+                    continue
+            result.append({**dict(raw), "data": data, "source": source})
+    return sorted(result, key=lambda row: (-row["source"]["asked_at"], row["id"]))
 
 
 def _public_topic(topic: dict, events: list[dict]) -> dict:
@@ -261,13 +283,102 @@ def _topic_items(cfg: Settings, events: list[dict]) -> list[dict]:
     return sorted(items, key=lambda item: (-item["consultation_count"], -item["event_count"], item["id"]))
 
 
-def topics(cfg: Settings, filters: dict) -> dict:
+def _last_synced(cfg: Settings) -> str:
+    source = Path(cfg.runtime.db_path).resolve()
+    if not source.is_file():
+        return ""
+    with assets.connection(source) as conn:
+        if "push_sync_state" not in _tables(conn):
+            return ""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(push_sync_state)")}
+        if not {"updated_at", "status", "source_json", "source_version", "version"} <= columns:
+            return ""
+        stamp = conn.execute("""SELECT MAX(updated_at) FROM push_sync_state
+            WHERE status='completed' AND source_json<>'' AND source_version=version""").fetchone()[0]
+    return datetime.fromtimestamp(stamp, insights.ZONE).isoformat(timespec="seconds") if stamp else ""
+
+
+def _source_filters(filters: dict) -> dict:
+    return {key: filters[key] for key in ("group", "staff", "q", "replied", "cluster", "customer") if filters.get(key)}
+
+
+def _workbench_data(cfg: Settings, filters: dict) -> tuple[list[dict], list[dict], set[str], dict]:
+    current, previous = insights.periods(filters)
+    start, stop = current.bounds()
+    comparison_start = previous.bounds()[0] if previous else start
+    sources = _sources(cfg, _source_filters(filters), identify_merchants=True, time_bounds=(comparison_start, stop))
+    current_sources = current.rows(sources)
+    previous_sources = previous.rows(sources) if previous else {}
+    store = path(cfg)
+    events, states, observed_before = [], {}, set()
+    if store.is_file():
+        with assets.connection(store) as conn:
+            conn.execute("BEGIN")
+            if "v2_source" in _tables(conn):
+                states = {row["qa_id"]: row["state"] for row in conn.execute(
+                    "SELECT qa_id,fingerprint,state FROM v2_source WHERE pipeline=?", (variants.pipeline(cfg),))
+                    if row["qa_id"] in sources and row["fingerprint"] == sources[row["qa_id"]]["_fingerprint"]}
+                events = _read_events(cfg, filters, sources, conn)
+                if previous and events:
+                    # Historical snapshots can suppress a false "first seen" label, but only
+                    # current fingerprints contribute to counts, evidence, or answers.
+                    observed_before = {row[0] for row in conn.execute("""SELECT DISTINCT i.topic_id
+                        FROM v2_intent i JOIN v2_source s ON s.qa_id=i.qa_id AND s.fingerprint=i.fingerprint
+                        WHERE i.active=1 AND s.state='done' AND s.pipeline=? AND
+                        CASE WHEN json_valid(s.snapshot) THEN CAST(json_extract(s.snapshot,'$.asked_at') AS INTEGER) END
+                        BETWEEN 1 AND ?""", (variants.pipeline(cfg), start - 1))}
+    comparison = insights.comparison(current.public(current_sources, states),
+                                     previous.public(previous_sources, states) if previous else None, _last_synced(cfg))
+    return ([row for row in events if row["qa_id"] in current_sources],
+            [row for row in events if row["qa_id"] in previous_sources], observed_before, comparison)
+
+
+def _topic_insight(topic: dict, rows: list[dict], prior: list[dict], earlier: bool, scope: dict) -> dict:
+    known, unknown = insights.participants(rows)
+    previous_count = len({variants.consultation_key(row) for row in prior})
+    return {**topic, "platforms": insights.platforms(rows), "merchant_count": known,
+            "unknown_merchant_sessions": unknown,
+            "trend": insights.trend(topic["consultation_count"], previous_count, earlier, scope)}
+
+
+def topics(cfg: Settings, filters: dict, *, workbench: bool = False, trend: str = "all") -> dict:
+    if workbench:
+        rows, previous, earlier, comparison = _workbench_data(cfg, filters)
+        grouped, prior = defaultdict(list), defaultdict(list)
+        for row in rows:
+            grouped[row["topic_id"]].append(row)
+        for row in previous:
+            prior[row["topic_id"]].append(row)
+        items = [_topic_insight(item, grouped[item["id"]], prior[item["id"]], item["id"] in earlier, comparison)
+                 for item in _topic_items(cfg, rows)]
+        if trend != "all":
+            items = [item for item in items if item["trend"]["status"] == trend]
+        return {"items": items, "total": len(items), "comparison": comparison}
     items = _topic_items(cfg, _events(cfg, filters))
     return {"items": items, "total": len(items)}
 
 
-def topic_detail(cfg: Settings, filters: dict, topic_id: str) -> dict:
+def topic_detail(cfg: Settings, filters: dict, topic_id: str, *, workbench: bool = False) -> dict:
+    if filters.get("focus_topic") and filters["focus_topic"] != topic_id:
+        raise EngineError("当前范围内没有该问题。", 404)
     topic = next((item for item in _stored_topics(path(cfg), domain_mode=variants.mode(cfg)) if item["id"] == topic_id), None)
+    if workbench:
+        if topic is None:
+            raise EngineError("当前范围内没有该问题。", 404)
+        rows, previous, earlier, comparison = _workbench_data(cfg, {**filters, "focus_topic": topic_id})
+        if not rows:
+            raise EngineError("当前范围内没有该问题。", 404)
+        global_sources = _sources(cfg, {})
+        all_events = _events(cfg, {}, _current=global_sources)
+        latest = _latest_assets(cfg, _current=global_sources, _plans=_knowledge_plans(cfg, all_events, topic_id=topic_id),
+                                topic_id=topic_id)
+        knowledge = _knowledge_for_events(cfg, latest, rows, all_events)
+        knowledge = [{**item, "reuse_level": insights.reuse_level(item)} for item in knowledge]
+        evidence = [{**quality.evidence(row), "workbench": insights.case_details(row)} for row in rows]
+        public = _topic_insight(_public_topic(topic, rows), rows, previous, topic_id in earlier, comparison)
+        return {"topic": public, "events": evidence, "evidence": evidence, "total": len(rows),
+                "workbench": {"comparison": comparison, "knowledge": knowledge,
+                              "gaps": insights.gaps(rows, knowledge, latest)}}
     rows = [row for row in _events(cfg, filters) if row["topic_id"] == topic_id]
     if topic is None or not rows:
         raise EngineError("当前范围内没有该问题。", 404)
@@ -303,13 +414,15 @@ def _compile_input(topic: dict, rows: list[dict], duplicate_links: list) -> str:
                           sorted((row["id"], row["fingerprint"], row["revision"]) for row in rows), duplicate_links])
 
 
-def _knowledge_plans(cfg: Settings, events: list[dict]) -> list[dict]:
+def _knowledge_plans(cfg: Settings, events: list[dict], *, topic_id: str = "") -> list[dict]:
     duplicates = _duplicate_context(events)
     by_topic = defaultdict(list)
     for row in events:
         by_topic[row["topic_id"]].append(row)
     result = []
     for topic in _stored_topics(path(cfg), domain_mode=variants.mode(cfg)):
+        if topic_id and topic["id"] != topic_id:
+            continue
         rows = by_topic.get(topic["id"])
         if not rows:
             continue
@@ -322,12 +435,13 @@ def _knowledge_plans(cfg: Settings, events: list[dict]) -> list[dict]:
     return result
 
 
-def _latest_assets(cfg: Settings, *, _current: dict | None = None, _plans: list[dict] | None = None) -> list[dict]:
+def _latest_assets(cfg: Settings, *, _current: dict | None = None, _plans: list[dict] | None = None,
+                   topic_id: str = "") -> list[dict]:
     store = path(cfg)
     if not store.is_file():
         return []
     current = _sources(cfg, {}) if _current is None else _current
-    plans = _knowledge_plans(cfg, _events(cfg, {}, _current=current)) if _plans is None else _plans
+    plans = _knowledge_plans(cfg, _events(cfg, {}, _current=current), topic_id=topic_id) if _plans is None else _plans
     expected_plans = {(plan["topic"]["id"], plan["key"]): plan for plan in plans}
     quality_version = variants.quality_version(cfg)
     with assets.connection(store) as conn:
@@ -336,7 +450,10 @@ def _latest_assets(cfg: Settings, *, _current: dict | None = None, _plans: list[
         result = []
         has_variants = "variant_key" in {row[1] for row in conn.execute("PRAGMA table_info(v2_asset)")}
         by_variant = " AND b.variant_key=a.variant_key" if has_variants else ""
-        for row in conn.execute("SELECT a.* FROM v2_asset a JOIN v2_topic t ON t.id=a.topic_id WHERE t.status!='ignored' AND a.version=(SELECT MAX(b.version) FROM v2_asset b WHERE b.topic_id=a.topic_id" + by_variant + ")"):
+        query = "SELECT a.* FROM v2_asset a JOIN v2_topic t ON t.id=a.topic_id WHERE t.status!='ignored' AND a.version=(SELECT MAX(b.version) FROM v2_asset b WHERE b.topic_id=a.topic_id" + by_variant + ")"
+        if topic_id:
+            query += " AND a.topic_id=?"
+        for row in conn.execute(query, (topic_id,) if topic_id else ()):
             branch = row["variant_key"] if has_variants else ""
             plan = expected_plans.get((row["topic_id"], branch))
             expected_input = plan["compile_input"] if plan else None
@@ -401,17 +518,22 @@ def _with_conversation_verification(cfg: Settings, items: list[dict], rows: list
     return result
 
 
+def _knowledge_for_events(cfg: Settings, candidates: list[dict], rows: list[dict], all_events: list[dict]) -> list[dict]:
+    visible = {row["topic_id"] for row in rows}
+    event_ids = {row["id"] for row in rows}
+    items = [item for item in candidates
+             if item["status"] == "ready" and not item["stale"] and item["topic_id"] in visible
+             and any(citation["event_id"] in event_ids for citation in item["evidence"])]
+    return _with_conversation_verification(cfg, items, rows, events=all_events)
+
+
 def knowledge(cfg: Settings, filters: dict, knowledge_id: str = "") -> dict:
     current = _sources(cfg, {})
     all_events = _events(cfg, {}, _current=current)
     rows = _events(cfg, filters) if any(value for key, value in filters.items() if key != "source") else all_events
-    visible = {row["topic_id"] for row in rows}
-    event_ids = {row["id"] for row in rows}
-    plans = _knowledge_plans(cfg, all_events)
-    items = [item for item in _latest_assets(cfg, _current=current, _plans=plans)
-             if item["status"] == "ready" and not item["stale"] and item["topic_id"] in visible
-             and any(citation["event_id"] in event_ids for citation in item["evidence"])]
-    items = _with_conversation_verification(cfg, items, rows, events=all_events)
+    focus = filters.get("focus_topic", "")
+    plans = _knowledge_plans(cfg, all_events, topic_id=focus)
+    items = _knowledge_for_events(cfg, _latest_assets(cfg, _current=current, _plans=plans, topic_id=focus), rows, all_events)
     if knowledge_id:
         item = next((item for item in items if item["id"] == str(knowledge_id)), None)
         if item is None:

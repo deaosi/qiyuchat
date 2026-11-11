@@ -11,6 +11,13 @@ def valid_date(value):
     return isinstance(value, str) and len(value) == 10 and date.fromisoformat(value).isoformat() == value
 
 
+def query_projection(filters):
+    result = {key: filters.get(key, default) for key, default in PROJECTION.items()}
+    if filters.get('focus_topic'):
+        result['focus_topic'] = filters['focus_topic']
+    return result
+
+
 def context_scope(filters, body):
     context = body.get('context')
     if context is None:
@@ -18,7 +25,7 @@ def context_scope(filters, body):
     if not isinstance(context, dict) or set(context) != {'query_filters', 'citations'}:
         raise ServiceError('上轮查询上下文格式不正确。')
     scope, refs = context['query_filters'], context['citations']
-    if not isinstance(scope, dict) or set(scope) - set(PROJECTION):
+    if not isinstance(scope, dict) or set(scope) - {*PROJECTION, 'focus_topic'}:
         raise ServiceError('上轮查询范围包含无效字段。')
     for key, value in scope.items():
         if key in ('days', 'cluster'):
@@ -48,7 +55,8 @@ def context_scope(filters, body):
             raise ServiceError('上轮引用格式不正确。')
     # A UI source/customer switch always wins over old conversation metadata.
     fixed = ('group', 'staff', 'customer', 'q', 'replied', 'cluster')
-    if any((scope.get(k) or PROJECTION[k]) != (filters.get(k) or PROJECTION[k]) for k in fixed):
+    if ((scope.get('focus_topic') or '') != (filters.get('focus_topic') or '')
+            or any((scope.get(k) or PROJECTION[k]) != (filters.get(k) or PROJECTION[k]) for k in fixed)):
         return dict(filters), []
     return {**filters, **scope}, refs
 

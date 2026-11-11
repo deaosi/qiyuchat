@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
@@ -72,7 +72,20 @@ function Workspace() {
   const [drillCustomerName, setDrillCustomerName] = useState('')
   const [tableExport, setTableExport] = useState<{ key: string; filters: ApiFilters } | null>(null)
   const [initialReply, setInitialReply] = useState<Reply>('all')
-  const [selected, setSelected] = useState<QAPair | null>(null)
+  const [selected, setSelected] = useState<{ pair: QAPair; anchorMessageId?: string } | null>(null)
+  const pairOpener = useRef<HTMLElement | null>(null)
+  const openPair = useCallback((pair: QAPair, anchorMessageId?: string) => {
+    pairOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setSelected({ pair, anchorMessageId })
+  }, [])
+  const restorePairFocus = useCallback((event: Event) => {
+    const opener = pairOpener.current
+    pairOpener.current = null
+    if (opener?.isConnected && opener !== document.body) {
+      event.preventDefault()
+      opener.focus({ preventScroll: true })
+    }
+  }, [])
   const [importOpen, setImportOpen] = useState(false)
   const [cleanOpen, setCleanOpen] = useState(false)
   const [cleaning, setCleaning] = useState(false)
@@ -180,12 +193,12 @@ function Workspace() {
           <QiyuSectionCards summary={summary.data} rangeLabel={rangeLabel} loading={summary.loading} onNavigate={cardNavigate} />
           {summary.error && <div className="px-4 lg:px-6"><QueryState error={summary.error} retry={summary.retry} /></div>}
           <div className="px-4 lg:px-6">{trend.error ? <QueryState error={trend.error} retry={trend.retry} /> : <QiyuAreaChart data={trend.data} loading={trend.loading} days={filters.start || filters.end ? -1 : filters.days ?? 0} onDaysChange={changeDays} onDaySelect={day => drill({ days: 0, start: day, end: day })} animate={motion} />}</div>
-          <div className="px-4 lg:px-6"><QATable key={`overview-${source}`} data={recent} remote={{ filters: sharedScope, refreshKey }} onSelect={setSelected} onFiltersChange={captureTableFilters} /></div>
+          <div className="px-4 lg:px-6"><QATable key={`overview-${source}`} data={recent} remote={{ filters: sharedScope, refreshKey }} onSelect={openPair} onFiltersChange={captureTableFilters} /></div>
         </>}
-        {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={clearDrill}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={setSelected} initialReply={initialReply} onFiltersChange={captureTableFilters} /></div>}
+        {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={clearDrill}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={openPair} initialReply={initialReply} onFiltersChange={captureTableFilters} /></div>}
         {view === 'settings' && <div className="px-4 lg:px-6"><GatewaySettings onSaved={() => setRefreshKey(key => key + 1)} /></div>}
-        {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={setSelected} onOpenChat={openChat} /></div>}
-        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={setSelected} /></div>}
+        {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} onOpenChat={openChat} /></div>}
+        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
         {listEnabled && <div className="px-4 lg:px-6"><QueryState loading={list.loading} error={list.error} retry={list.retry} empty={!list.data?.items.length}>
           {view === 'clusters' && <div className="grid gap-4 lg:grid-cols-2">{(list.data?.items as ClusterItem[] | undefined)?.map(item => <Card key={item.cluster_id} className="min-w-0"><CardHeader className="min-w-0"><div className="mb-1 flex flex-wrap items-center justify-between gap-2"><Badge variant="outline">问题簇 {item.cluster_id}</Badge><span className="text-xs text-muted-foreground">{item.variants} 种问法</span></div><CardTitle className="min-w-0 whitespace-normal text-lg leading-relaxed [overflow-wrap:anywhere]">{item.question}</CardTitle><CardDescription>{item.count} 条问答 · {item.customers} 位客户 · {item.groups} 个客户群</CardDescription></CardHeader><CardContent className="min-w-0"><ul className="space-y-2 text-sm text-muted-foreground">{item.samples.map(sample => <li key={sample} className="flex min-w-0 gap-2"><MessageSquareText className="mt-0.5 size-4 shrink-0 opacity-50" /><span className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{sample}</span></li>)}</ul></CardContent><CardFooter className="flex-wrap justify-between gap-2"><Badge variant="secondary">{item.unanswered} 条未发现回复</Badge><Button variant="outline" size="sm" onClick={() => drill({ cluster: item.cluster_id })}>追溯问答<ArrowRight /></Button></CardFooter></Card>)}</div>}
@@ -198,7 +211,7 @@ function Workspace() {
         {view !== 'voc-chat' && <footer className="flex items-center justify-between gap-4 px-4 pt-1 text-xs text-muted-foreground lg:px-6"><span className="flex items-center gap-1.5"><ShieldCheck className="size-3.5" />{view === 'settings' ? '仅管理员可管理模型服务配置' : '问答与会话内容按服务端规则脱敏'}</span><span>{meta.data?.db_name || '语海Voc'}</span></footer>}
       </div></div></div>
     </SidebarInset>
-    <QADetail pair={selected} source={source} onClose={() => setSelected(null)} />
+    <QADetail pair={selected?.pair ?? null} anchorMessageId={selected?.anchorMessageId} source={source} onClose={() => setSelected(null)} onCloseAutoFocus={restorePairFocus} />
     <ImportDialog open={importOpen} onOpenChange={setImportOpen} onImported={() => { setFilters({ source: 'local', days: 0 }); setRange('0'); setDrillFilters({}); setSelected(null); setRefreshKey(key => key + 1); navigate('cleaning') }} />
     <AlertDialog open={cleanOpen} onOpenChange={setCleanOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>重新执行业务库规则清洗？</AlertDialogTitle><AlertDialogDescription>将重新抽取当前库保留的会话并重算问题簇，簇编号可能变化。原始正文不会删除，没有正文的归档问答会保留。不调用模型或外部服务。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={() => void clean()}>确认重新清洗</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <Toaster position="top-center" theme={theme} />
