@@ -191,7 +191,11 @@ def reuse_level(item: dict) -> str:
 
 def gaps(rows: list[dict], knowledge: list[dict], assets: list[dict]) -> list[dict]:
     results = defaultdict(set)
-    by_id = {row["id"]: variants.consultation_key(row) for row in rows}
+    by_id = {}
+    for row in rows:
+        key = variants.consultation_key(row)
+        for identity in (row["id"], *row.get("legacy_event_ids", ())):
+            by_id[identity] = key
     for row in rows:
         key, source = by_id[row["id"]], row["source"]
         if not source["answer"]:

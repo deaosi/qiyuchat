@@ -147,6 +147,30 @@ class TestVocService(LocalFixture):
             self.assertEqual(S.main(),0)
         start.assert_called_once()
 
+    def test_episode_pass_shares_job_budget_and_uses_selected_filters(self):
+        cfg=replace(self.cfg,runtime=replace(self.cfg.runtime,voc_domain='zhihuige'))
+        filters={'days':7,'group':'指定群'}
+        job=S.start(cfg,filters,{'limit':12,'max_calls':12,'max_tokens':200000},launch=False)['job']
+        self.fake.run.return_value={'job':{'status':'completed','usage_tokens':90}}
+        with patch('src.voc_episode_live.run',return_value={
+            'calls':2,'usage_tokens':300,'reserved_tokens':18000,'segments_processed':1,'errors':{}}) as episodes:
+            result=S.execute(cfg,job['id'])
+        self.assertEqual(result['usage_tokens'],390)
+        self.assertEqual(episodes.call_args.kwargs['filters'],filters)
+        self.assertEqual(episodes.call_args.kwargs['max_calls'],3)
+        self.assertEqual(episodes.call_args.kwargs['max_tokens'],50000)
+        self.assertEqual(self.fake.run.call_args.kwargs['max_calls'],10)
+        self.assertEqual(self.fake.run.call_args.kwargs['max_tokens'],182000)
+
+    def test_hourly_runs_when_only_episode_sources_are_pending(self):
+        cfg=replace(self.cfg,runtime=replace(self.cfg.runtime,voc_domain='zhihuige'))
+        self.fake.check.return_value={'coverage':{'pending_pairs':0},'needs_compile':0}
+        with patch('src.voc_service.load_settings',return_value=cfg), patch('src.voc_episode_live.pending',return_value=True), \
+             patch('src.voc_service.start',return_value={'job':{'id':'synthetic'}}) as start, \
+             patch('sys.argv',['voc_service','--hourly']), patch('builtins.print'):
+            self.assertEqual(S.main(),0)
+        start.assert_called_once()
+
     def test_release_maintenance_blocks_new_jobs_without_changing_existing_queue(self):
         marker=S._path(self.cfg).parent/'.voc-release-maintenance'
         marker.touch()

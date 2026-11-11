@@ -189,10 +189,14 @@ def _bounds(filters: dict[str, Any]) -> tuple[int, int]:
     return low, high
 
 def _scope(conn: sqlite3.Connection, filters: dict[str, Any], *, qa_id: int | None = None,
-           include_messages: bool = True, _bounds_override: tuple[int, int] | None = None) -> dict[int, dict[str, Any]]:
+           include_messages: bool = True, _bounds_override: tuple[int, int] | None = None,
+           _qa_ids: set[int] | None = None) -> dict[int, dict[str, Any]]:
     low, high = _bounds(filters) if _bounds_override is None else _bounds_override
     try:
-        if qa_id is None:
+        if _qa_ids is not None:
+            raw_rows = conn.execute("SELECT * FROM qa_pair WHERE qa_id IN (SELECT value FROM json_each(?))",
+                                    (json.dumps(sorted(_qa_ids)),)).fetchall()
+        elif qa_id is None:
             query, args = "SELECT * FROM qa_pair", []
             if _bounds_override and (low or high):
                 query += " WHERE asked_at>0"

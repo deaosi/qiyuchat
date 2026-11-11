@@ -224,7 +224,8 @@ def start(cfg: Settings, filters: dict, body: object, *, launch=True) -> dict:
             if db.execute("SELECT 1 FROM voc_service_job WHERE status IN ('queued','running')").fetchone():
                 raise ServiceError('已有新整理任务正在运行。',409)
             job_id,now = uuid.uuid4().hex,time.time()
-            request = json.dumps({'filters':filters,'domain':cfg.runtime.voc_domain,**limits},ensure_ascii=False)
+            request = json.dumps({'filters':filters,'domain':cfg.runtime.voc_domain,
+                                  'episode_linking':cfg.runtime.voc_domain=='zhihuige',**limits},ensure_ascii=False)
             _save_profile(cfg,job_id)
             try:
                 db.execute('INSERT INTO voc_service_job(id,status,owner,request_json,model,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
@@ -251,9 +252,12 @@ def execute(cfg: Settings, job_id: str) -> dict:
         if row is None or row['status']!='queued':
             raise ServiceError('待执行任务不存在或已经执行。',409)
         db.execute("UPDATE voc_service_job SET status='running',owner=?,updated_at=? WHERE id=?",(os.getpid(),time.time(),job_id))
+    episode_usage=0
     def progress(data):
         values={key:data[key] for key in ('total','processed','failed','skipped','usage_tokens')
                 if type(data.get(key)) is int and data[key]>=0}
+        if episode_usage:
+            values['usage_tokens']=values.get('usage_tokens',0)+episode_usage
         _update(cfg,job_id,**values)
     try:
         request=json.loads(row['request_json'])
@@ -263,15 +267,49 @@ def execute(cfg: Settings, job_id: str) -> dict:
         cfg=replace(cfg,llm=LLMConfig(**profile))
         cfg=replace(cfg,runtime=replace(cfg.runtime,voc_domain=request.get('domain','')))
         _discard_profile(cfg,job_id)
-        result=_engine().run(cfg,request['filters'],limit=request['limit'],max_calls=request['max_calls'],
-                             max_tokens=request['max_tokens'],shadow=True,progress=progress)
-        job=result.get('job',result)
+        calls,tokens=request['max_calls'],request['max_tokens']
+        episode_calls=min(4,calls//4)
+        episode_tokens=min(200000,tokens//4)
+        episode_notice=''
+        episode_processed=0
+        if request.get('episode_linking') is True and cfg.runtime.voc_domain=='zhihuige' and episode_calls and episode_tokens>=32768:
+            from . import voc_episode_live
+            from .voc_episode_topics import LocalReranker
+            from .voc_semantics import SemanticError
+            try:
+                model_path=os.environ.get('VOC_EPISODE_RERANKER_PATH','').strip()
+                rerank=LocalReranker(model_path) if model_path else None
+                episode=voc_episode_live.run(cfg,filters=request['filters'],max_calls=episode_calls,
+                                             max_tokens=episode_tokens,embedder=_engine()._semantic(cfg),rerank=rerank)
+                calls-=episode['calls']
+                tokens-=max(episode['reserved_tokens'],episode['usage_tokens'])
+                episode_usage=episode['usage_tokens']
+                episode_processed=episode['segments_processed']
+                if any(key.startswith('gateway_') or key=='semantic_unavailable' for key in episode['errors']):
+                    episode_notice='部分多轮会话暂未整理，系统会在后续任务中重试。'
+            except (OSError,sqlite3.Error,SemanticError,RuntimeError,ValueError):
+                # A stopped episode pass may already have reached the gateway.
+                calls-=episode_calls
+                tokens-=episode_tokens
+                episode_notice='多轮会话整理暂未完成，系统会在后续任务中重试。'
+            if episode_usage:
+                _update(cfg,job_id,usage_tokens=episode_usage)
+        if tokens>=4000:
+            result=_engine().run(cfg,request['filters'],limit=request['limit'],max_calls=calls,
+                                 max_tokens=tokens,shadow=True,progress=progress)
+            job=result.get('job',result)
+        else:
+            job={'status':'partial','usage_tokens':0,'error':'本轮模型预算已用完，其余问答将在后续任务中整理。'}
         progress(job)
         status=job.get('status','completed')
         if status not in STATES-set(ACTIVE):
             raise ServiceError('整理任务没有进入终态。',502)
         # Engine errors have a designated public boundary; never expose unknown exceptions.
         error=job.get('error','') if isinstance(job.get('error',''),str) else ''
+        if episode_notice:
+            error=' '.join(filter(None,(error,episode_notice)))
+            if status in ('completed','skipped'):
+                status='partial' if job.get('processed',0) or episode_processed else 'failed'
         if cfg.llm.api_key and cfg.llm.api_key in error:
             error='模型服务返回了无法安全展示的错误，请检查配置后重试。'
         _update(cfg,job_id,status=status,error=error[:240])
@@ -352,7 +390,12 @@ def main():
             print(json.dumps({'status':'skipped','reason':'model_busy'}));return 0
         check=_engine().check(cfg,{})
         if check.get('coverage',{}).get('pending_pairs',1)==0 and not check.get('needs_compile'):
-            print(json.dumps({'status':'skipped','reason':'no_changes'}));return 0
+            episode_pending=False
+            if cfg.runtime.voc_domain=='zhihuige':
+                from . import voc_episode_live
+                episode_pending=voc_episode_live.pending(cfg)
+            if not episode_pending:
+                print(json.dumps({'status':'skipped','reason':'no_changes'}));return 0
         result=start(cfg,{}, {'limit':min(100,max(1,args.limit)),'max_calls':min(100,max(1,args.limit)),'max_tokens':2000000})
         print(json.dumps(result,ensure_ascii=False));return 0
     job=execute(load_settings(),args.job)

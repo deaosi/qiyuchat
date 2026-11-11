@@ -190,6 +190,7 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     && hasCounts(v, ['source_pairs', 'processed_pairs'])
   const comparison = (v: unknown) => isRecord(v) && period(v.current) && (v.previous === null || period(v.previous))
     && typeof v.comparable === 'boolean' && typeof v.note === 'string' && typeof v.last_synced_at === 'string'
+    && (v.episode === undefined || isRecord(v.episode) && hasCounts(v.episode, ['consultations', 'sessions']))
   const enrichedTopic = (v: unknown) => isRecord(v) && topic(v) && isStringArray(v.platforms)
     && hasCounts(v, ['merchant_count', 'unknown_merchant_sessions']) && isRecord(v.trend)
     && ['new', 'rising', 'persistent', 'stable', 'unknown'].includes(String(v.trend.status))

@@ -532,7 +532,9 @@ def _focused_search(engine, cfg, scoped, plan, refs):
         query = ''
     query = query or str(topic.get('question') or row.get('question') or '')
     if query and ref['kind'] != 'knowledge':
-        candidates = [item for item in _list(engine.knowledge(cfg, scoped)) if item.get('topic_id') == topic_id]
+        candidates = _list(engine.knowledge(cfg, scoped))
+        if focus_topic != topic_id:
+            candidates = [item for item in candidates if item.get('topic_id') == topic_id]
         result['knowledge'] = engine.relevant_items(cfg, candidates, query, kind='knowledge', limit=10)
     if query and ref['kind'] != 'event':
         result['events'] = engine.relevant_items(cfg, _list(detail, 'events'), query, kind='event', limit=10,

@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 import re
 import unicodedata
-from typing import Callable
+from typing import Callable, Iterable
 
 from .extract.cluster import jaccard
 from .voc_assets import digest
@@ -156,7 +156,8 @@ def _evidence_text(issue: _Issue) -> str:
     return f"{issue.episode['module']}\n{issue.text}\n{issue.episode['question']['quote']}"
 
 
-def _scores(issues: list[_Issue], embedder: Embedder | None, rerank: Reranker | None) -> dict[tuple[int, int], float]:
+def _scores(issues: list[_Issue], embedder: Embedder | None, rerank: Reranker | None, *,
+            pairs: Iterable[tuple[int, int]] | None = None) -> dict[tuple[int, int], float]:
     vectors = []
     if embedder is not None:
         vectors = [normalize(vector) for vector in embedder.encode([item.text for item in issues])]
@@ -164,24 +165,24 @@ def _scores(issues: list[_Issue], embedder: Embedder | None, rerank: Reranker | 
             raise ValueError("VOC 主题召回的嵌入向量不完整或维度不一致。")
     strong = {}
     candidates: dict[int, list[tuple[float, tuple[int, int]]]] = defaultdict(list)
-    for i, first in enumerate(issues):
-        for j in range(i + 1, len(issues)):
-            second = issues[j]
-            semantic = similarity(vectors[i], vectors[j]) if vectors else 0.
-            result = _candidate(first, second, semantic)
-            if result is None:
-                continue
-            exact, lexical = result
-            pair = i, j
-            if exact:
-                strong[pair] = _EXACT_MATCH
-            elif rerank is not None:
-                score = .65 * max(0., semantic) + .35 * lexical if vectors else lexical
-                candidates[i].append((score, pair))
-                candidates[j].append((score, pair))
-            elif (not vectors and lexical >= .74 or vectors and
-                  (semantic >= .90 and lexical >= .43 or semantic >= .70 and lexical >= .74)):
-                strong[pair] = .65 * semantic + .35 * lexical if vectors else lexical
+    if pairs is None:
+        pairs = ((i, j) for i in range(len(issues)) for j in range(i + 1, len(issues)))
+    for i, j in pairs:
+        semantic = similarity(vectors[i], vectors[j]) if vectors else 0.
+        result = _candidate(issues[i], issues[j], semantic)
+        if result is None:
+            continue
+        exact, lexical = result
+        pair = i, j
+        if exact:
+            strong[pair] = _EXACT_MATCH
+        elif rerank is not None:
+            score = .65 * max(0., semantic) + .35 * lexical if vectors else lexical
+            candidates[i].append((score, pair))
+            candidates[j].append((score, pair))
+        elif (not vectors and lexical >= .74 or vectors and
+              (semantic >= .90 and lexical >= .43 or semantic >= .70 and lexical >= .74)):
+            strong[pair] = .65 * semantic + .35 * lexical if vectors else lexical
     if candidates and rerank is not None:
         pairs = sorted({pair for options in candidates.values()
                         for _, pair in sorted(options, key=lambda option: (-option[0], option[1]))[:_RERANK_CANDIDATES]})

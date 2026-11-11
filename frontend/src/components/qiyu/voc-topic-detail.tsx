@@ -11,7 +11,7 @@ export const trendLabels = { all: '全部', new: '新出现', rising: '明显上
 export type TrendFilter = keyof typeof trendLabels
 export type TopicTrend = { status: Exclude<TrendFilter, 'all'> | 'stable' | 'unknown'; previous_consultation_count: number | null; delta: number | null }
 type Period = { start: string; end: string; source_pairs: number; processed_pairs: number }
-export type TrendComparisonData = { current: Period; previous: Period | null; comparable: boolean; note: string; last_synced_at: string }
+export type TrendComparisonData = { current: Period; previous: Period | null; comparable: boolean; note: string; last_synced_at: string; episode?: { consultations: number; sessions: number } }
 
 const number = (value?: number) => value === undefined ? '—' : value.toLocaleString('zh-CN')
 const gapLabels: Record<string, string> = {
@@ -44,6 +44,10 @@ export function TrendComparison({ comparison, currentConsultations, trend }: { c
         <dt className="font-medium">{label} <span className="ml-1 font-normal text-muted-foreground">{periodLabel(period)}</span></dt>
         <dd className="tabular-nums text-muted-foreground">{consultations !== undefined && `${number(consultations)} 次咨询 · `}已整理 {number(period.processed_pairs)} / {number(period.source_pairs)} 条问答</dd>
       </div>)}
+      {comparison.episode && comparison.episode.consultations > 0 && <div>
+        <dt className="font-medium">会话归并</dt>
+        <dd className="tabular-nums text-muted-foreground">{number(comparison.episode.consultations)} 次咨询 · {number(comparison.episode.sessions)} 个会话</dd>
+      </div>}
       <div>
         <dt className="font-medium">七鱼最近同步</dt>
         <dd className="tabular-nums text-muted-foreground">{comparison.last_synced_at ? displayTime(comparison.last_synced_at) : '暂无记录'}</dd>

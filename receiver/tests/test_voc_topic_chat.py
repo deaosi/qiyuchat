@@ -35,3 +35,14 @@ class TestTopicChat(LocalFixture):
         self.assertEqual(engine.topics.call_args.args[1]['focus_topic'], topic)
         self.assertEqual(engine.topics.call_args.kwargs, {'workbench': True})
         engine.relevant_topics.assert_not_called()
+
+    def test_focused_episode_topic_can_retrieve_original_knowledge(self):
+        topic, legacy = 't_'+'a'*24, 't_'+'b'*24
+        original = {'id':'k-original','topic_id':legacy,'question':'场景未触发的检查步骤'}
+        engine = Mock()
+        engine.topic_detail.return_value={'topic':{'id':topic,'question':'场景没触发'},'events':[]}
+        engine.knowledge.return_value={'items':[original]}
+        engine.relevant_items.side_effect=lambda cfg, rows, query, **kwargs: rows
+        result = voc_assistant._focused_search(engine, self.cfg, {'focus_topic':topic},
+                                              {'query':'这个问题怎么排查','intent':'knowledge'}, [])
+        self.assertEqual(result['knowledge'],[original])

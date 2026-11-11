@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import voc, voc_assets as assets, voc_quality as quality, voc_variants as variants
+from . import voc_episode_projection as episode_projection
 from . import voc_topic_insights as insights
 from .clean.rules import mask_pii
 from .config import Settings, load_settings
@@ -71,7 +72,8 @@ def _anchored_text(conn: sqlite3.Connection, session_id: str, ids: list[str], ro
 
 
 def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
-             identify_merchants: bool = False, time_bounds: tuple[int, int] | None = None) -> dict[int, dict]:
+             identify_merchants: bool = False, time_bounds: tuple[int, int] | None = None,
+             qa_ids: set[int] | None = None) -> dict[int, dict]:
     source_path = Path(cfg.runtime.db_path).resolve()
     if not source_path.is_file():
         return {}
@@ -79,7 +81,8 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("BEGIN")  # Consistent read snapshot, closed before any model work.
-        source = voc._scope(conn, filters, qa_id=only_qa_id, include_messages=False, _bounds_override=time_bounds)
+        source = voc._scope(conn, filters, qa_id=only_qa_id, include_messages=False, _bounds_override=time_bounds,
+                            _qa_ids=qa_ids)
         tables = _tables(conn)
         official_sessions = set()
         if identify_merchants and "push_sync_state" in tables:
@@ -119,6 +122,8 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
                 if question == row["question"] and question_parts:
                     row["_question_parts"] = question_parts
                     row["source_kind"] = "source-anchored"
+                    if row["_domain_mode"] and raw_customer:
+                        row["_episode_customer_key"] = episode_projection.customer_key(raw_customer)
             if identify_merchants:
                 known = (bool(row["_question_parts"]) and raw_sid in official_sessions
                          and raw_customer.startswith(("qiyu-external:", "qiyu-external-sha256:", "qiyu-user:")))
@@ -236,13 +241,17 @@ def _events(cfg: Settings, filters: dict, *, _current: dict | None = None) -> li
         return _read_events(cfg, filters, current, conn)
 
 
-def _read_events(cfg: Settings, filters: dict, current: dict, conn: sqlite3.Connection) -> list[dict]:
+def _read_events(cfg: Settings, filters: dict, current: dict, conn: sqlite3.Connection, *,
+                 restrict_qa_ids: bool = False) -> list[dict]:
     if "v2_intent" not in _tables(conn):
         return []
     query = """SELECT i.* FROM v2_intent i JOIN v2_topic t ON t.id=i.topic_id
       JOIN v2_source s ON s.qa_id=i.qa_id AND s.fingerprint=i.fingerprint
       WHERE i.active=1 AND t.status!='ignored' AND s.pipeline=? AND s.state='done'"""
     params = [variants.pipeline(cfg)]
+    if restrict_qa_ids:
+        query += " AND i.qa_id IN (SELECT value FROM json_each(?))"
+        params.append(assets.dump(sorted(current)))
     if filters.get("focus_topic"):
         query += " AND i.topic_id=?"
         params.append(filters["focus_topic"])
@@ -259,6 +268,51 @@ def _read_events(cfg: Settings, filters: dict, current: dict, conn: sqlite3.Conn
                     continue
             result.append({**dict(raw), "data": data, "source": source})
     return sorted(result, key=lambda row: (-row["source"]["asked_at"], row["id"]))
+
+
+def _episode_anchors(cfg: Settings, qa_ids: set[int]) -> tuple[dict[int, dict], list[dict]]:
+    sources = _sources(cfg, {}, qa_ids=qa_ids)
+    store = path(cfg)
+    if not sources or not store.is_file():
+        return sources, []
+    with assets.connection(store) as conn:
+        return sources, _read_events(cfg, {}, sources, conn, restrict_qa_ids=True)
+
+
+def _topic_definitions(cfg: Settings) -> dict[str, dict]:
+    current = {item["id"]: item for item in _stored_topics(path(cfg), domain_mode=variants.mode(cfg))}
+    if variants.mode(cfg) == "zhihuige":
+        from . import voc_episode_catalog
+
+        for item in voc_episode_catalog.topics(cfg):
+            current.setdefault(item["id"], item)
+    return current
+
+
+def _topic_view(cfg: Settings, filters: dict, current: dict | None = None) -> list[dict]:
+    if getattr(getattr(cfg, "runtime", None), "voc_domain", "") != "zhihuige":
+        return _events(cfg, filters) if current is None else _events(cfg, filters, _current=current)
+    current = _sources(cfg, filters) if current is None else current
+    legacy = _events(cfg, episode_projection.source_filters(filters), _current=current)
+    return episode_projection.project(cfg, current, legacy, filters, set(_topic_definitions(cfg)))
+
+
+def _topic_evidence(row: dict) -> dict:
+    evidence = quality.evidence(row)
+    if row.get("episode_id"):
+        evidence["episode_id"] = row["episode_id"]
+    return evidence
+
+
+def _original_topic_events(rows: list[dict], all_events: list[dict]) -> list[dict]:
+    ids = episode_projection.legacy_event_ids(rows)
+    return [row for row in all_events if row["id"] in ids]
+
+
+def _topic_knowledge_assets(cfg: Settings, current: dict, all_events: list[dict], rows: list[dict]) -> list[dict]:
+    return [item for topic_id in sorted({row["topic_id"] for row in rows})
+            for item in _latest_assets(cfg, _current=current, topic_id=topic_id,
+                                       _plans=_knowledge_plans(cfg, all_events, topic_id=topic_id))]
 
 
 def _public_topic(topic: dict, events: list[dict]) -> dict:
@@ -278,8 +332,8 @@ def _topic_items(cfg: Settings, events: list[dict]) -> list[dict]:
     by_topic = defaultdict(list)
     for row in events:
         by_topic[row["topic_id"]].append(row)
-    items = [_public_topic(topic, by_topic[topic["id"]])
-             for topic in _stored_topics(path(cfg), domain_mode=variants.mode(cfg)) if topic["id"] in by_topic]
+    items = [_public_topic(topic, by_topic[topic_id])
+             for topic_id, topic in _topic_definitions(cfg).items() if topic_id in by_topic]
     return sorted(items, key=lambda item: (-item["consultation_count"], -item["event_count"], item["id"]))
 
 
@@ -318,7 +372,8 @@ def _workbench_data(cfg: Settings, filters: dict) -> tuple[list[dict], list[dict
                 states = {row["qa_id"]: row["state"] for row in conn.execute(
                     "SELECT qa_id,fingerprint,state FROM v2_source WHERE pipeline=?", (variants.pipeline(cfg),))
                     if row["qa_id"] in sources and row["fingerprint"] == sources[row["qa_id"]]["_fingerprint"]}
-                events = _read_events(cfg, filters, sources, conn)
+                read_filters = episode_projection.source_filters(filters) if variants.mode(cfg) == "zhihuige" else filters
+                events = _read_events(cfg, read_filters, sources, conn)
                 if previous and events:
                     # Historical snapshots can suppress a false "first seen" label, but only
                     # current fingerprints contribute to counts, evidence, or answers.
@@ -327,18 +382,35 @@ def _workbench_data(cfg: Settings, filters: dict) -> tuple[list[dict], list[dict
                         WHERE i.active=1 AND s.state='done' AND s.pipeline=? AND
                         CASE WHEN json_valid(s.snapshot) THEN CAST(json_extract(s.snapshot,'$.asked_at') AS INTEGER) END
                         BETWEEN 1 AND ?""", (variants.pipeline(cfg), start - 1))}
+    domain = variants.mode(cfg) == "zhihuige"
+    if domain:
+        legacy_events = events
+        view_filters = {key: value for key, value in filters.items() if key != "focus_topic"}
+        events = episode_projection.project(cfg, sources, events, view_filters, set(_topic_definitions(cfg)))
+        states.update({row["qa_id"]: "done" for row in events if row.get("episode_id")})
+    current_events = [row for row in events if row["qa_id"] in current_sources]
+    previous_events = [row for row in events if row["qa_id"] in previous_sources]
+    if domain and filters.get("focus_topic"):
+        current_events = episode_projection.focus_rows(current_events,
+            [row for row in legacy_events if row["qa_id"] in current_sources], filters)
+        previous_events = episode_projection.focus_rows(previous_events,
+            [row for row in legacy_events if row["qa_id"] in previous_sources], filters)
     comparison = insights.comparison(current.public(current_sources, states),
                                      previous.public(previous_sources, states) if previous else None, _last_synced(cfg))
-    return ([row for row in events if row["qa_id"] in current_sources],
-            [row for row in events if row["qa_id"] in previous_sources], observed_before, comparison)
+    comparison["episode"] = episode_projection.coverage(current_events)
+    return current_events, previous_events, observed_before, comparison
 
 
 def _topic_insight(topic: dict, rows: list[dict], prior: list[dict], earlier: bool, scope: dict) -> dict:
     known, unknown = insights.participants(rows)
     previous_count = len({variants.consultation_key(row) for row in prior})
+    trend = insights.trend(topic["consultation_count"], previous_count, earlier, scope)
+    if trend["status"] == "new" and any(row.get("episode_id") for row in rows):
+        # Earlier episodes may have been published outside the compared periods.
+        trend["status"] = "unknown"
     return {**topic, "platforms": insights.platforms(rows), "merchant_count": known,
             "unknown_merchant_sessions": unknown,
-            "trend": insights.trend(topic["consultation_count"], previous_count, earlier, scope)}
+            "trend": trend}
 
 
 def topics(cfg: Settings, filters: dict, *, workbench: bool = False, trend: str = "all") -> dict:
@@ -354,14 +426,14 @@ def topics(cfg: Settings, filters: dict, *, workbench: bool = False, trend: str 
         if trend != "all":
             items = [item for item in items if item["trend"]["status"] == trend]
         return {"items": items, "total": len(items), "comparison": comparison}
-    items = _topic_items(cfg, _events(cfg, filters))
+    items = _topic_items(cfg, _topic_view(cfg, filters))
     return {"items": items, "total": len(items)}
 
 
 def topic_detail(cfg: Settings, filters: dict, topic_id: str, *, workbench: bool = False) -> dict:
     if filters.get("focus_topic") and filters["focus_topic"] != topic_id:
         raise EngineError("当前范围内没有该问题。", 404)
-    topic = next((item for item in _stored_topics(path(cfg), domain_mode=variants.mode(cfg)) if item["id"] == topic_id), None)
+    topic = _topic_definitions(cfg).get(topic_id)
     if workbench:
         if topic is None:
             raise EngineError("当前范围内没有该问题。", 404)
@@ -370,27 +442,32 @@ def topic_detail(cfg: Settings, filters: dict, topic_id: str, *, workbench: bool
             raise EngineError("当前范围内没有该问题。", 404)
         global_sources = _sources(cfg, {})
         all_events = _events(cfg, {}, _current=global_sources)
-        latest = _latest_assets(cfg, _current=global_sources, _plans=_knowledge_plans(cfg, all_events, topic_id=topic_id),
-                                topic_id=topic_id)
-        knowledge = _knowledge_for_events(cfg, latest, rows, all_events)
+        original = _original_topic_events(rows, all_events)
+        latest = _topic_knowledge_assets(cfg, global_sources, all_events, original)
+        knowledge = _knowledge_for_events(cfg, latest, original, all_events)
         knowledge = [{**item, "reuse_level": insights.reuse_level(item)} for item in knowledge]
-        evidence = [{**quality.evidence(row), "workbench": insights.case_details(row)} for row in rows]
+        evidence = [{**_topic_evidence(row), "workbench": insights.case_details(row)} for row in rows]
         public = _topic_insight(_public_topic(topic, rows), rows, previous, topic_id in earlier, comparison)
         return {"topic": public, "events": evidence, "evidence": evidence, "total": len(rows),
                 "workbench": {"comparison": comparison, "knowledge": knowledge,
                               "gaps": insights.gaps(rows, knowledge, latest)}}
-    rows = [row for row in _events(cfg, filters) if row["topic_id"] == topic_id]
+    rows = _topic_view(cfg, {**filters, "focus_topic": topic_id})
     if topic is None or not rows:
         raise EngineError("当前范围内没有该问题。", 404)
-    evidence = [quality.evidence(row) for row in rows]
+    evidence = [_topic_evidence(row) for row in rows]
     return {"topic": _public_topic(topic, rows), "events": evidence, "evidence": evidence, "total": len(rows)}
 
 
 def event_detail(cfg: Settings, filters: dict, event_id: str) -> dict:
-    row = next((row for row in _events(cfg, filters) if row["id"] == event_id), None)
+    events = _topic_view(cfg, filters) if event_id.startswith("episode_") else _events(cfg, filters)
+    row = next((row for row in events if row["id"] == event_id), None)
+    if row is None and filters.get("focus_topic") and variants.mode(cfg) == "zhihuige" and not event_id.startswith("episode_"):
+        if event_id in episode_projection.legacy_event_ids(_topic_view(cfg, filters)):
+            row = next((item for item in _events(cfg, episode_projection.source_filters(filters))
+                        if item["id"] == event_id), None)
     if row is None:
         raise EngineError("当前范围内没有该咨询事件，来源可能已更新。", 404)
-    return {"event": {**quality.evidence(row), "topic_id": row["topic_id"], "revision": row["revision"]}}
+    return {"event": {**_topic_evidence(row), "topic_id": row["topic_id"], "revision": row["revision"]}}
 
 
 def defects(cfg: Settings, filters: dict) -> dict:
@@ -530,10 +607,15 @@ def _knowledge_for_events(cfg: Settings, candidates: list[dict], rows: list[dict
 def knowledge(cfg: Settings, filters: dict, knowledge_id: str = "") -> dict:
     current = _sources(cfg, {})
     all_events = _events(cfg, {}, _current=current)
-    rows = _events(cfg, filters) if any(value for key, value in filters.items() if key != "source") else all_events
     focus = filters.get("focus_topic", "")
-    plans = _knowledge_plans(cfg, all_events, topic_id=focus)
-    items = _knowledge_for_events(cfg, _latest_assets(cfg, _current=current, _plans=plans, topic_id=focus), rows, all_events)
+    if focus and variants.mode(cfg) == "zhihuige":
+        rows = _original_topic_events(_topic_view(cfg, filters), all_events)
+        candidates = _topic_knowledge_assets(cfg, current, all_events, rows)
+    else:
+        rows = _events(cfg, filters) if any(value for key, value in filters.items() if key != "source") else all_events
+        plans = _knowledge_plans(cfg, all_events, topic_id=focus)
+        candidates = _latest_assets(cfg, _current=current, _plans=plans, topic_id=focus)
+    items = _knowledge_for_events(cfg, candidates, rows, all_events)
     if knowledge_id:
         item = next((item for item in items if item["id"] == str(knowledge_id)), None)
         if item is None:
@@ -595,6 +677,7 @@ def _semantic(cfg: Settings) -> LocalBGE:
 def summary(cfg: Settings, filters: dict) -> dict:
     source = _sources(cfg, filters)
     events = _events(cfg, filters, _current=source)
+    topic_events = _topic_view(cfg, filters, source) if variants.mode(cfg) == "zhihuige" else events
     processed = 0
     context_needed = 0
     latest_job = None
@@ -609,10 +692,11 @@ def summary(cfg: Settings, filters: dict) -> dict:
                 processed = states["done"] + states["excluded"] + context_needed
                 row = conn.execute("SELECT * FROM v2_job ORDER BY id DESC LIMIT 1").fetchone()
                 latest_job = _public_job(row) if row else None
-    topic_items = _topic_items(cfg, events)
-    visible = {item["id"] for item in topic_items}
     global_source = _sources(cfg, {}) if any(value for key, value in filters.items() if key != "source") else source
     all_events = events if global_source is source else _events(cfg, {}, _current=global_source)
+    if filters.get("focus_topic") and variants.mode(cfg) == "zhihuige":
+        events = _original_topic_events(topic_events, all_events)
+    visible = {row["topic_id"] for row in events}
     plans = _knowledge_plans(cfg, all_events)
     latest = _latest_assets(cfg, _current=global_source, _plans=plans)
     by_branch = {(item["topic_id"], item["variant_key"]): item for item in latest}
@@ -626,18 +710,19 @@ def summary(cfg: Settings, filters: dict) -> dict:
     know = _with_conversation_verification(cfg, know, events, events=all_events)
     reuse_counts = Counter(item["knowledge_reuse"]["level"] for item in know)
     problems = _exception_items(cfg, source, visible, {item["fingerprint"]: item for item in latest}, filters=filters, event_ids=event_ids)
-    return {"total_events": len(events), "topic_count": len(topic_items),
+    return {"total_events": len(topic_events), "topic_count": len({row["topic_id"] for row in topic_events}),
             "ready_knowledge": len(know), "auto_reusable_knowledge": reuse_counts["verified"] + reuse_counts["guidance"],
             "verified_effect_knowledge": reuse_counts["verified"], "guidance_knowledge": reuse_counts["guidance"],
             "exception_count": len(problems), "needs_compile": needs_compile,
-            "answered_events": sum(bool(row["source"]["answer"]) for row in events), "source_pairs": len(source),
-            "consultation_count": len({variants.consultation_key(row) for row in events}),
+            "answered_events": sum(bool(row["source"]["answer"]) for row in topic_events), "source_pairs": len(source),
+            "consultation_count": len({variants.consultation_key(row) for row in topic_events}),
             "coverage": {"processed_pairs": processed, "pending_pairs": len(source) - processed, "context_needed_pairs": context_needed,
-                         "anchored_events": sum(row["source"]["source_kind"] == "source-anchored" for row in events),
-                         "legacy_events": sum(row["source"]["source_kind"] != "source-anchored" for row in events),
+                         "anchored_events": sum(row["source"]["source_kind"] == "source-anchored" for row in topic_events),
+                         "legacy_events": sum(row["source"]["source_kind"] != "source-anchored" for row in topic_events),
                          "answered_pairs": sum(bool(pair["answer"]) for pair in source.values()),
-                         "resolved_events": sum(row["data"]["answer_kind"] == "resolved_answer" for row in events),
-                         "collect_info_events": sum(row["data"]["answer_kind"] == "collect_info" for row in events),
+                         "resolved_events": sum(row["data"]["answer_kind"] == "resolved_answer" for row in topic_events),
+                         "collect_info_events": sum(row["data"]["answer_kind"] == "collect_info" for row in topic_events),
+                         "episode": episode_projection.coverage(topic_events),
                          "needs_compile": needs_compile,
                          "pipeline_version": variants.pipeline(cfg) + "/" + variants.quality_version(cfg),
                          "domain": variants.mode(cfg)},
@@ -1022,21 +1107,32 @@ def search(cfg: Settings, filters: dict, query: str, limit: int = 5, *, require_
     if not candidates:
         return {"topics": [], "knowledge": [], "events": []}
     ids = {item['id'] for item in candidates}
+    rows = [row for row in _topic_view(cfg, filters) if row['topic_id'] in ids]
+    links = defaultdict(set)
+    for row in rows:
+        for original_id in row.get('legacy_event_ids', ()):
+            links[original_id].add(row['topic_id'])
+
+    def topic_ids(item):
+        destinations = {item['topic_id']} & ids
+        for citation in item.get('evidence', []):
+            destinations.update(links.get(citation.get('event_id'), ()))
+        return destinations
+
     # Topic labels are a navigation aid, not a proxy for which answer matches.
     # Rank the complete, scoped material before truncating it to the UI budget.
-    know = relevant_items(cfg, [item for item in knowledge(cfg, filters)['items'] if item['topic_id'] in ids],
+    know = relevant_items(cfg, [item for item in knowledge(cfg, filters)['items'] if topic_ids(item)],
                           query, kind='knowledge', limit=limit)
-    event_items = [{**quality.evidence(row), 'topic_id': row['topic_id']}
-                   for row in _events(cfg, filters) if row['topic_id'] in ids]
+    event_items = [{**_topic_evidence(row), 'topic_id': row['topic_id']} for row in rows]
     events = relevant_items(cfg, event_items, query, kind='event', limit=limit, require_staff=require_staff)
     selected = relevant_items(cfg, candidates, query, kind='topic')
     # A precise answer can be relevant when the broad topic title is not.
     material_scores = {}
     material_semantics = {}
     for item in [*know, *events]:
-        topic_id = item['topic_id']
-        material_scores[topic_id] = max(material_scores.get(topic_id, 0.), item['retrieval']['score'])
-        material_semantics[topic_id] = max(material_semantics.get(topic_id, 0.), item['similarity'])
+        for topic_id in topic_ids(item):
+            material_scores[topic_id] = max(material_scores.get(topic_id, 0.), item['retrieval']['score'])
+            material_semantics[topic_id] = max(material_semantics.get(topic_id, 0.), item['similarity'])
     selected_ids = {item['id'] for item in selected}
     selected += [{**item, 'similarity': material_semantics[item['id']]}
                  for item in candidates if item['id'] in material_scores and item['id'] not in selected_ids]

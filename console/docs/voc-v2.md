@@ -355,3 +355,26 @@ counts, and case-level evidence grades. Topic IDs are reproducible within a
 fixed cohort. Replays run outside the dashboard worker and do not publish their
 results. Case success records an observed result tied to one action in one
 episode. Promotion to reusable knowledge requires separate release evaluation.
+
+## Multi-turn topic ranking
+
+In the `zhihuige` domain, the existing VOC worker reserves a small part of the
+job budget for complete official sessions with a known visitor. It checks the
+official version and message anchors before publishing a result to the derived
+database. A stale, incomplete or failed episode leaves its existing topic
+evidence available. The recurring job can continue processing these sessions
+after the per-question queue is empty.
+
+The topic catalog assigns durable IDs to grounded issues. It reuses an existing
+topic when the evidence uniquely identifies it, compares new issues with saved
+representatives, and creates a topic for a grounded new issue. Business-field
+conflicts and ambiguous matches withhold a merge. Local BGE vectors take part
+in matching. An already prepared local model can be selected with
+`VOC_EPISODE_RERANKER_PATH` for pairwise reranking.
+
+Topic rankings count qualified linked consultations and retain the existing
+results for sessions that have yet to qualify. The workbench reports how many
+consultations were linked. A linked consultation is counted on the date of
+its first question. Its evidence can include later replies and follow-ups.
+The knowledge compiler continues to verify its
+original message evidence before making any answer available for reuse.
