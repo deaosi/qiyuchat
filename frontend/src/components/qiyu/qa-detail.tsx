@@ -93,12 +93,14 @@ function ConversationImage({ url }: DetailMessageImage) {
 export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false }: QADetailProps) {
   const [retry, setRetry] = React.useState(0)
   const [request, setRequest] = React.useState<{ key: string; loading: boolean; data: DetailData | null; error: string | null }>({ key: '', loading: false, data: null, error: null })
+  const [lookupRequestedFor, setLookupRequestedFor] = React.useState<DetailData | null>(null)
   const [replyRevision, setReplyRevision] = React.useState(0)
   const [replyLookup, setReplyLookup] = React.useState<{ detail: DetailData; revision: number; result: DetailRepliesResponse } | null>(null)
   const sequence = React.useRef(0)
   const requestedId = requestedPair?.id
   const requestKey = requestedPair && source ? JSON.stringify([source, requestedPair.id]) : ''
   React.useEffect(() => {
+    setLookupRequestedFor(null)
     if (!requestKey) {
       setRequest({ key: '', loading: false, data: null, error: null })
       return
@@ -132,7 +134,8 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   const loaded = request.key === requestKey ? request.data : null
   const retainedMessages = loaded?.messages ?? []
   const hasRetainedStaff = retainedMessages.some(message => message.role === 'staff')
-  const lookupDetail = embedded && loaded?.canLookupReplies && !hasRetainedStaff ? loaded : null
+  const lookupEligible = loaded?.canLookupReplies && !hasRetainedStaff ? loaded : null
+  const lookupDetail = embedded || lookupRequestedFor === lookupEligible ? lookupEligible : null
   React.useEffect(() => {
     if (!lookupDetail || !requestedId) return
     const controller = new AbortController()
@@ -153,15 +156,16 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   const normalizedQuestion = loaded?.normalizedQuestion.trim()
     ? loaded.normalizedQuestion : (loading ? '正在读取归一化问法…' : error ? '暂时无法读取归一化问法' : '未记录归一化问法')
   const archived = Boolean(loaded?.archived)
-  const messages = officialResult?.status === 'found' ? mergeOfficialReplies(retainedMessages, officialResult.messages) : retainedMessages
+  const officialFound = officialResult?.status === 'found'
+  const messages = officialFound ? mergeOfficialReplies(retainedMessages, officialResult.messages) : retainedMessages
   const availability = loaded?.availability || (archived ? 'archived' : undefined)
   const noStaffMessages = embedded && !lookupStatus && retainedMessages.length > 0 && (availability === 'available' || availability === 'partial') && !hasRetainedStaff
   const content = pair && <div className={embedded ? 'min-w-0 [overflow-wrap:anywhere]' : 'min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-8 [overflow-wrap:anywhere]'}>
           {!embedded && <div className="flex flex-wrap gap-2 py-5">
             <Badge variant="secondary" className="rounded-md">{pair.id}</Badge>
             <Badge variant="outline" className="gap-1.5 font-normal">
-              {pair.answer.trim() ? <CircleCheck className="size-3.5" /> : <CircleDashed className="size-3.5" />}
-              {pair.answer.trim() ? '有客服回复' : '未发现回复'}
+              {pair.answer.trim() || officialFound ? <CircleCheck className="size-3.5" /> : <CircleDashed className="size-3.5" />}
+              {pair.answer.trim() ? '有客服回复' : officialFound ? '已查到人工客服回复' : '未发现回复'}
             </Badge>
             <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground"><ShieldCheck className="size-3.5" />已脱敏</Badge>
           </div>}
@@ -178,7 +182,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
           </div>
           <section className="py-6">
             <h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><ArrowUpRight className="size-3.5" />客服回复</h3>
-            <p className="whitespace-pre-wrap text-sm leading-7 [overflow-wrap:anywhere]">{pair.answer.trim() ? pair.answer : '当前抽取片段中未发现客服回复。这不代表已经确认该问题未解决。'}</p>
+            <p className="whitespace-pre-wrap text-sm leading-7 [overflow-wrap:anywhere]">{pair.answer.trim() || (officialFound ? '查到的人工客服回复见下方会话记录。' : '当前抽取片段中未发现客服回复。这不代表已经确认该问题未解决。')}</p>
           </section>
           </>}
           <Separator />
@@ -189,6 +193,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
                 : <>
                   {availability === 'partial' && <p role="status" className="mb-4 text-sm leading-6 text-muted-foreground">当前仅保留部分聊天记录。</p>}
                   {noStaffMessages && <p className="mb-4 text-sm leading-6 text-muted-foreground">这段已保存的会话记录中没有客服消息。</p>}
+                  {!embedded && lookupEligible && !lookupDetail && <Button variant="outline" size="sm" className="mb-4" onClick={() => setLookupRequestedFor(lookupEligible)}><MessagesSquare className="size-3.5" />查询七鱼客服回复</Button>}
                   {lookupStatus && <div className="mb-4 flex flex-wrap items-center gap-x-2 text-sm leading-6 text-muted-foreground">
                     <p role="status">{replyLookupText[lookupStatus]}</p>
                     {(lookupStatus === 'busy' || lookupStatus === 'unavailable') && <Button variant="ghost" size="xs" onClick={() => setReplyRevision(value => value + 1)}>重试查询</Button>}

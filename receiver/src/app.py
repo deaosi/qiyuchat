@@ -25,6 +25,7 @@ from .feishu import (AgentClient, BitableWriter, BotSender, DocxWriter,
                      PAIR_FIELD_SPEC, check_feishu, pair_to_fields)
 from .log import get, setup
 from .qiyu import InspectExporter, SessionExporter
+from .qiyu.message import source_auto_reply, source_integer
 
 log = get("app")
 
@@ -106,11 +107,39 @@ def stage_pull(cfg: Settings | None = None, days: int = 0) -> dict[str, int]:
     return {"sessions": total, "messages": msgs}
 
 
-def _ingest_export_messages(db: DB, messages: list[dict[str, Any]]) -> int:
-    """把 export/session 的 message.txt 按会话归组写进 raw_message。
+def _bulk_message_int(value: Any) -> int | None:
+    # JSON lines use integers; the older TSV/CSV export uses decimal strings.
+    if isinstance(value, str):
+        value = value.strip()
+        digits = value.removeprefix("-")
+        if 1 <= len(digits) <= 19 and digits.isascii() and digits.isdecimal():
+            value = int(value)
+    return value if source_integer(value) else None
 
-    `from` 1=访客 0=客服；`mType` 1=文本。非文本（图片/语音）只记占位。
-    """
+
+def _bulk_message_role(message: dict[str, Any]) -> str:
+    status = _bulk_message_int(message.get("status"))
+    direction = _bulk_message_int(message.get("from"))
+    kind = _bulk_message_int(message.get("mType"))
+    if status != 1:
+        return "boundary"
+    if direction == 0 and kind == 110:
+        return "bot"
+    if kind not in (1, 2):
+        return "boundary"
+    if direction == 1:
+        return "user"
+    if direction == 0:
+        staff_id = _bulk_message_int(message.get("staffId"))
+        if source_auto_reply(message):
+            return "bot"
+        if staff_id is not None:
+            return "staff" if staff_id > 0 else "bot"
+    return "boundary"
+
+
+def _ingest_export_messages(db: DB, messages: list[dict[str, Any]]) -> int:
+    """按会话归组导出消息，仅用明确的方向、身份和类型判断角色。"""
     grouped: dict[str, list[dict[str, Any]]] = {}
     for m in messages:
         sid = str(m.get("sessionId") or "").strip()
@@ -120,13 +149,10 @@ def _ingest_export_messages(db: DB, messages: list[dict[str, Any]]) -> int:
         text = "" if text is None else str(text).strip()
         if not text:
             text = f"[非文本消息 mType={m.get('mType')}]"
-        # 实测坑：本租户导出的 message.txt 里 `from` 恒为 1，不能用来区分角色。
-        # `staffId > 0` 才是「人工客服」的可靠信号；其余一律当访客（含机器人）。
-        role = "staff" if int(m.get("staffId") or 0) > 0 else "user"
         grouped.setdefault(sid, []).append({
-            "role": role,
+            "role": _bulk_message_role(m),
             "content": text,
-            "ts": int(m.get("time") or 0),
+            "ts": _bulk_message_int(m.get("time")) or 0,
         })
 
     written = 0
@@ -184,23 +210,35 @@ def stage_extract(cfg: Settings | None = None, limit: int = 0,
         sessions = sessions[:limit]
 
     total_pairs = 0
+    sessions_scanned = 0
     for s in sessions:
-        sd = dict(s)
-        sd["session_id"] = sd.get("session_id") or sd.get("id")
-        sid = str(sd["session_id"])
-        db.restore_verified_source(sid)
-        msgs = db.get_messages(sid)
-        input_data = {k: sd.get(k) for k in
-                      ("session_id", "user_id", "user_name", "from_group", "staff_name", "start_ts")}
-        fingerprint = hashlib.sha256(json.dumps(
-            [input_data, msgs], ensure_ascii=False, sort_keys=True,
-        ).encode("utf-8")).hexdigest()
-        # 原始正文可能已由保留策略归档；不能把历史问答资产重洗成空。
-        pairs = E.extract_pairs(msgs, sd) if msgs else [dict(p) for p in db.iter_qa_pairs([sid])]
-        status = ("extracted" if msgs else "archived") if pairs else ("no_question" if msgs else "no_content")
-        total_pairs += db.replace_session_pairs(sid, pairs, fingerprint, status)
+        sid = s["session_id"]
+        # 保留策略与消息同步在其他进程运行；原文读取和问答替换须属于同一事务。
+        with db.tx(immediate=True) as conn:
+            session = conn.execute("SELECT * FROM raw_session WHERE session_id=?", (sid,)).fetchone()
+            if session is None:
+                continue
+            sd = dict(session)
+            archived = db.originals_archived(sid)
+            if not archived:
+                db.restore_verified_source(sid)
+            msgs = db.get_messages(sid)
+            input_data = {k: sd.get(k) for k in
+                          ("session_id", "user_id", "user_name", "from_group", "staff_name", "start_ts")}
+            fingerprint = hashlib.sha256(json.dumps(
+                [input_data, msgs], ensure_ascii=False, sort_keys=True,
+            ).encode("utf-8")).hexdigest()
+            # 部分原文已归档时，保留已经抽取的完整问答。
+            if msgs and not archived:
+                pairs = E.extract_pairs(msgs, sd)
+                status = "extracted" if pairs else "no_question"
+            else:
+                pairs = [dict(p) for p in db.iter_qa_pairs([sid])]
+                status = "archived" if archived or pairs else "no_content"
+            total_pairs += db.replace_session_pairs(sid, pairs, fingerprint, status)
+            sessions_scanned += 1
 
-    log.info("抽取出 %d 条问答对（覆盖 %d 个会话）", total_pairs, len(sessions))
+    log.info("抽取出 %d 条问答对（覆盖 %d 个会话）", total_pairs, sessions_scanned)
 
     # 聚类：全量重算，保证簇号稳定可比
     rows = db.iter_qa_pairs()
@@ -240,7 +278,7 @@ def stage_extract(cfg: Settings | None = None, limit: int = 0,
 
     log.info("聚类完成：%d 条问答 → %d 个问题簇", len(rows), len(cluster_rows))
     return {
-        "sessions_scanned": len(sessions),
+        "sessions_scanned": sessions_scanned,
         "qa_pairs": total_pairs,
         "clusters": len(cluster_rows),
         "largest_cluster": max((c["size"] for c in cluster_rows), default=0),

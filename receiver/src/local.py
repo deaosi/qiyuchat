@@ -24,6 +24,7 @@ from .xlsx import read_table
 
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_IMPORT_ROWS = 5000
+IMPORT_SOURCE = "本地导入"
 
 ALIASES = {
     "session_id": ("会话ID", "session_id", "sessionId", "id"),
@@ -60,6 +61,8 @@ def parse_time(value: str) -> int:
                 ms = int(number if number >= 100_000_000_000 else number * 1000)
         else:
             text = text.replace("/", "-").replace("年", "-").replace("月", "-").replace("日", "")
+            text = re.sub(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?=$|[ T])",
+                          lambda m: f"{m[1]}-{int(m[2]):02d}-{int(m[3]):02d}", text)
             ms = int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp() * 1000)
         if not 946684800000 <= ms <= 4133980799999:
             raise ValueError
@@ -139,10 +142,14 @@ def parse_import(data: bytes, filename: str) -> ImportData:
         raise ValueError("未找到“会话内容”或“问题”列，请下载模板并保留对应表头")
     result = ImportData(filename, hashlib.sha256(data).hexdigest(), kind, fields, 0)
     seen_rows: set[str] = set()
+    customer_ids: dict[str, str] = {}
     for row_number, cells in enumerate(rows[1:], 2):
         if not any(str(c).strip() for c in cells):
             continue
         result.total_rows += 1
+        if any(str(c).strip() for c in cells[len(headers):]):
+            result.errors.append({"row": row_number, "reason": "数据列多于表头，请检查逗号或补齐表头"})
+            continue
         row = {headers[i]: str(cells[i]).strip() if i < len(cells) else ""
                for i in range(len(headers)) if headers[i]}
         values = {key: row.get(column, "") for key, column in fields.items()}
@@ -155,23 +162,45 @@ def parse_import(data: bytes, filename: str) -> ImportData:
             if not text:
                 raise ValueError("会话内容/问题为空，已跳过")
             start = parse_time(values.get("time", ""))
-            end = parse_time(values.get("end", "")) or start
+            declared_end = parse_time(values.get("end", ""))
+            end = declared_end or start
             if start and end and end < start:
                 raise ValueError("结束时间早于开始时间")
             sid = values.get("session_id") or "local-" + hashlib.sha256(signature.encode()).hexdigest()[:24]
-            customer = values.get("customer_id") or "anonymous-" + hashlib.sha256(sid.encode()).hexdigest()[:16]
+            previous = result.sessions.get(sid)
+            if previous and kind == "会话正文":
+                raise ValueError("同一会话 ID 已有一条会话正文，请将完整会话放在同一行")
+            customer_id = values.get("customer_id") or ""
+            previous_customer_id = customer_ids.get(sid, "")
+            if previous_customer_id and customer_id and previous_customer_id != customer_id:
+                raise ValueError("同一会话 ID 对应不同客户 ID，已跳过本行")
+            customer = previous_customer_id or customer_id or "anonymous-" + hashlib.sha256(sid.encode()).hexdigest()[:16]
             session = {
                 "id": sid, "userId": customer, "userName": values.get("customer_name", ""),
                 "fromGroup": values.get("group", ""), "staffName": values.get("staff", ""),
                 "startTime": start, "endTime": end, "sType": 0, "isValid": 1,
-                "fromType": "本地导入",
+                "fromType": IMPORT_SOURCE,
             }
+            if previous:
+                for key, label in (("userName", "客户名称"), ("fromGroup", "客户群"), ("staffName", "客服")):
+                    old, new = previous[key], session[key]
+                    same_customer = key == "userName" and customer_id and customer_id == previous_customer_id
+                    if old and new and old != new and not same_customer:
+                        raise ValueError(f"同一会话 ID 对应不同{label}，已跳过本行")
+                    session[key] = old or new
             if kind == "会话正文":
                 messages = InspectExporter.split_transcript(text, session["staffName"])
                 for message in messages:
                     message["ts"] = message.get("ts") or start
                 if not messages or not any(m["role"] == "user" for m in messages):
                     raise ValueError("无法识别客户消息，请使用“客户: … / 客服: …”或填写接待客服")
+                times = [message["ts"] for message in messages if message["ts"] > 0]
+                if times:
+                    start = start or min(times)
+                    session["startTime"] = start
+                    session["endTime"] = declared_end or max(start, max(times))
+                    if session["endTime"] < start:
+                        raise ValueError("结束时间早于正文中首条消息")
                 result.messages[sid] = messages
             else:
                 messages = [{"role": "user", "content": text, "ts": start}]
@@ -181,12 +210,13 @@ def parse_import(data: bytes, filename: str) -> ImportData:
                 if sid in result.messages:
                     messages.insert(0, {"role": "boundary", "content": "", "ts": start})
                 result.messages.setdefault(sid, []).extend(messages)
-                previous = result.sessions.get(sid)
                 if previous:
                     session["startTime"] = min(x for x in (previous["startTime"], start) if x) if (previous["startTime"] or start) else 0
                     session["endTime"] = max(previous["endTime"], end)
             session["roundNumber"] = max(1, len(result.messages[sid]) // 2)
             result.sessions[sid] = session
+            if customer_id:
+                customer_ids[sid] = customer_id
             result.valid_rows += 1
             result.unknown_time += int(not start)
             seen_rows.add(signature)
@@ -200,9 +230,21 @@ def import_file(cfg: Settings, data: bytes, filename: str) -> dict[str, Any]:
     if not parsed.sessions:
         raise ValueError("没有可以导入的会话，请先修正预览中列出的错误")
     db = get_db(cfg)
-    old_ids = {r["session_id"] for r in db.iter_sessions()}
-    before = db.stats()["qa_pair"]
-    with db.tx():
+    with db.tx(immediate=True) as conn:
+        old_ids = set()
+        for sid in parsed.sessions:
+            row = conn.execute("SELECT from_type FROM raw_session WHERE session_id=?", (sid,)).fetchone()
+            if row is not None and row["from_type"] == IMPORT_SOURCE and not db._protected_source(sid, include_archived=True):
+                old_ids.add(sid)
+                continue
+            retained = row is not None or db._protected_source(sid, include_archived=True)
+            if not retained:
+                retained = any(conn.execute(f"SELECT 1 FROM {table} WHERE session_id=? LIMIT 1", (sid,)).fetchone()
+                               for table in ("raw_message", "qa_pair", "qa_origin"))
+            if retained:
+                safe_id = mask_pii(sid)[:80]
+                raise ValueError(f"会话 ID {safe_id} 与已有七鱼或归档记录冲突，请修改编号后重新导入")
+        before = db.stats()["qa_pair"]
         db.upsert_sessions(parsed.sessions.values())
         for sid, messages in parsed.messages.items():
             db.upsert_messages(sid, messages)
@@ -221,7 +263,7 @@ def import_file(cfg: Settings, data: bytes, filename: str) -> dict[str, Any]:
 
 def clean_local(cfg: Settings) -> dict[str, Any]:
     db = get_db(cfg)
-    with db.tx():
+    with db.tx(immediate=True):
         result = stage_extract(cfg, rebuild=True)
         db.log_task("local_clean", result, f"clean-{time.time_ns()}", "completed")
     return result

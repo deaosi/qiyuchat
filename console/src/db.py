@@ -236,11 +236,12 @@ class DB:
     # ---------- 基础 ----------
 
     @contextmanager
-    def tx(self) -> Iterator[sqlite3.Connection]:
+    def tx(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         # 导入整批数据时复用同一事务；内部 upsert 用 SAVEPOINT，不能提前提交。
         nested = self._conn.in_transaction
         name = f"sp_{time.monotonic_ns()}"
-        self._conn.execute(f"SAVEPOINT {name}" if nested else "BEGIN")
+        begin = "BEGIN IMMEDIATE" if immediate else "BEGIN"
+        self._conn.execute(f"SAVEPOINT {name}" if nested else begin)
         try:
             yield self._conn
             if nested:
@@ -261,6 +262,10 @@ class DB:
     # ---------- 原始会话 ----------
 
     def _protected_source(self, session_id: str, *, include_archived: bool = False) -> bool:
+        if include_archived and self._conn.execute(
+            "SELECT 1 FROM extract_state WHERE session_id=? AND status='archived'", (session_id,),
+        ).fetchone():
+            return True
         if not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state' AND type='table'").fetchone():
             return False
         return self._conn.execute("SELECT 1 FROM push_sync_state WHERE session_id=? AND ((source_json<>'' AND status<>'archived') OR (? AND (status='archived' OR archive_reason<>'')))", (session_id,int(include_archived))).fetchone() is not None
@@ -300,7 +305,7 @@ class DB:
                 old = c.execute("SELECT payload FROM raw_session WHERE session_id=?",
                                 (str(r.get("id")),)).fetchone()
                 if old is None or old[0] != payload:
-                    c.execute("DELETE FROM extract_state WHERE session_id=?", (str(r.get("id")),))
+                    c.execute("DELETE FROM extract_state WHERE session_id=? AND status<>'archived'", (str(r.get("id")),))
                 c.execute(sql, (
                     str(r.get("id")),
                     _int(r.get("startTime")),
@@ -342,12 +347,13 @@ class DB:
         """正文是会话快照，更新时删除旧尾部，且让规则清洗重新处理。"""
         normalized = [{"role": m.get("role", ""), "content": m.get("content", ""),
                        "ts": _int(m.get("ts")), **({"source_message_id": str(m["source_message_id"])} if m.get("source_message_id") else {})} for m in msgs]
-        if self.get_messages(session_id) == normalized:
-            return len(msgs)
-        with self.tx() as c:
+        with self.tx(immediate=True) as c:
+            current = self.get_messages(session_id)
             if not verified_source and self._protected_source(session_id, include_archived=True):
-                self._reject_source_write(session_id, "message_snapshot", len(msgs), len(self.get_messages(session_id)))
+                self._reject_source_write(session_id, "message_snapshot", len(msgs), len(current))
                 return 0
+            if current == normalized:
+                return len(msgs)
             c.execute("INSERT OR IGNORE INTO source_write_guard VALUES (?)", (session_id,))
             c.execute("DELETE FROM raw_message WHERE session_id=?", (session_id,))
             c.executemany(
@@ -398,11 +404,13 @@ class DB:
         with self.tx() as c:
             c.execute("UPDATE uid_session SET ended_at=?, updated_at=? WHERE uid=?",
                       (ended, now, uid))
-            c.execute(
-                "UPDATE raw_session SET end_ts=? WHERE session_id="
-                "(SELECT session_id FROM uid_session WHERE uid=?)",
-                (ended, uid),
-            )
+            row = c.execute("SELECT session_id FROM uid_session WHERE uid=?", (uid,)).fetchone()
+            if row is not None:
+                sid = row["session_id"]
+                if self._protected_source(sid, include_archived=True):
+                    self._reject_source_write(sid, "session_end", 1, 1)
+                else:
+                    c.execute("UPDATE raw_session SET end_ts=? WHERE session_id=?", (ended, sid))
 
     def current_session_for_uid(self, uid: str) -> str:
         row = self._conn.execute(
@@ -411,18 +419,21 @@ class DB:
         return (row["session_id"] if row else "") or ""
 
     def append_message(self, session_id: str, role: str, content: str, ts: int = 0) -> int:
-        """流式追加一条消息。不能用 upsert_messages —— 那是整段快照替换。"""
+        """流式追加一条消息，已核验或归档的会话拒绝写入并返回 -1。"""
         with self.tx() as c:
             row = c.execute(
-                "SELECT COALESCE(MAX(seq),-1) AS m FROM raw_message WHERE session_id=?",
+                "SELECT COALESCE(MAX(seq),-1) AS m,COUNT(*) AS n FROM raw_message WHERE session_id=?",
                 (session_id,),
             ).fetchone()
             nxt = int(row["m"]) + 1
+            if self._protected_source(session_id, include_archived=True):
+                self._reject_source_write(session_id, "message_append", 1, row["n"])
+                return -1
             c.execute(
                 "INSERT INTO raw_message (session_id, seq, role, content, ts) VALUES (?,?,?,?,?)",
                 (session_id, nxt, role, content, ts),
             )
-            c.execute("DELETE FROM extract_state WHERE session_id=?", (session_id,))
+            c.execute("DELETE FROM extract_state WHERE session_id=? AND status<>'archived'", (session_id,))
         return nxt
 
     def get_messages(self, session_id: str) -> list[dict[str, Any]]:
@@ -649,10 +660,30 @@ class DB:
                 c.execute("UPDATE qa_origin SET active=0 WHERE qa_id=?", (row["qa_id"],))
 
     def _mark_retention(self, session_ids: Iterable[str]) -> None:
+        session_ids = tuple(dict.fromkeys(str(sid) for sid in session_ids))
+        if not session_ids:
+            return
+        now = time.time()
+        self._conn.executemany(
+            """INSERT INTO extract_state(session_id,version,fingerprint,status,pair_count,processed_at)
+               SELECT ?,?,'','archived',COUNT(*),? FROM qa_pair WHERE session_id=?
+               ON CONFLICT(session_id) DO UPDATE SET status='archived',pair_count=excluded.pair_count""",
+            [(sid, EXTRACT_VERSION, int(now * 1000), sid) for sid in session_ids],
+        )
         if not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state' AND type='table'").fetchone():
             return
         self._conn.executemany("UPDATE push_sync_state SET source_json='',source_version='',status='archived',archive_reason='retention',archived_at=?,updated_at=? WHERE session_id=?",
-                               [(time.time(),time.time(),str(sid)) for sid in session_ids])
+                               [(now, now, sid) for sid in session_ids])
+
+    def originals_archived(self, session_id: str) -> bool:
+        if self._conn.execute("SELECT 1 FROM extract_state WHERE session_id=? AND status='archived'", (session_id,)).fetchone():
+            return True
+        if not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state' AND type='table'").fetchone():
+            return False
+        return self._conn.execute(
+            "SELECT 1 FROM push_sync_state WHERE session_id=? AND (status='archived' OR archive_reason<>'')",
+            (session_id,),
+        ).fetchone() is not None
 
     def local_status(self) -> dict[str, Any]:
         q = lambda sql: self._conn.execute(sql).fetchone()[0]
@@ -747,17 +778,17 @@ class DB:
 
         now_ms = int(_t.time() * 1000)
         out = {"raw_message": 0, "raw_session": 0}
-        if message_days > 0:
-            cutoff = now_ms - message_days * 86400_000
-            self._mark_retention([r[0] for r in self._conn.execute("SELECT DISTINCT session_id FROM raw_message WHERE ts < ?", (cutoff,))])
-            cur = self._conn.execute("DELETE FROM raw_message WHERE ts < ?", (cutoff,))
-            out["raw_message"] = cur.rowcount or 0
-        if session_days > 0:
-            cutoff = now_ms - session_days * 86400_000
-            self._mark_retention([r[0] for r in self._conn.execute("SELECT session_id FROM raw_session WHERE end_ts < ?", (cutoff,))])
-            cur = self._conn.execute("DELETE FROM raw_session WHERE end_ts < ?", (cutoff,))
-            out["raw_session"] = cur.rowcount or 0
-        self._conn.commit()
+        with self.tx(immediate=True) as conn:
+            if message_days > 0:
+                cutoff = now_ms - message_days * 86400_000
+                self._mark_retention(r[0] for r in conn.execute("SELECT DISTINCT session_id FROM raw_message WHERE ts < ?", (cutoff,)))
+                cur = conn.execute("DELETE FROM raw_message WHERE ts < ?", (cutoff,))
+                out["raw_message"] = cur.rowcount or 0
+            if session_days > 0:
+                cutoff = now_ms - session_days * 86400_000
+                self._mark_retention(r[0] for r in conn.execute("SELECT session_id FROM raw_session WHERE end_ts < ?", (cutoff,)))
+                cur = conn.execute("DELETE FROM raw_session WHERE end_ts < ?", (cutoff,))
+                out["raw_session"] = cur.rowcount or 0
         if vacuum:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._conn.execute("VACUUM")

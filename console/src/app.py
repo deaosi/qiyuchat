@@ -152,23 +152,35 @@ def stage_extract(cfg: Settings | None = None, limit: int = 0,
         sessions = sessions[:limit]
 
     total_pairs = 0
+    sessions_scanned = 0
     for s in sessions:
-        sd = dict(s)
-        sd["session_id"] = sd.get("session_id") or sd.get("id")
-        sid = str(sd["session_id"])
-        db.restore_verified_source(sid)
-        msgs = db.get_messages(sid)
-        input_data = {k: sd.get(k) for k in
-                      ("session_id", "user_id", "user_name", "from_group", "staff_name", "start_ts")}
-        fingerprint = hashlib.sha256(json.dumps(
-            [input_data, msgs], ensure_ascii=False, sort_keys=True,
-        ).encode("utf-8")).hexdigest()
-        # 原始正文可能已由保留策略归档；不能把历史问答资产重洗成空。
-        pairs = E.extract_pairs(msgs, sd) if msgs else [dict(p) for p in db.iter_qa_pairs([sid])]
-        status = ("extracted" if msgs else "archived") if pairs else ("no_question" if msgs else "no_content")
-        total_pairs += db.replace_session_pairs(sid, pairs, fingerprint, status)
+        sid = s["session_id"]
+        # 保留策略与消息同步在其他进程运行；原文读取和问答替换须属于同一事务。
+        with db.tx(immediate=True) as conn:
+            session = conn.execute("SELECT * FROM raw_session WHERE session_id=?", (sid,)).fetchone()
+            if session is None:
+                continue
+            sd = dict(session)
+            archived = db.originals_archived(sid)
+            if not archived:
+                db.restore_verified_source(sid)
+            msgs = db.get_messages(sid)
+            input_data = {k: sd.get(k) for k in
+                          ("session_id", "user_id", "user_name", "from_group", "staff_name", "start_ts")}
+            fingerprint = hashlib.sha256(json.dumps(
+                [input_data, msgs], ensure_ascii=False, sort_keys=True,
+            ).encode("utf-8")).hexdigest()
+            # 部分原文已归档时，保留已经抽取的完整问答。
+            if msgs and not archived:
+                pairs = E.extract_pairs(msgs, sd)
+                status = "extracted" if pairs else "no_question"
+            else:
+                pairs = [dict(p) for p in db.iter_qa_pairs([sid])]
+                status = "archived" if archived or pairs else "no_content"
+            total_pairs += db.replace_session_pairs(sid, pairs, fingerprint, status)
+            sessions_scanned += 1
 
-    log.info("抽取出 %d 条问答对（覆盖 %d 个会话）", total_pairs, len(sessions))
+    log.info("抽取出 %d 条问答对（覆盖 %d 个会话）", total_pairs, sessions_scanned)
 
     # 聚类：全量重算，保证簇号稳定可比
     rows = db.iter_qa_pairs()
@@ -208,7 +220,7 @@ def stage_extract(cfg: Settings | None = None, limit: int = 0,
 
     log.info("聚类完成：%d 条问答 → %d 个问题簇", len(rows), len(cluster_rows))
     return {
-        "sessions_scanned": len(sessions),
+        "sessions_scanned": sessions_scanned,
         "qa_pairs": total_pairs,
         "clusters": len(cluster_rows),
         "largest_cluster": max((c["size"] for c in cluster_rows), default=0),

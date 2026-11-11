@@ -75,6 +75,31 @@ describe('embedded case conversation details', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  it('looks up eligible replies in the standard drawer only after the user requests them', async () => {
+    const detail = response('21', [message(0, '客户原话')], { availability: 'available', can_lookup_replies: true })
+    vi.mocked(apiGet).mockResolvedValueOnce({ ...detail, pair: { ...detail.pair, answer: '' } })
+      .mockResolvedValueOnce(response('22', [message(0, '另一案例原话')], { availability: 'available', can_lookup_replies: true }))
+    const reply = deferred<DetailRepliesResponse>()
+    vi.mocked(apiPost).mockReturnValueOnce(reply.promise)
+    const view = render(<QADetail pair={{ ...pair(), answer: '' }} onClose={vi.fn()} />)
+
+    const lookup = await screen.findByRole('button', { name: '查询七鱼客服回复' })
+    expect(apiPost).not.toHaveBeenCalled()
+    fireEvent.click(lookup)
+    expect(screen.getByText('客户原话')).toBeTruthy()
+    expect(screen.getByText('正在查询七鱼客服回复…')).toBeTruthy()
+    expect(apiPost).toHaveBeenCalledWith('detail/replies', { source: 'local', id: '21' }, undefined, undefined, expect.any(AbortSignal))
+    await act(async () => { reply.resolve({ status: 'found', messages: [officialReply(1, '七鱼返回的人工原话')] }) })
+    expect(screen.getByText('已查到人工客服回复')).toBeTruthy()
+    expect(within(screen.getByRole('list', { name: '会话消息' })).getByText('七鱼返回的人工原话')).toBeTruthy()
+    expect(screen.queryByText('未发现回复')).toBeNull()
+
+    view.rerender(<QADetail pair={pair('22')} onClose={vi.fn()} />)
+    expect(await screen.findByRole('button', { name: '查询七鱼客服回复' })).toBeTruthy()
+    expect(screen.queryByText('七鱼返回的人工原话')).toBeNull()
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
   it('clears old records immediately when changing cases and ignores a late response', async () => {
     const oldRequest = deferred<ReturnType<typeof response>>()
     const newRequest = deferred<ReturnType<typeof response>>()

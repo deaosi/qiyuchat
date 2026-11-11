@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import csv
 import io
+import posixpath
 import zipfile
 from xml.etree import ElementTree as ET
 
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+REL_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+PACKAGE_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
 
 
 def _col_index(ref: str) -> int:
@@ -21,6 +24,31 @@ def _col_index(ref: str) -> int:
     return n - 1
 
 
+def _first_sheet(zf: zipfile.ZipFile) -> str | None:
+    names = set(zf.namelist())
+    workbook, relations = "xl/workbook.xml", "xl/_rels/workbook.xml.rels"
+    if workbook in names and relations in names:
+        ordered = ET.fromstring(zf.read(workbook)).findall(f"{NS}sheets/{NS}sheet")
+        links = {
+            rel.get("Id"): rel
+            for rel in ET.fromstring(zf.read(relations)).findall(PACKAGE_REL)
+            if rel.get("Type", "").endswith("/worksheet") and rel.get("TargetMode", "Internal") == "Internal"
+        }
+        for sheet in ordered:
+            relation = links.get(sheet.get(REL_ID))
+            if relation is None:
+                continue
+            target = relation.get("Target", "")
+            path = posixpath.normpath(target.lstrip("/") if target.startswith("/") else posixpath.join("xl", target))
+            if path not in names or not path.startswith("xl/") or not path.endswith(".xml"):
+                raise ValueError("XLSX 的首个工作表引用无效，请从 Excel 重新保存")
+            return path
+        return None
+    # Older minimal exports may omit the workbook relationship manifest.
+    return next((name for name in sorted(names)
+                 if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")), None)
+
+
 def read_xlsx(data: bytes, max_rows: int = 0) -> list[list[str]]:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         if len(zf.infolist()) > 2000 or sum(i.file_size for i in zf.infolist()) > 64 * 1024 * 1024:
@@ -31,8 +59,7 @@ def read_xlsx(data: bytes, max_rows: int = 0) -> list[list[str]]:
             for si in root.findall(f"{NS}si"):
                 shared.append("".join(t.text or "" for t in si.iter(f"{NS}t")))
         # 单表导入：读取第一个工作表，不拼接其他工作表。
-        sheet_name = next((name for name in sorted(zf.namelist())
-                           if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")), None)
+        sheet_name = _first_sheet(zf)
         if not sheet_name:
             raise ValueError("XLSX 里找不到工作表")
         root = ET.fromstring(zf.read(sheet_name))

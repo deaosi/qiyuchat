@@ -382,7 +382,7 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                 if old and old["status"] == "running" and old["claim_until"] > clock():
                     result["skipped"] += 1
                     continue
-                if old and old["status"] == "archived" and not repairing:
+                if not repairing and db.originals_archived(sid):
                     result["skipped"] += 1
                     continue
                 if not repairing and old and old["version"] == event["version"] and (old["status"] in ("completed", "archived") or old["retry_after"] > clock()):
@@ -406,6 +406,9 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                 db._conn.execute("INSERT INTO push_sync_state(session_id,event_key,version,status,attempts,updated_at,owner,claim_until) VALUES (?,?,?,'running',?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET event_key=excluded.event_key,version=excluded.version,status='running',attempts=excluded.attempts,updated_at=excluded.updated_at,owner=excluded.owner,claim_until=excluded.claim_until,retry_after=0,safe_error=''", (sid, event["event_key"], event["version"], attempts, clock(), owner, lease))
                 if repairing and not old["archive_reason"]:
                     db._conn.execute("UPDATE push_sync_state SET archive_reason='legacy_overwrite_candidate',archived_at=? WHERE session_id=?", (old["updated_at"],sid))
+                previous_archive = tuple(db._conn.execute(
+                    "SELECT archive_reason,archived_at FROM push_sync_state WHERE session_id=?", (sid,),
+                ).fetchone())
                 result["claimed"] += 1
             try:
                 _counts(event["payload"])
@@ -427,7 +430,8 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                     claim = db._conn.execute("SELECT * FROM push_sync_state WHERE session_id=?", (sid,)).fetchone()
                     if claim["owner"] != owner or claim["status"] != "running" or claim["version"] != event["version"]:
                         raise PushSyncError("同步任务已由其它进程接管，请稍后重试")
-                    if claim["source_json"] != previous_source:
+                    if (claim["source_json"] != previous_source
+                            or (claim["archive_reason"], claim["archived_at"]) != previous_archive):
                         raise PushSyncError("同步期间原始记录已归档，请重新核对来源")
                     latest = next((row for row in _latest(db._conn)[0] if row["sid"] == sid), None)
                     if not latest or latest["version"] != event["version"]:
@@ -447,7 +451,13 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                 result["test_marked_sessions"] += bool(test_marker)
             except Exception as exc:
                 with _transaction(db._conn):
-                    db._conn.execute("UPDATE push_sync_state SET status=?,updated_at=?,retry_after=?,safe_error=?,owner='',claim_until=0 WHERE session_id=? AND owner=? AND version=?", ("archived" if repairing else "failed",clock(), clock() + min(3600, 60 * 2 ** min(attempts - 1, 6)), _safe_error(exc), sid, owner, event["version"]))
+                    db._conn.execute(
+                        "UPDATE push_sync_state SET status=CASE WHEN status='archived' OR archive_reason<>'' OR ? "
+                        "THEN 'archived' ELSE 'failed' END,updated_at=?,retry_after=?,safe_error=?,owner='',claim_until=0 "
+                        "WHERE session_id=? AND owner=? AND version=?",
+                        (repairing, clock(), clock() + min(3600, 60 * 2 ** min(attempts - 1, 6)), _safe_error(exc),
+                         sid, owner, event["version"]),
+                    )
                 result["failed"] += 1
         return result
     finally:

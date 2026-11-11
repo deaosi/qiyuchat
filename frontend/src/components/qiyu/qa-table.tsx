@@ -78,6 +78,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
   const displayQuery = currentScope ? query : initialQuery
   const serverQuery = currentScope ? debouncedQuery : initialQuery.trim()
   const requestPage = currentScope ? page : 0
+  const searchPending = isRemote && displayQuery.trim() !== serverQuery
 
   React.useEffect(() => { setReply(initialTab); setPage(0) }, [initialTab])
   React.useEffect(() => {
@@ -106,7 +107,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 280)
     return () => window.clearTimeout(timer)
   }, [query, isRemote])
-  const requestKey = filtersKey ? JSON.stringify({
+  const requestKey = filtersKey && !searchPending ? JSON.stringify({
     ...JSON.parse(filtersKey),
     q: serverQuery,
     replied: reply === 'all' ? '' : reply,
@@ -150,7 +151,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
   const pageRows = isRemote ? server.rows : filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize)
   const selectedCount = isRemote ? selected.size : filtered.filter(row => selected.has(row.id)).length
   const selectedOnPage = pageRows.filter(row => selected.has(row.id)).length
-  const pending = isRemote && (server.key !== requestKey || server.loading || displayQuery.trim() !== serverQuery)
+  const pending = isRemote && (searchPending || server.key !== requestKey || server.loading)
   const failed = isRemote && server.key === requestKey && server.error
   function changeQuery(value: string) { setQuery(value); setPage(0); setSelected(new Set()) }
   function changeReply(value: ReplyTab) { setReply(value); setPage(0); setSelected(new Set()) }

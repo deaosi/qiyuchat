@@ -108,10 +108,10 @@ export function ImportDialog({ open, onOpenChange, onImported }: {
         'import/preview', { source: 'local' }, bytes,
         { 'X-Filename': encodeURIComponent(file.name) },
       )
-      setPreview(result)
       if (result.digest !== fileDigest) {
         throw new Error('文件校验不一致，请重新选择文件并预览。')
       }
+      setPreview(result)
       if (result.can_import) {
         setPreviewBytes(bytes)
         setDigest(fileDigest)
@@ -145,7 +145,7 @@ export function ImportDialog({ open, onOpenChange, onImported }: {
     }
   }
 
-  const currentStep = busy === 'import' ? 3 : preview && digest ? 2 : 1
+  const currentStep = busy === 'import' ? 3 : busy === 'preview' || preview ? 2 : 1
 
   return <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }}>
     <DialogContent

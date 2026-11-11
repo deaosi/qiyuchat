@@ -368,6 +368,21 @@ function validateDetailRepliesResponse(data: unknown): void {
   if (!valid) throw new ApiError('七鱼回复接口返回的数据格式不完整，请稍后重试。', 502)
 }
 
+function validateImportResponse(name: string, data: unknown): void {
+  if (name === 'import/preview') {
+    const valid = isRecord(data) && typeof data.filename === 'string' && typeof data.kind === 'string'
+      && typeof data.digest === 'string' && /^[a-f0-9]{64}$/.test(data.digest) && typeof data.can_import === 'boolean'
+      && isRecord(data.fields) && Object.values(data.fields).every(value => typeof value === 'string')
+      && hasCounts(data, ['total_rows', 'valid_rows', 'duplicate_rows', 'skipped_rows', 'sessions', 'estimated_pairs', 'unknown_time'])
+      && Array.isArray(data.errors) && data.errors.every(error => isRecord(error) && isCount(error.row) && typeof error.reason === 'string')
+      && Array.isArray(data.samples) && data.samples.every(sample => isRecord(sample)
+        && ['question', 'answer', 'customer_name', 'group_name'].every(field => typeof sample[field] === 'string'))
+    if (!valid) throw new ApiError('导入预览返回的数据不完整，请重新预览。', 502)
+  } else if (name === 'import' && !(isRecord(data) && hasCounts(data, ['new_sessions', 'updated_sessions', 'qa_pairs']))) {
+    throw new ApiError('导入结果返回的数据不完整，请在数据清洗页核对处理记录。', 502)
+  }
+}
+
 function validateGatewayResponse(name: string, data: unknown): void {
   if (!name.startsWith('gateway/')) return
   let valid = isRecord(data)
@@ -413,6 +428,7 @@ export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyI
     validateVoc2Response(name, data)
     validateGatewayResponse(name, data)
     if (replyLookup) validateDetailRepliesResponse(data)
+    validateImportResponse(name, data)
     return data as T
   }, replyLookup)
 }

@@ -362,7 +362,8 @@ class TestPushSync(LocalFixture):
 
     def test_v1_migration_refuses_modified_raw_messages_or_existing_qa(self):
         self.legacy_snapshot()
-        app.get_db(self.cfg).append_message(str(SID), "user", "人工补充的原文", 1)
+        self.sql("INSERT INTO raw_message(session_id,seq,role,content,ts) VALUES (?,99,'user',?,1)",
+                 (str(SID), "人工补充的原文"))
         before = self.target_messages(controls=True)
         self.assertEqual(self.sync()["failed"], 1)
         self.assertEqual(self.target_messages(controls=True), before)
@@ -445,6 +446,49 @@ class TestPushSync(LocalFixture):
         self.assertEqual(self.sync(NOW + 90 * 86400)["claimed"], 0)
         self.assertEqual(len(self.api.calls), 2)
         self.assertEqual(self.sql("SELECT * FROM qa_pair ORDER BY qa_id"), before_pairs)
+
+    def test_retention_during_first_request_cannot_be_downgraded_or_restored_by_retry(self):
+        db = app.get_db(self.cfg)
+        db.upsert_sessions([metadata()])
+        first = self.api.rows[0]
+        db.upsert_messages(str(SID), [{"role": "user", "content": first["msg"], "ts": first["time"]}])
+        self.api.on_messages = lambda: db.rotate(window_days=60, grace_days=0, now_ms=int((NOW + 90 * 86400) * 1000))
+        self.assertEqual(self.sync()["failed"], 1)
+        self.assertEqual((self.state()["status"], self.state()["archive_reason"]), ("archived", "retention"))
+        self.assertEqual(self.target_messages(), [])
+        self.api.on_messages = None
+        self.api.calls.clear()
+        self.assertEqual(self.sync(NOW + 120)["claimed"], 0)
+        self.assertEqual(self.api.calls, [])
+
+    def test_legacy_retention_marker_prevents_first_official_backfill(self):
+        db = app.get_db(self.cfg)
+        db.upsert_sessions([metadata()])
+        db.rotate(window_days=60, grace_days=0, now_ms=int((NOW + 90 * 86400) * 1000))
+        self.assertTrue(db.originals_archived(str(SID)))
+        self.assertEqual(self.sync(NOW + 120)["claimed"], 0)
+        self.assertEqual(self.api.calls, [])
+
+    def test_raw_message_delete_during_first_sync_cannot_be_repopulated(self):
+        db = app.get_db(self.cfg)
+        db.upsert_sessions([metadata()])
+        first = self.api.rows[0]
+        db.upsert_messages(str(SID), [{"role": "user", "content": first["msg"], "ts": first["time"]}])
+        self.api.on_messages = lambda: self.sql("DELETE FROM raw_message WHERE session_id=?", (str(SID),))
+        self.assertEqual(self.sync()["failed"], 1)
+        self.assertEqual((self.state()["status"], self.state()["archive_reason"]), ("archived", "raw_message_deleted"))
+        self.assertEqual(self.target_messages(), [])
+
+    def test_late_legacy_events_cannot_append_or_close_a_verified_source(self):
+        self.assertEqual(self.sync()["completed"], 1)
+        db = app.get_db(self.cfg)
+        before = self.target_messages(controls=True)
+        db.bind_uid_session("synthetic-live", str(SID))
+        db.close_uid_session("synthetic-live", 1)
+        self.assertEqual(db.append_message(str(SID), "staff", "非已核验消息", 1), -1)
+        self.assertEqual(self.target_messages(controls=True), before)
+        row = self.sql("SELECT end_ts FROM raw_session WHERE session_id=?", (str(SID),))[0]
+        self.assertEqual(row["end_ts"], self.api.metadata["endTime"])
 
     def test_late_old_end_is_archived_without_requesting_source(self):
         self.sql("DELETE FROM push_event")

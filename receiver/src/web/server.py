@@ -393,22 +393,19 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             self._json({"error": "请通过本机服务地址访问"}, 403)
             return
-        u = urlparse(self.path)
-        path = unquote(u.path)
-        qs = parse_qs(u.query, max_num_fields=30)
-        if path == "/login":
-            self._handle_login()
-            return
-        if not self._gate(path, qs):
-            return
-        if not self._write_ok():
-            self.close_connection = True
-            self._json({"error": "写操作仅允许看板页面同源发起，请刷新后重试"}, 403)
-            return
         try:
             u = urlparse(self.path)
+            path = unquote(u.path)
             qs = parse_qs(u.query, max_num_fields=30)
-            cfg = self._cfg(qs)
+            if path == "/login":
+                self._handle_login()
+                return
+            if not self._gate(path, qs):
+                return
+            if not self._write_ok():
+                self.close_connection = True
+                self._json({"error": "写操作仅允许看板页面同源发起，请刷新后重试"}, 403)
+                return
             if self.headers.get("Transfer-Encoding"):
                 raise ValueError("不支持分块上传")
             try:
@@ -422,6 +419,7 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise ValueError("上传未完成，请重新选择文件")
+            cfg = self._cfg(qs)
             if path == "/api/detail/replies":
                 if data:
                     raise ValueError("客服回复查询不接受请求正文")
@@ -483,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     log.warning("网关设置操作失败")
                     self._json({"error": "网关设置操作失败，请稍后重试"}, 500)
-            elif u.path.startswith("/api/voc/"):
+            elif path.startswith("/api/voc/"):
                 if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
                     raise ValueError("VOC 请求须使用 application/json")
                 if len(data) > 256 * 1024:
@@ -496,24 +494,24 @@ class Handler(BaseHTTPRequestHandler):
                     with voc_service.LAUNCH_LOCK:
                         if path in ("/api/voc/run","/api/voc/knowledge/run") and voc_service.busy(cfg):
                             raise voc.VocError("新整理任务正在运行，请完成后再启动其他模型任务。",409)
-                        self._json(voc.handle_post(cfg, u.path[5:], self._filters(qs), body))
+                        self._json(voc.handle_post(cfg, path[5:], self._filters(qs), body))
                 except voc.VocError as exc:
                     self._json({"error": str(exc)}, exc.status)
-            elif u.path in ("/api/import/preview", "/api/import"):
+            elif path in ("/api/import/preview", "/api/import"):
                 if _str(qs, "source", "local") != "local":
                     raise ValueError("仅支持导入业务数据")
                 filename = unquote(self.headers.get("X-Filename", ""))
-                if u.path.endswith("preview"):
+                if path.endswith("preview"):
                     self._json(parse_import(data, filename).preview())
                     return
                 if self.headers.get("X-File-Digest") != hashlib.sha256(data).hexdigest():
                     raise ValueError("文件已变化，请先重新预览")
                 with DB_LOCK:
                     self._json(import_file(cfg, data, filename))
-            elif u.path == "/api/clean":
+            elif path == "/api/clean":
                 with DB_LOCK:
                     self._json(clean_local(cfg))
-            elif u.path == "/api/demo":
+            elif path == "/api/demo":
                 self._json({"error": "演示数据入口已停用"}, 410)
             else:
                 self._json({"error": "接口不存在"}, 404)

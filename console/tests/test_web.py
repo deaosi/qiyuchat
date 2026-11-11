@@ -156,6 +156,14 @@ class TestWeb(LocalFixture):
         self.assertEqual(self.call("/api/no-such-route")[0], 404)
         self.assertEqual(self.call("/api/clean", "POST", headers=self.write_headers(**{"Content-Length": "9000000"}))[0], 413)
 
+    def test_overlong_post_query_returns_an_http_error(self):
+        query = "&".join(f"param{i}=x" for i in range(31))
+        with patch("src.web.server.clean_local") as clean:
+            status, response, _ = self.call("/api/clean?" + query, "POST", headers=self.write_headers())
+        self.assertEqual(status, 400)
+        self.assertIn("error", response)
+        clean.assert_not_called()
+
     def test_disabled_demo_cannot_switch_database_during_parallel_local_requests(self):
         self.seed()
         demo = Path(self.cfg.runtime.db_path).with_name("dashboard_demo.db")

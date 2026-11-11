@@ -384,5 +384,45 @@ class TestAgent(unittest.TestCase):
                 A.reset_db()
 
 
+class TestBulkMessageRoles(unittest.TestCase):
+    def test_manual_pull_distinguishes_visitor_bot_and_real_staff_in_json_and_tsv(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+
+        from src import app
+        from src.config import load_settings
+
+        sid = "synthetic-bulk"
+        visitor = "请问这个订单怎么退？"
+        answer = "请在订单页面提交售后申请。"
+        messages = [
+            {"from": 1, "status": 1, "mType": 1, "staffId": 9, "time": 1000, "msg": visitor},
+            {"from": "0", "status": "1", "mType": "110", "staffId": "9", "time": "2000", "msg": "机器人回复"},
+            {"from": "0", "status": "1", "mType": "1", "staffId": "9", "time": "3000", "autoReply": "1", "msg": "自动回复"},
+            {"from": "0", "status": "1", "mType": "1", "staffId": "9", "time": "4000", "autoReply": "0", "msg": answer},
+            {"from": 0, "status": 2, "mType": 1, "staffId": 9, "time": 5000, "msg": "撤回的客服消息"},
+            {"from": "unknown", "status": "1", "mType": "113", "staffId": "9", "time": "6000", "msg": "系统通知"},
+        ]
+        for message in messages:
+            message["sessionId"] = sid
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = load_settings()
+            cfg = replace(cfg, runtime=replace(cfg.runtime, mock=False, db_path=str(Path(directory) / "bulk.db")),
+                          qiyu=replace(cfg.qiyu, app_key="synthetic", app_secret="synthetic"))
+            app.reset_db()
+            try:
+                with patch("src.app.SessionExporter") as exporter:
+                    exporter.return_value.export_bundle.return_value = ([{"id": sid, "startTime": 1000}], messages)
+                    self.assertEqual(app.stage_pull(cfg, days=1), {"sessions": 1, "messages": 6})
+                db = app.get_db(cfg)
+                self.assertEqual([row["role"] for row in db.get_messages(sid)],
+                                 ["user", "bot", "bot", "staff", "boundary", "boundary"])
+                app.stage_extract(cfg)
+                pairs = db.iter_qa_pairs([sid])
+                self.assertEqual([(row["question"], row["answer"]) for row in pairs], [(visitor, answer)])
+            finally:
+                app.reset_db()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

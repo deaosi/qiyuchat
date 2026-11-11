@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import csv
 import io
+import sqlite3
 import tempfile
+import time
 import unittest
 import zipfile
 from dataclasses import replace
@@ -112,6 +114,7 @@ class TestImportParsing(unittest.TestCase):
         self.assertEqual(parse_time("1700000000"), 1700000000000)
         self.assertEqual(parse_time("1700000000000"), 1700000000000)
         self.assertEqual(parse_time("2026/11/07 10:30:00"), parse_time("2026-11-07T10:30:00"))
+        self.assertEqual(parse_time("2026年11月7日 10:30:00"), parse_time("2026-11-07T10:30:00"))
         self.assertGreater(parse_time("46000.5"), 0)
         for bad in ("abc", "2026-02-30", "0001-01-01", "2102-01-01", "123"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
@@ -123,7 +126,51 @@ class TestImportParsing(unittest.TestCase):
         sample = p.preview()
         self.assertEqual(sample["estimated_pairs"], 1)
         self.assertEqual(sample["samples"][0]["answer"], "今天")
-        self.assertGreater(next(iter(p.messages.values()))[0]["ts"], 0)
+        first_time = next(iter(p.messages.values()))[0]["ts"]
+        self.assertGreater(first_time, 0)
+        self.assertEqual(next(iter(p.sessions.values()))["startTime"], first_time)
+        self.assertEqual(sample["unknown_time"], 0)
+
+    def test_duplicate_transcript_does_not_replace_first_valid_row(self):
+        data = make_csv(["会话ID", "会话内容"], [
+            ["transcript-1", "客户：这个订单怎么退？"],
+            ["transcript-1", "客户：电子发票怎么开？"],
+            ["transcript-1", "客户：这个订单怎么退？"],
+        ])
+        preview = parse_import(data, "chat.csv").preview()
+        self.assertEqual((preview["valid_rows"], preview["duplicate_rows"], preview["skipped_rows"]), (1, 1, 1))
+        self.assertEqual(preview["errors"][0]["row"], 3)
+        self.assertEqual(preview["samples"][0]["question"], "这个订单怎么退？")
+
+    def test_conflicting_customer_and_excess_csv_cells_are_reported_in_preview(self):
+        data = make_csv(["会话ID", "客户ID", "问题"], [
+            ["shared", "visitor-a", "这个订单怎么退？"],
+            ["shared", "visitor-b", "电子发票怎么开？"],
+            ["shared", "", "售后进度怎么查？"],
+            ["another", "visitor-c", "这行内容", "列超过表头"],
+        ])
+        parsed = parse_import(data, "qa.csv")
+        preview = parsed.preview()
+        self.assertEqual((preview["valid_rows"], preview["skipped_rows"], preview["estimated_pairs"]), (2, 2, 2))
+        self.assertEqual([item["row"] for item in preview["errors"]], [3, 5])
+        self.assertEqual(parsed.sessions["shared"]["userId"], "visitor-a")
+
+    def test_xlsx_uses_workbook_order_after_tabs_are_reordered(self):
+        spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        office = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        package = "http://schemas.openxmlformats.org/package/2006/relationships"
+        types = "http://schemas.openxmlformats.org/package/2006/content-types"
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as book:
+            book.writestr("[Content_Types].xml", f'<Types xmlns="{types}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+            book.writestr("_rels/.rels", f'<Relationships xmlns="{package}"><Relationship Id="rId1" Type="{office}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+            book.writestr("xl/workbook.xml", f'<workbook xmlns="{spreadsheet}" xmlns:r="{office}"><sheets><sheet name="首个标签" sheetId="2" r:id="rId2"/><sheet name="第二个标签" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            book.writestr("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="{package}"><Relationship Id="rId1" Type="{office}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="{office}/worksheet" Target="/xl/worksheets/sheet2.xml"/></Relationships>')
+            for number, question in ((1, "旧标签里的问题"), (2, "这个订单怎么退？")):
+                with zipfile.ZipFile(io.BytesIO(make_xlsx([["问题"], [question]]))) as sheet:
+                    book.writestr(f"xl/worksheets/sheet{number}.xml", sheet.read("xl/worksheets/sheet1.xml"))
+        preview = parse_import(out.getvalue(), "reordered.xlsx").preview()
+        self.assertEqual(preview["samples"][0]["question"], "这个订单怎么退？")
 
     def test_unrecognizable_speaker_is_reported(self):
         p = parse_import(make_csv(["会话内容"], [["小林：今天发货"]]), "a.csv").preview()
@@ -162,6 +209,27 @@ class TestLocalWorkflow(LocalFixture):
         self.assertEqual(rows[0]["staff_name"], "新客服")
         self.assertEqual(len(db.get_messages("s1")), 2)
 
+    def test_import_collision_rolls_back_without_overwriting_native_or_archived_records(self):
+        db = app.get_db(self.cfg)
+        sid = "1561234567"
+        original = [{"role": "user", "content": "原会话订单怎么退？", "ts": 0}]
+        db.upsert_sessions([{"id": sid, "fromType": "wx_cs"}])
+        db.upsert_messages(sid, original)
+        app.stage_extract(self.cfg)
+        data = make_csv(["会话ID", "问题"], [["fresh", "新会话订单怎么退？"], [sid, "电子发票怎么开？"]])
+        with self.assertRaisesRegex(ValueError, "冲突"):
+            import_file(self.cfg, data, "collision.csv")
+        self.assertEqual(db.get_messages(sid), original)
+        self.assertEqual([row["session_id"] for row in db.iter_sessions()], [sid])
+        self.assertEqual(db.stats()["task_log"], 0)
+        with db.tx() as conn:
+            conn.execute("DELETE FROM raw_session WHERE session_id=?", (sid,))
+            conn.execute("DELETE FROM raw_message WHERE session_id=?", (sid,))
+        with self.assertRaisesRegex(ValueError, "冲突"):
+            import_file(self.cfg, data, "collision.csv")
+        self.assertEqual(len(db.iter_qa_pairs([sid])), 1)
+        self.assertEqual(db.iter_sessions(), [])
+
     def test_processing_states_and_invalidation(self):
         db = app.get_db(self.cfg)
         db.upsert_sessions([{"id": "empty"}, {"id": "noise"}])
@@ -190,6 +258,45 @@ class TestLocalWorkflow(LocalFixture):
         clean_local(self.cfg)
         self.assertEqual(len(db.iter_qa_pairs(["s2"])), 1)
         self.assertEqual(db.local_status()["archived"], 1)
+
+    def test_clean_after_partial_retention_preserves_prior_qa_ids_and_text(self):
+        sid = "partial-local"
+        now = int(time.time() * 1000)
+        data = make_csv(["会话ID", "问题", "回答", "时间"], [
+            [sid, "这个订单怎么退？", "提交售后申请。", now - 2 * 86_400_000],
+            [sid, "电子发票怎么开？", "在订单页开票。", now],
+        ])
+        import_file(self.cfg, data, "partial.csv")
+        db = app.get_db(self.cfg)
+        before = [(row["qa_id"], row["question"], row["answer"]) for row in db.iter_qa_pairs([sid])]
+        self.assertEqual(db.prune(message_days=1)["raw_message"], 2)
+        self.assertTrue(db.get_messages(sid))
+        self.assertTrue(db.originals_archived(sid))
+        retained = db.get_messages(sid)
+        self.assertEqual(db.upsert_messages(sid, [{"role": "user", "content": "被归档的原文", "ts": now - 1}]), 0)
+        self.assertEqual(db.get_messages(sid), retained)
+        clean_local(self.cfg)
+        after = [(row["qa_id"], row["question"], row["answer"]) for row in db.iter_qa_pairs([sid])]
+        self.assertEqual(after, before)
+
+    def test_extract_holds_write_transaction_until_qa_is_replaced(self):
+        self.seed()
+        db = app.get_db(self.cfg)
+        get_messages = db.get_messages
+        checked = []
+        def try_concurrent_prune(sid):
+            if not checked:
+                other = sqlite3.connect(self.cfg.runtime.db_path, timeout=0)
+                try:
+                    with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+                        other.execute("DELETE FROM raw_message WHERE session_id=?", (sid,))
+                finally:
+                    other.close()
+                checked.append(sid)
+            return get_messages(sid)
+        with patch.object(db, "get_messages", side_effect=try_concurrent_prune):
+            self.assertGreater(app.stage_extract(self.cfg, rebuild=True)["sessions_scanned"], 0)
+        self.assertTrue(checked)
 
     def test_transaction_rolls_back_complete_import(self):
         with patch("src.local.stage_extract", side_effect=RuntimeError("injected failure")):
