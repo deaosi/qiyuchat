@@ -303,7 +303,15 @@ class Handler(BaseHTTPRequestHandler):
         filters = self._filters(qs)
         if name.startswith("voc2/"):
             try:
-                self._json(voc_service.get(cfg, name[5:], self._voc_filters(qs), _str(qs, "id")))
+                paged = name == "voc2/topics" and ("limit" in qs or "offset" in qs)
+                if paged:
+                    limit, offset = _int(qs, "limit", 20), _int(qs, "offset", 0)
+                    if not 1 <= limit <= 20 or offset < 0:
+                        raise ValueError("高频问题每页须为 1–20 条，起始位置须为非负整数。")
+                result = voc_service.get(cfg, name[5:], self._voc_filters(qs), _str(qs, "id"))
+                if paged:
+                    result = {**result, "items": result["items"][offset:offset + limit]}
+                self._json(result)
             except (voc_service.ServiceError, voc.VocError) as exc:
                 self._json({"error": str(exc)}, exc.status)
             return

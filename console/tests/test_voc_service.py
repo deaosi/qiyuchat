@@ -378,3 +378,22 @@ class TestVocHttp(LocalFixture):
             for query in ('support_intent=buyer_product_policy','support_intent=all&support_intent=functional_anomaly','diagnosis_status=guessed_bug'):
                 self.assertEqual(self.call('/api/voc2/topics?'+query,headers=self.headers())[0],400)
         get.assert_not_called()
+
+    def test_topics_pagination_preserves_order_total_and_full_list_route(self):
+        items = [{"id": f"topic-{i}"} for i in range(42)]
+        result = {"items": items, "total": len(items)}
+        with patch("src.web.server.voc_service.get", return_value=result) as get:
+            for query, expected in (
+                ("?limit=20&offset=0", items[:20]),
+                ("?limit=20&offset=20", items[20:40]),
+                ("?offset=40", items[40:]),
+                ("?limit=20&offset=60", []),
+                ("", items),
+            ):
+                status, body = self.call("/api/voc2/topics" + query, headers=self.headers())
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body), {"items": expected, "total": 42})
+            get.reset_mock()
+            for query in ("?limit=21", "?limit=0", "?offset=-1", "?limit=all"):
+                self.assertEqual(self.call("/api/voc2/topics" + query, headers=self.headers())[0], 400)
+            get.assert_not_called()

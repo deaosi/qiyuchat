@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { ArrowUpRight, BookOpen, CircleAlert, LoaderCircle, MessagesSquare, RefreshCw, Sparkles } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, CircleAlert, LoaderCircle, MessagesSquare, RefreshCw, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
@@ -7,7 +7,7 @@ import { apiPost, normalizePair, type ApiFilters, type VocConversationVerificati
 import type { QAPair } from '@/lib/demo-data'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -27,6 +27,7 @@ type Job = { id: string; status: string; total: number; failed: number; skipped:
 type Summary = { source_pairs: number; total_events: number; consultation_count?: number; topic_count: number; coverage: { processed_pairs: number; pending_pairs: number }; semantics: { ready: boolean; error?: string }; latest_job: Job | null }
 type WorkspaceProps = { filters: ApiFilters; refreshKey?: number; onOpenPair: (pair: QAPair) => void }
 export type TopicDetail = { topic: Topic; events: Evidence[] }
+const topicPageSize = 20
 const count = (n: number | undefined) => typeof n === 'number' ? n.toLocaleString('zh-CN') : '—'
 const active = (job: Job | null | undefined) => job?.status === 'queued' || job?.status === 'running'
 const labels: Record<string, string> = { queued: '排队中', running: '整理中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '已跳过' }
@@ -113,21 +114,37 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const [supportIntent, setSupportIntent] = useState<NonNullable<ApiFilters['support_intent']>>('all')
   const [diagnosisStatus, setDiagnosisStatus] = useState<NonNullable<ApiFilters['diagnosis_status']>>('all')
   const [revision, setRevision] = useState(0)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [runOpen, setRunOpen] = useState(false)
   const [running, setRunning] = useState(false)
   const [limit, setLimit] = useState('100')
+  const rankingHeading = useRef<HTMLDivElement>(null)
   const resultFilters: ApiFilters = { ...filters, support_intent: supportIntent, diagnosis_status: diagnosisStatus }
   const scopeKey = JSON.stringify(resultFilters)
+  const [ranking, setRanking] = useState<{ scopeKey: string; page: number; selectedId: string | null }>({ scopeKey, page: 0, selectedId: null })
+  const { page, selectedId } = ranking.scopeKey === scopeKey ? ranking : { page: 0, selectedId: null }
+  const offset = page * topicPageSize
   const key = refreshKey + revision
   const summary = useApi<Summary>('voc2/summary', resultFilters, key)
-  const topics = useApi<ResultList<Topic>>('voc2/topics', resultFilters, key)
+  const topics = useApi<ResultList<Topic>>('voc2/topics', { ...resultFilters, limit: topicPageSize, offset }, key)
   const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
+  const lastPage = topics.data ? Math.max(0, Math.ceil(topics.data.total / topicPageSize) - 1) : null
+  const pageLoading = topics.loading || (lastPage !== null && page > lastPage)
   const job = summary.data?.latest_job
   const refreshResults = useCallback(() => setRevision(value => value + 1), [])
   const fetching = summary.loading || summary.refreshing || topics.loading || topics.refreshing
   useBackgroundRefresh(refreshResults, active(job), fetching, key)
-  useEffect(() => setSelectedId(null), [scopeKey])
+  useEffect(() => {
+    setRanking(current => current.scopeKey === scopeKey ? current : { scopeKey, page: 0, selectedId: null })
+  }, [scopeKey])
+  useEffect(() => {
+    if (lastPage !== null && page > lastPage) setRanking(current => ({ ...current, page: lastPage }))
+  }, [page, lastPage])
+
+  function changePage(next: number) {
+    setRanking({ scopeKey, page: next, selectedId: null })
+    rankingHeading.current?.focus({ preventScroll: true })
+    rankingHeading.current?.scrollIntoView?.({ block: 'start' })
+  }
 
   async function run() {
     const n = Number(limit)
@@ -183,24 +200,35 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
     </Card>}
     <Card>
       <CardHeader>
-        <CardTitle>咨询主题排行</CardTitle>
+        <CardTitle ref={rankingHeading} role="heading" aria-level={2} tabIndex={-1} className="scroll-mt-4">咨询主题排行</CardTitle>
         <CardDescription>按咨询次数排序。同一次咨询的多次提及可能产生多个片段。</CardDescription>
         {summary.data && <p className="text-xs text-muted-foreground">当前日期、客户群和客服范围已整理 {count(summary.data.coverage.processed_pairs)} / {count(summary.data.source_pairs)} 条问答，待整理 {count(summary.data.coverage.pending_pairs)} 条。</p>}
       </CardHeader>
       <CardContent>
-        <QueryPanel hasData={topics.data !== null} loading={topics.loading} error={topics.error} retry={topics.retry}>
-          {topics.data?.items.length ? <div className="divide-y">{topics.data.items.map(item => <button key={item.id} onClick={() => setSelectedId(item.id)} className="flex w-full flex-wrap items-center justify-between gap-3 rounded-sm py-4 text-left hover:bg-muted/30 focus-visible:outline-2 focus-visible:outline-ring">
-            <span className="min-w-0 break-words">
-              <span className="block font-medium">{item.theme.trim() || item.question}</span>
-              {item.theme.trim() && item.theme.trim() !== item.question.trim() && <span className="mt-1 block text-xs text-muted-foreground">代表问法：{item.question}</span>}
-              <span className="mt-1 block text-xs text-muted-foreground">{intentLabels[item.primary_intent || 'unclear']} · 最近 {item.last_seen || '时间未知'}</span>
+        <QueryPanel hasData={topics.data !== null} loading={pageLoading} error={topics.error} retry={topics.retry}>
+          {topics.data?.items.length ? <div className="divide-y">{topics.data.items.map((item, index) => <button key={item.id} onClick={() => setRanking({ scopeKey, page, selectedId: item.id })} className="flex w-full flex-wrap items-center justify-between gap-3 rounded-sm py-4 text-left hover:bg-muted/30 focus-visible:outline-2 focus-visible:outline-ring">
+            <span className="flex min-w-0 items-start gap-3">
+              <span className="w-7 shrink-0 text-right text-sm tabular-nums text-muted-foreground"><span className="sr-only">排名 </span>{count(offset + index + 1)}</span>
+              <span className="min-w-0 break-words">
+                <span className="block font-medium">{item.theme.trim() || item.question}</span>
+                {item.theme.trim() && item.theme.trim() !== item.question.trim() && <span className="mt-1 block text-xs text-muted-foreground">代表问法：{item.question}</span>}
+                <span className="mt-1 block text-xs text-muted-foreground">{intentLabels[item.primary_intent || 'unclear']} · 最近 {item.last_seen || '时间未知'}</span>
+              </span>
             </span>
             <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground"><span>{count(item.consultation_count)} 次咨询</span><span>{count(item.event_count)} 个咨询片段</span><span>{count(item.customer_count)} 客户</span><span>{count(item.session_count)} 会话</span><ArrowUpRight aria-hidden="true" className="size-4" /></span>
           </button>)}</div> : <p className="py-10 text-center text-sm text-muted-foreground">当前范围暂无高频问题。</p>}
         </QueryPanel>
       </CardContent>
+      {(pageLoading || page > 0 || Boolean(topics.data?.total)) && <CardFooter className="flex-wrap justify-between gap-3 border-t text-xs text-muted-foreground">
+        <span>{topics.data ? `共 ${count(topics.data.total)} 个主题` : ''}</span>
+        <nav aria-label="高频问题分页" className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" disabled={pageLoading || page === 0} onClick={() => changePage(page - 1)}><ChevronLeft />上一页</Button>
+          <span aria-live="polite" className="tabular-nums">第 {page + 1}{lastPage !== null && !pageLoading ? ` / ${lastPage + 1}` : ''} 页</span>
+          <Button variant="outline" size="sm" disabled={pageLoading || lastPage === null || page >= lastPage} onClick={() => changePage(page + 1)}>下一页<ChevronRight /></Button>
+        </nav>
+      </CardFooter>}
     </Card>
-    <Sheet open={selectedId !== null} onOpenChange={open => { if (!open) setSelectedId(null) }}>
+    <Sheet open={selectedId !== null} onOpenChange={open => { if (!open) setRanking(current => ({ ...current, selectedId: null })) }}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
         <SheetHeader><SheetTitle>问题与原句依据</SheetTitle><SheetDescription>按对应查询范围展示相关会话。</SheetDescription></SheetHeader>
         <div className="space-y-5 px-4 pb-6">
