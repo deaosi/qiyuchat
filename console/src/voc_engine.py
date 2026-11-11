@@ -26,6 +26,7 @@ from .voc_extract import (VERSION, MAX_OUTPUT_TOKENS, MAX_SOURCE_CHARS, GatewayP
                           LangExtractAligner, canonical, request_payload, validate, output_token_limit, correction_feedback)
 from .voc_model import VocModelError
 from .voc_semantics import LocalBGE, SemanticError, retrieve
+from .voc_search import rank_materials
 
 PIPELINE_VERSION = VERSION + "/" + quality.VERSION
 
@@ -819,20 +820,50 @@ def run(cfg: Settings, filters: dict, limit: int = 20, max_calls: int = 20,
     return {"job": _public_job(job), "summary": summary(cfg, filters), "shadow": shadow}
 
 
-def search(cfg: Settings, filters: dict, query: str, limit: int = 5) -> dict:
+def relevant_items(cfg: Settings, items: list[dict], query: str, *, kind: str = 'knowledge',
+                   limit: int | None = None, require_staff: bool = False) -> list[dict]:
+    """Rank an already scoped/gated complete list, without inventing facts."""
+    if not isinstance(query, str) or not 1 <= len(query.strip()) <= 1000:
+        raise EngineError("检索词须为 1–1000 字。")
+    try:
+        return rank_materials(path(cfg), _semantic(cfg), query.strip(), items,
+                              kind=kind, limit=limit, require_staff=require_staff)
+    except SemanticError as error:
+        raise EngineError(str(error), 503) from None
+
+
+def relevant_topics(cfg: Settings, filters: dict, query: str) -> list[dict]:
+    """All relevant scoped topics, not a top-N sample used as a false total."""
+    return relevant_items(cfg, topics(cfg, filters)['items'], query, kind='topic')
+
+
+def search(cfg: Settings, filters: dict, query: str, limit: int = 5, *, require_staff: bool = False) -> dict:
     if not isinstance(query, str) or not 1 <= len(query.strip()) <= 1000 or type(limit) is not int or not 1 <= limit <= 10:
         raise EngineError("检索词须为 1–1000 字，结果数为 1–10。")
     candidates = topics(cfg, filters)["items"]
     if not candidates:
         return {"topics": [], "knowledge": [], "events": []}
-    try:
-        selected = retrieve(path(cfg), _semantic(cfg), query.strip(), candidates, top_k=limit)
-    except SemanticError as error:
-        raise EngineError(str(error), 503) from None
-    ids = {item["id"] for item in selected}
-    know = [item for item in knowledge(cfg, filters)["items"] if item["topic_id"] in ids][:limit]
-    know = [{**item, "evidence": item["evidence"][:5]} for item in know]
-    events = [quality.evidence(row) for row in _events(cfg, filters) if row["topic_id"] in ids][:limit]
+    ids = {item['id'] for item in candidates}
+    # Topic labels are a navigation aid, not a proxy for which answer matches.
+    # Rank the complete, scoped material before truncating it to the UI budget.
+    know = relevant_items(cfg, [item for item in knowledge(cfg, filters)['items'] if item['topic_id'] in ids],
+                          query, kind='knowledge', limit=limit)
+    event_items = [{**quality.evidence(row), 'topic_id': row['topic_id']}
+                   for row in _events(cfg, filters) if row['topic_id'] in ids]
+    events = relevant_items(cfg, event_items, query, kind='event', limit=limit, require_staff=require_staff)
+    selected = relevant_items(cfg, candidates, query, kind='topic')
+    # A precise answer can be relevant when the broad topic title is not.
+    material_scores = {}
+    material_semantics = {}
+    for item in [*know, *events]:
+        topic_id = item['topic_id']
+        material_scores[topic_id] = max(material_scores.get(topic_id, 0.), item['retrieval']['score'])
+        material_semantics[topic_id] = max(material_semantics.get(topic_id, 0.), item['similarity'])
+    selected_ids = {item['id'] for item in selected}
+    selected += [{**item, 'similarity': material_semantics[item['id']]}
+                 for item in candidates if item['id'] in material_scores and item['id'] not in selected_ids]
+    selected.sort(key=lambda item: (-max(material_scores.get(item['id'], 0.), item.get('retrieval', {}).get('score', item.get('similarity', 0.))), item['id']))
+    selected = selected[:limit]
     return {"topics": selected, "knowledge": know, "events": events}
 
 

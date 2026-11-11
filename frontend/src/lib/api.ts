@@ -158,6 +158,8 @@ function validateVoc2Response(name: string, data: unknown): void {
     case 'voc2/run': valid = job(data.job); break
     case 'voc2/assistant': valid = typeof data.answer === 'string' && typeof data.model === 'string'
       && isRecord(data.scope) && typeof data.scope.label === 'string'
+      && (data.answer_mode === undefined || typeof data.answer_mode === 'string' && ['grounded_model', 'computed', 'source_reference', 'insufficient'].includes(data.answer_mode))
+      && (data.warnings === undefined || isStringArray(data.warnings))
       && Array.isArray(data.tools) && data.tools.every(item => isRecord(item) && typeof item.name === 'string' && typeof item.label === 'string')
       && Array.isArray(data.citations) && data.citations.every(item => isRecord(item)
         && ['topic', 'knowledge', 'event'].includes(String(item.kind)) && typeof item.id === 'string' && typeof item.title === 'string'); break

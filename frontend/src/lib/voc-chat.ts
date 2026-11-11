@@ -1,16 +1,20 @@
 import { apiPost, type ApiFilters, type VocQueryFilters } from '@/lib/api'
 
 export type ChatCitation = { kind: 'topic' | 'knowledge' | 'event'; id: string; title: string }
-export type ChatAnswer = { answer: string; citations: ChatCitation[]; scope: { label: string; start?: string; end?: string; query_filters?: VocQueryFilters }; model: string; tools: { name: string; label: string }[] }
-export type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; citations?: ChatCitation[]; scope?: string; queryFilters?: VocQueryFilters; model?: string; tools?: { name: string; label: string }[] }
+export type ChatAnswerMode = 'grounded_model' | 'computed' | 'source_reference' | 'insufficient'
+export type ChatAnswer = { answer: string; citations: ChatCitation[]; scope: { label: string; start?: string; end?: string; query_filters?: VocQueryFilters }; model: string; tools: { name: string; label: string }[]; answer_mode?: ChatAnswerMode; warnings?: string[] }
+export type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; citations?: ChatCitation[]; scope?: string; queryFilters?: VocQueryFilters; model?: string; tools?: { name: string; label: string }[]; answerMode?: ChatAnswerMode; warnings?: string[] }
 export type ChatThread = { id: string; title: string; filters: ApiFilters; messages: ChatMessage[]; draft: string; updatedAt: number; error?: string }
+export type ChatContext = { query_filters: VocQueryFilters; citations: Pick<ChatCitation, 'kind' | 'id'>[] }
+export type ChatRequest = { message: string; history: { role: 'user' | 'assistant'; content: string }[]; context?: ChatContext }
 type ChatSnapshot = { threads: ChatThread[]; activeId: string; pending: Record<string, boolean>; storageWarning: boolean }
-type Transport = (filters: ApiFilters, body: { message: string; history: { role: string; content: string }[] }, signal: AbortSignal) => Promise<ChatAnswer>
+type Transport = (filters: ApiFilters, body: ChatRequest, signal: AbortSignal) => Promise<ChatAnswer>
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
 export const CHAT_STORAGE_KEY = 'qiyu-voc-chat-v1'
 const projectionKeys = ['days', 'start', 'end', 'group', 'staff', 'customer', 'q', 'support_intent', 'diagnosis_status', 'replied', 'cluster'] as const
 const intents = ['all', 'configuration_guidance', 'functional_anomaly', 'unclear'] as const
 const diagnoses = ['all', 'reported', 'pending', 'config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed', 'not_applicable'] as const
+const answerModes = ['grounded_model', 'computed', 'source_reference', 'insufficient'] as const
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown, maximum = 500) => typeof value === 'string' ? value.slice(0, maximum) : ''
 
@@ -48,6 +52,23 @@ function readProjection(value: Record<string, unknown>): VocQueryFilters {
   const normalized = normalizeChatFilters(value)
   return Object.fromEntries(projectionKeys.filter(key => Object.hasOwn(value, key)).map(key => [key, normalized[key]])) as VocQueryFilters
 }
+
+/** Previous output is a retrieval hint, never an instruction or an authoritative fact. */
+function previousContext(messages: ChatMessage[]): ChatContext | undefined {
+  const last = [...messages].reverse().find(message => message.role === 'assistant')
+  if (!record(last?.queryFilters)) return undefined
+  const query_filters = readProjection(last.queryFilters)
+  if (!Object.keys(query_filters).length) return undefined
+  const citations: ChatContext['citations'] = [], seen = new Set<string>()
+  for (const ref of last.citations || []) {
+    if (!record(ref) || !['topic', 'knowledge', 'event'].includes(String(ref.kind)) || typeof ref.id !== 'string' || !ref.id.trim() || ref.id.length > 200) continue
+    const key = `${ref.kind}:${ref.id}`
+    if (seen.has(key)) continue
+    seen.add(key); citations.push({ kind: ref.kind as ChatCitation['kind'], id: ref.id })
+    if (citations.length === 10) break
+  }
+  return { query_filters, citations }
+}
 export function chatScopeLabel(filters: ApiFilters): string {
   const f = normalizeChatFilters(filters)
   return [f.start || f.end ? `${f.start || '不限'} 至 ${f.end || '不限'}` : f.days ? `最近 ${f.days} 天` : '全部时间',
@@ -75,6 +96,8 @@ function loadHistory(storage?: StorageLike): { threads: ChatThread[]; activeId: 
         }
         messages.push({ id: msg.id, role: msg.role as ChatMessage['role'], content: msg.content, citations,
           scope: text(msg.scope, 2000), model: text(msg.model), queryFilters: record(msg.queryFilters) ? readProjection(msg.queryFilters) : undefined,
+          answerMode: answerModes.includes(msg.answerMode as ChatAnswerMode) ? msg.answerMode as ChatAnswerMode : undefined,
+          warnings: Array.isArray(msg.warnings) && msg.warnings.every(item => typeof item === 'string') ? msg.warnings : undefined,
           tools: Array.isArray(msg.tools) ? msg.tools.filter(record).filter(t => typeof t.name === 'string' && typeof t.label === 'string').map(t => ({ name: String(t.name), label: String(t.label) })) : [] })
       }
       if (!valid) continue
@@ -156,16 +179,17 @@ export function createChatStore(options: { storage?: StorageLike; transport?: Tr
       const thread = state.threads.find(t => t.id === threadId), question = content.trim()
       if (!thread || requests.has(threadId) || !question || question.length > 2000) return
       const request = { controller: new AbortController(), messageId: id(), text: question }
-      const history = thread.messages.slice(-20).map(({ role, content }) => ({ role, content }))
+      const history = thread.messages.filter(message => (message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string').slice(-20).map(({ role, content }) => ({ role, content }))
+      const context = previousContext(thread.messages)
       requests.set(threadId, request)
       update(threadId, t => ({ ...t, title: t.messages.length ? t.title : question.slice(0, 42), messages: [...t.messages, { id: request.messageId, role: 'user', content: question }], draft: '', error: '', updatedAt: now() }), { ...state.pending, [threadId]: true })
       try {
-        const answer = await transport({ ...thread.filters }, { message: question, history }, request.controller.signal)
+        const answer = await transport({ ...thread.filters }, { message: question, history, ...(context ? { context } : {}) }, request.controller.signal)
         if (requests.get(threadId) !== request) return
         requests.delete(threadId)
         const queryFilters = { ...answer.scope.query_filters }
         if (answer.scope.start || answer.scope.end) Object.assign(queryFilters, { days: 0, start: answer.scope.start || '', end: answer.scope.end || '' })
-        update(threadId, t => ({ ...t, messages: [...t.messages, { id: id(), role: 'assistant', content: answer.answer, citations: answer.citations, scope: answer.scope.label, queryFilters, model: answer.model, tools: answer.tools }], updatedAt: now() }), withoutPending(threadId))
+        update(threadId, t => ({ ...t, messages: [...t.messages, { id: id(), role: 'assistant', content: answer.answer, citations: answer.citations, scope: answer.scope.label, queryFilters, model: answer.model, tools: answer.tools, answerMode: answer.answer_mode, warnings: answer.warnings }], updatedAt: now() }), withoutPending(threadId))
       } catch (error) {
         if (requests.get(threadId) !== request) return
         requests.delete(threadId)

@@ -151,6 +151,13 @@ class TestVocAssistant(LocalFixture):
         super().setUp()
         self.cfg=replace(self.cfg,llm=replace(self.cfg.llm,model_main='arbitrary-family'))
         self.engine=Mock()
+        self.engine.relevant_topics.side_effect=lambda cfg,filters,query:self.engine.topics(cfg,filters).get('items',[])
+        self.engine.relevant_items.side_effect=lambda cfg,items,query,**kwargs:items
+        def event_detail(cfg,filters,identity):
+            found=self.engine.search.return_value
+            rows=found.get('events',[]) if isinstance(found,dict) else []
+            return {'event':next((row for row in rows if str(row.get('id') or row.get('event_id'))==str(identity)),None)}
+        self.engine.event_detail.side_effect=event_detail
         self.patch=patch('src.voc_assistant._engine',return_value=self.engine);self.patch.start();self.addCleanup(self.patch.stop)
 
     @staticmethod
@@ -232,7 +239,7 @@ class TestVocAssistant(LocalFixture):
             result=A.answer(self.domain_cfg(),filters,{'message':'这些问题哪些最高频？'})
         self.assertIn('1 次咨询、3 个片段',result['answer'])
         self.assertIn('待定位',result['scope']['label'])
-        self.engine.topics.assert_called_once_with(self.domain_cfg(),filters)
+        self.engine.topics.assert_called_once_with(self.domain_cfg(),{**filters,'days':0,'start':result['scope']['start'],'end':result['scope']['end']})
 
     def test_defect_tool_excludes_customer_claims_and_unverified_diagnoses(self):
         def row(identity,status,verified):

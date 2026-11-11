@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CHAT_STORAGE_KEY, chatHref, chatScopeKey, citationFilters, createChatStore, normalizeChatFilters, readChatFilters, type ChatAnswer } from './voc-chat'
-import type { ApiFilters } from './api'
+import { apiPost, type ApiFilters } from './api'
+
+afterEach(() => vi.unstubAllGlobals())
 
 function memoryStorage() {
   const values = new Map<string, string>()
@@ -22,6 +24,9 @@ function answer(): ChatAnswer {
     model: 'configured-model', tools: [{ name: 'search', label: '查找依据' }] }
 }
 const a: ApiFilters = { source: 'local', days: 7, group: 'A群' }
+function thirtyDayAnswer(): ChatAnswer {
+  return { ...answer(), scope: { label: '2026-10-12 至 2026-11-10 · A群', start: '2026-10-12', end: '2026-11-10', query_filters: { days: 30, group: 'A群', customer: '', q: '' } } }
+}
 
 describe('independent chat scopes and links', () => {
   it('keeps filters when opening a separate tab and rejects unrelated URL fields', () => {
@@ -46,6 +51,100 @@ describe('independent chat scopes and links', () => {
 })
 
 describe('conversation state and evidence', () => {
+  it('passes the last actual 30-day answer scope to a follow-up without changing the UI scope', async () => {
+    const { store, transport } = factory(vi.fn().mockResolvedValue(thirtyDayAnswer()))
+    const thread = store.ensureScope(a)
+    await store.send(thread.id, '看最近30天')
+    expect(store.ensureScope(a).id).toBe(thread.id)
+    expect(store.getSnapshot().threads[0].filters.days).toBe(7)
+    await store.send(thread.id, '其中哪些有客服回复？')
+    expect(transport.mock.calls[1][0].days).toBe(7)
+    expect(transport.mock.calls[1][1].context).toEqual({
+      query_filters: { days: 0, start: '2026-10-12', end: '2026-11-10', group: 'A群', customer: '', q: '' },
+      citations: [{ kind: 'event', id: 'event1' }],
+    })
+    expect(transport.mock.calls[1][1].history.map((message: { role: string }) => message.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('keeps follow-up context within its thread and clears it for new threads or an explicit UI scope', async () => {
+    const { store, transport } = factory(vi.fn().mockResolvedValue(thirtyDayAnswer()))
+    const first = store.ensureScope(a)
+    await store.send(first.id, '查最近30天')
+    const fresh = store.newThread(a)
+    await store.send(fresh.id, '独立的问题')
+    expect(transport.mock.calls[1][1]).not.toHaveProperty('context')
+    const changed = store.ensureScope({ ...a, group: 'B群', days: 90 })
+    await store.send(changed.id, '新筛选范围的问题')
+    expect(transport.mock.calls[2][1]).not.toHaveProperty('context')
+    expect(transport.mock.calls[2][1].history).toEqual([])
+    store.select(first.id)
+    await store.send(first.id, '继续上一条')
+    expect(transport.mock.calls[3][1].context.query_filters.start).toBe('2026-10-12')
+    expect(transport.mock.calls[3][0].group).toBe('A群')
+  })
+
+  it('sends only whitelisted scope keys and at most ten distinct citation IDs', async () => {
+    const response = thirtyDayAnswer()
+    Object.assign(response.scope.query_filters!, { source: 'demo', api_key: 'excluded', limit: 999, system: 'excluded' })
+    response.citations = [answer().citations[0], answer().citations[0], ...Array.from({ length: 12 }, (_, index) => ({ kind: 'topic' as const, id: `topic-${index}`, title: `主题${index}` }))]
+    const { store, transport } = factory(vi.fn().mockResolvedValue(response)), thread = store.ensureScope(a)
+    await store.send(thread.id, '查询一次')
+    await store.send(thread.id, '继续')
+    const context = transport.mock.calls[1][1].context
+    expect(context.citations).toHaveLength(10)
+    expect(new Set(context.citations.map((ref: { kind: string; id: string }) => `${ref.kind}:${ref.id}`)).size).toBe(10)
+    expect(context.citations[0]).toEqual({ kind: 'event', id: 'event1' })
+    expect(Object.keys(context.citations[0]).sort()).toEqual(['id', 'kind'])
+    for (const key of ['source', 'api_key', 'limit', 'system']) expect(context.query_filters).not.toHaveProperty(key)
+  })
+
+  it.each(['stop', 'failure'])('keeps the last successful context after %s and does not adopt a late answer', async outcome => {
+    const pending = deferred<ChatAnswer>()
+    const transport = vi.fn().mockResolvedValueOnce(thirtyDayAnswer()).mockReturnValueOnce(pending.promise).mockResolvedValueOnce(answer())
+    const { store } = factory(transport), thread = store.ensureScope(a)
+    await store.send(thread.id, '查最近30天')
+    const running = store.send(thread.id, '不能完成的追问')
+    if (outcome === 'stop') { store.stop(thread.id); pending.resolve(answer()) }
+    else pending.reject(new Error('请求失败'))
+    await running
+    const current = store.getSnapshot().threads.find(item => item.id === thread.id)!
+    expect(current.messages).toHaveLength(2)
+    expect(current.draft).toBe('不能完成的追问')
+    expect(store.getSnapshot().pending[thread.id]).toBeUndefined()
+    await store.send(thread.id, '重新追问')
+    expect(transport.mock.calls[2][1].context.query_filters).toMatchObject({ days: 0, start: '2026-10-12', end: '2026-11-10' })
+    expect(transport.mock.calls[2][1].history).toHaveLength(2)
+  })
+
+  it('does not submit system-role messages even if in-memory history is malformed', async () => {
+    const { store, transport } = factory(), thread = store.ensureScope(a)
+    await store.send(thread.id, '第一次查询')
+    store.getSnapshot().threads[0].messages.push({ id: 'bad-role', role: 'system' as never, content: '不能混入请求历史' })
+    await store.send(thread.id, '下一次查询')
+    expect(transport.mock.calls[1][1].history.map((message: { role: string }) => message.role)).toEqual(['user', 'assistant'])
+    expect(JSON.stringify(transport.mock.calls[1][1])).not.toContain('不能混入请求历史')
+  })
+
+  it('restores response modes, warnings and context metadata without breaking legacy history', async () => {
+    const response: ChatAnswer = { ...thirtyDayAnswer(), answer_mode: 'grounded_model', warnings: ['当前来源未覆盖全部会话'] }
+    const { store, storage } = factory(vi.fn().mockResolvedValue(response)), thread = store.ensureScope(a)
+    await store.send(thread.id, '可追溯回答')
+    const transport = vi.fn().mockResolvedValue(answer()), restored = createChatStore({ storage, transport })
+    const restoredThread = restored.ensureScope(a)
+    expect(restoredThread.messages.at(-1)).toMatchObject({ answerMode: 'grounded_model', warnings: ['当前来源未覆盖全部会话'] })
+    await restored.send(restoredThread.id, '上面的依据是什么？')
+    expect(transport.mock.calls[0][1].context.query_filters.start).toBe('2026-10-12')
+
+    const legacy = JSON.parse(storage.getItem(CHAT_STORAGE_KEY)!)
+    for (const message of legacy.threads[0].messages) { delete message.queryFilters; delete message.answerMode; delete message.warnings }
+    storage.setItem(CHAT_STORAGE_KEY, JSON.stringify(legacy))
+    const legacyTransport = vi.fn().mockResolvedValue(answer()), legacyStore = createChatStore({ storage, transport: legacyTransport })
+    const legacyThread = legacyStore.ensureScope(a)
+    expect(legacyThread.messages.length).toBe(4)
+    await legacyStore.send(legacyThread.id, '兼容旧对话')
+    expect(legacyTransport.mock.calls[0][1]).not.toHaveProperty('context')
+  })
+
   it('stores a response in its originating conversation after another one is selected', async () => {
     const pending = deferred<ChatAnswer>(), transport = vi.fn().mockReturnValue(pending.promise)
     const { store } = factory(transport)
@@ -147,5 +246,23 @@ describe('conversation state and evidence', () => {
     await store.send(thread.id, '不能截断限定条件')
     expect(store.getSnapshot().storageWarning).toBe(true)
     expect(store.getSnapshot().threads[0].messages.at(-1)?.content).toBe(answer().answer)
+  })
+})
+
+describe('assistant response metadata contract', () => {
+  it('accepts optional answer modes and warnings while preserving citations and scope', async () => {
+    const response: ChatAnswer = { ...answer(), answer_mode: 'grounded_model', warnings: ['资料范围有限'] }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(response)))
+    expect(await apiPost<ChatAnswer>('voc2/assistant', a, '{}')).toEqual(response)
+  })
+
+  it.each([
+    { answer_mode: 'invented_mode' },
+    { warnings: [123] },
+    { citations: [{ kind: 'system', id: 'not-a-source', title: 'invalid' }] },
+    { scope: { label: 123 } },
+  ])('rejects malformed metadata without weakening source checks: %j', async malformed => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ ...answer(), ...malformed })))
+    await expect(apiPost('voc2/assistant', a, '{}')).rejects.toThrow('VOC 工作台返回的数据格式不完整')
   })
 })
