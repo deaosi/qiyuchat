@@ -23,8 +23,9 @@ MESSAGE_ENDPOINT = "/openapi/export/session/one/message"
 
 
 class SessionExporter:
-    def __init__(self, cfg: QiyuConfig):
+    def __init__(self, cfg: QiyuConfig, *, retries: int = 3):
         self.cfg = cfg
+        self.retries = retries
 
     def export(self, start_ms: int, end_ms: int, type_: int = 0) -> list[dict[str, Any]]:
         """拉一个时间片的会话记录。官方限制：跨度最大 5 天。"""
@@ -51,7 +52,7 @@ class SessionExporter:
             raise ValueError("会话 ID 须为正整数")
         qs, raw = signed_query(self.cfg.app_key, self.cfg.app_secret, {"sessionId": session_id})
         data = ensure_ok(request("POST", f"{self.cfg.base_url}{ONE_ENDPOINT}?{qs}",
-                                 body=raw, timeout=self.cfg.timeout), ONE_ENDPOINT)
+                                 body=raw, timeout=self.cfg.timeout, retries=self.retries), ONE_ENDPOINT)
         if not isinstance(data, dict) or type(data.get("id")) is not int or data["id"] != session_id:
             raise ValueError("单会话详情的来源会话不一致")
         return data
@@ -62,7 +63,7 @@ class SessionExporter:
             raise ValueError("会话 ID 须为正整数")
         qs, raw = signed_query(self.cfg.app_key, self.cfg.app_secret, {"sessionId": session_id})
         data = ensure_ok(request("POST", f"{self.cfg.base_url}{MESSAGE_ENDPOINT}?{qs}",
-                                 body=raw, timeout=self.cfg.timeout), MESSAGE_ENDPOINT)
+                                 body=raw, timeout=self.cfg.timeout, retries=self.retries), MESSAGE_ENDPOINT)
         return validate_messages(data, session_id)
 
     @staticmethod

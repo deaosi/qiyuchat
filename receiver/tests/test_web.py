@@ -6,6 +6,8 @@ import hashlib
 import http.client
 import json
 import threading
+import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
@@ -83,6 +85,63 @@ class TestWeb(LocalFixture):
         self.assertEqual(self.call("/api/clean", "POST", headers=self.write_headers())[0], 200)
         self.assertEqual(self.call("/api/status")[1]["pending"], 0)
         self.assertEqual(self.call("/api/template")[0], 200)
+
+    def test_case_reply_lookup_checks_access_and_releases_database_lock(self):
+        cfg = self.server.cfg
+        self.server.cfg = replace(cfg, qiyu=replace(cfg.qiyu, app_key="fixture", app_secret="fixture"))
+        self.server.admin_key = "case-fixture-admin"
+        db = app.get_db(self.server.cfg)
+        stamp = int(time.time() * 1000) - 1000
+        sid = 123456
+        question = "合成在线客服问题"
+        db.upsert_sessions([{"id": sid, "startTime": stamp, "endTime": stamp + 10, "fromType": "wx_cs",
+                             "staffMessageCount": 0, "userMessageCount": 1}])
+        db.upsert_messages(str(sid), [{"role": "user", "content": question, "ts": stamp}])
+        with db.tx() as conn:
+            qa_id = conn.execute("INSERT INTO qa_pair(session_id,idx,question,asked_at) VALUES (?,1,?,?)",
+                                 (str(sid), question, stamp)).lastrowid
+        path = f"/api/detail/replies?id={qa_id}"
+        auth = {"X-Admin-Key": "case-fixture-admin"}
+        write = self.write_headers(**auth)
+        self.assertEqual(self.call(path, "POST", headers=self.write_headers())[0], 401)
+        self.assertEqual(self.call(path, "POST", headers=auth)[0], 403)
+        self.assertTrue(self.call(f"/api/detail?id={qa_id}", headers=auth)[1]["can_lookup_replies"])
+        started, finish = threading.Event(), threading.Event()
+        upstream = {"status": "found", "messages": [
+            {"role": "staff", "content": "合成客服消息 13812345678", "ts": stamp + 1,
+             "source_message_id": f"source:{sid}:2"}]}
+
+        def lookup(_cfg, session, pair, retained):
+            self.assertEqual(session["session_id"], str(sid))
+            self.assertEqual(pair["qa_id"], qa_id)
+            self.assertEqual(retained[0]["content"], question)
+            started.set()
+            finish.wait(5)
+            return upstream
+
+        with patch("src.web.api.case_replies.lookup", side_effect=lookup), ThreadPoolExecutor() as pool:
+            response = pool.submit(self.call, path, "POST", headers=write)
+            try:
+                self.assertTrue(started.wait(3))
+                local = pool.submit(self.call, f"/api/detail?id={qa_id}", headers=auth)
+                self.assertEqual(local.result(timeout=2)[1]["message_count"], 1)
+            finally:
+                finish.set()
+            status, result, _ = response.result(timeout=3)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["status"], "found")
+        self.assertNotIn("13812345678", str(result))
+        self.assertEqual(result["messages"][0]["source_message_id"], f"source:{sid}:2")
+        self.assertEqual(len(db.get_messages(str(sid))), 1)
+
+        def archive_during_lookup(*_args):
+            with db.tx() as conn:
+                conn.execute("DELETE FROM raw_message WHERE session_id=?", (str(sid),))
+            return upstream
+
+        with patch("src.web.api.case_replies.lookup", side_effect=archive_during_lookup):
+            self.assertEqual(self.call(path, "POST", headers=write)[1],
+                             {"status": "unavailable", "messages": []})
 
     def test_input_errors_have_400(self):
         for path in ("/api/pairs?limit=bad", "/api/summary?start=bad", "/api/meta?source=unknown",

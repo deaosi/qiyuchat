@@ -28,6 +28,20 @@ export type VocQueryFilters = {
   [K in 'days' | 'start' | 'end' | 'group' | 'staff' | 'customer' | 'q' | 'support_intent' | 'diagnosis_status' | 'replied' | 'cluster']?: ApiFilters[K] | null
 }
 
+const detailRepliesStatuses = ['found', 'no_reply', 'unmatched', 'unavailable', 'busy'] as const
+export interface DetailRepliesResponse {
+  status: typeof detailRepliesStatuses[number]
+  messages: {
+    role: 'staff'
+    content: string
+    ts: number
+    time: string
+    source_message_id: string
+    is_question: false
+    is_answer: false
+  }[]
+}
+
 export class ApiError extends Error {
   status: number
   constructor(message: string, status = 0) {
@@ -312,6 +326,7 @@ function validateGetResponse(name: string, data: unknown): void {
           && (data.message_count === undefined || isCount(data.message_count) && data.message_count === (data.messages as unknown[]).length)
           && (data.availability === undefined || ['available', 'partial', 'archived', 'empty'].includes(String(data.availability)))
           && (data.context_scope === undefined || ['session_customer', 'legacy_session'].includes(String(data.context_scope)))
+          && (data.can_lookup_replies === undefined || typeof data.can_lookup_replies === 'boolean')
         break
       case 'status':
         valid = hasCounts(data, ['sessions', 'total_pairs']) && Array.isArray(data.tasks)
@@ -321,6 +336,19 @@ function validateGetResponse(name: string, data: unknown): void {
     }
   }
   if (!valid) throw new ApiError('服务接口版本不匹配，请刷新或联系管理员', 502)
+}
+
+function validateDetailRepliesResponse(data: unknown): void {
+  const valid = isRecord(data) && detailRepliesStatuses.some(status => status === data.status)
+    && Array.isArray(data.messages) && (data.status === 'found' ? data.messages.length > 0 : data.messages.length === 0)
+    && data.messages.every(message => isRecord(message) && message.role === 'staff'
+      && typeof message.content === 'string' && Boolean(message.content.trim())
+      && isCount(message.ts) && message.ts > 0
+      && typeof message.time === 'string' && Boolean(message.time.trim())
+      && typeof message.source_message_id === 'string' && Boolean(message.source_message_id.trim())
+      && message.is_question === false && message.is_answer === false)
+    && new Set(data.messages.map(message => message.source_message_id)).size === data.messages.length
+  if (!valid) throw new ApiError('七鱼回复接口返回的数据格式不完整，请稍后重试。', 502)
 }
 
 function validateGatewayResponse(name: string, data: unknown): void {
@@ -354,7 +382,8 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
 }
 
 export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyInit, headers?: HeadersInit, signal?: AbortSignal): Promise<T> {
-  const label = name === 'voc2/assistant' ? '正在查询会话数据…' : name === 'clean' ? '正在清洗会话…' : name.startsWith('import') ? '正在处理导入文件…' : name === 'gateway/models' ? '正在读取模型列表…' : name.includes('run') ? '正在提交整理任务…' : '正在保存…'
+  const replyLookup = name === 'detail/replies'
+  const label = replyLookup ? '正在查询七鱼客服回复…' : name === 'voc2/assistant' ? '正在查询会话数据…' : name === 'clean' ? '正在清洗会话…' : name.startsWith('import') ? '正在处理导入文件…' : name === 'gateway/models' ? '正在读取模型列表…' : name.includes('run') ? '正在提交整理任务…' : '正在保存…'
   return withRequestActivity(label, async () => {
     const requestHeaders = new Headers(headers)
     if (!requestHeaders.has('Content-Type')) requestHeaders.set('Content-Type', 'application/octet-stream')
@@ -366,8 +395,9 @@ export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyI
     validateVocResponse(name, data)
     validateVoc2Response(name, data)
     validateGatewayResponse(name, data)
+    if (replyLookup) validateDetailRepliesResponse(data)
     return data as T
-  })
+  }, replyLookup)
 }
 
 export interface GatewayConfig {

@@ -18,6 +18,7 @@ from ..extract.concepts import concept_signature
 from ..extract.identity import HIDDEN_ROLES, SOURCE_IDENTITY_ROLE, sender_context
 from ..extract.text import _attachment, _structured, clean_visible_text
 from ..local import csv_bytes
+from . import case_replies
 
 try:
     _DETAIL_ZONE = ZoneInfo('Asia/Shanghai')
@@ -281,6 +282,52 @@ def _detail_origin(db: Any, raw: dict[str, Any]) -> tuple[set[str], set[str], bo
     return question_ids, answer_ids, partial
 
 
+def _case_reply_session(db: Any, cfg: Settings, pair: dict) -> dict[str, Any] | None:
+    session_id = pair["session_id"]
+    row = db._conn.execute("SELECT * FROM raw_session WHERE session_id=?", (session_id,)).fetchone()
+    session = dict(row) if row else None
+    if session is None or not case_replies.eligible(cfg, session):
+        return None
+    if db._conn.execute("SELECT 1 FROM qa_origin WHERE qa_id=? AND active=0", (pair["qa_id"],)).fetchone():
+        return None
+    has_sync_state = db._conn.execute("SELECT 1 FROM sqlite_master WHERE name='push_sync_state'").fetchone()
+    if has_sync_state and db._conn.execute(
+        "SELECT 1 FROM push_sync_state WHERE session_id=? AND (status='archived' OR archive_reason='retention')",
+        (session_id,),
+    ).fetchone():
+        return None
+    return session
+
+
+def case_reply_target(cfg: Settings, qa_id: int) -> tuple[dict, dict, list[dict]] | None:
+    """Capture the locally authorized case, independently of the network call."""
+    db = get_db(cfg)
+    pair = db.get_pair(qa_id)
+    if not pair or not _public(pair)["question"].strip():
+        return None
+    session = _case_reply_session(db, cfg, pair)
+    if session is None:
+        return None
+    visible = sender_context(db.get_messages(pair["session_id"]), pair["session_id"], str(pair.get("customer_id") or ""))
+    if not any(m["role"] == "user" and _detail_content(m["content"]) for m in visible):
+        return None
+    if any(m["role"] == "staff" and _detail_content(m["content"]) for m in visible):
+        return None
+    return session, pair, visible
+
+
+def case_reply_response(result: dict[str, Any]) -> dict[str, Any]:
+    messages = []
+    for message in result["messages"]:
+        content = _detail_content(message["content"])
+        if content:
+            stamp, display_time = _detail_time(message["ts"])
+            messages.append({"role": "staff", "content": content, "time": display_time, "ts": stamp,
+                             "source_message_id": message["source_message_id"], "is_question": False, "is_answer": False})
+    status = "unmatched" if result["status"] == "found" and not messages else result["status"]
+    return {"status": status, "messages": messages}
+
+
 def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
     db = get_db(cfg)
     raw = db.get_pair(qa_id)
@@ -306,8 +353,12 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
                                      'is_answer': message['role'] == 'staff' and source_id in answer_ids})
     archived = not bool(messages)
     availability = 'archived' if archived else 'empty' if not visible_messages else 'partial' if partial else 'available'
+    roles = {message["role"] for message in visible_messages}
+    can_lookup = ("user" in roles and "staff" not in roles and
+                  _case_reply_session(db, cfg, raw) is not None)
     return {'pair': pair, 'messages': visible_messages, 'archived': archived,
             'message_count': len(visible_messages), 'time_zone': 'Asia/Shanghai', 'availability': availability,
+            'can_lookup_replies': can_lookup,
             'context_scope': 'session_customer' if any(m.get('role') == SOURCE_IDENTITY_ROLE for m in messages) else 'legacy_session'}
 
 

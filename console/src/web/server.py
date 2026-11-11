@@ -418,7 +418,24 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise ValueError("上传未完成，请重新选择文件")
-            if path.startswith("/api/voc2/"):
+            if path == "/api/detail/replies":
+                if data:
+                    raise ValueError("客服回复查询不接受请求正文")
+                qa_id = _int(qs, "id", 0)
+                if qa_id <= 0:
+                    raise ValueError("问答 ID 须为正整数")
+                with DB_LOCK:
+                    target = api.case_reply_target(cfg, qa_id)
+                result = {"status": "unavailable", "messages": []}
+                if target is not None:
+                    result = api.case_replies.lookup(cfg, *target)
+                    # The upstream request can outlive a local import or retention
+                    # pass. Recheck the original case before returning any reply.
+                    with DB_LOCK:
+                        if api.case_reply_target(cfg, qa_id) != target:
+                            result = {"status": "unavailable", "messages": []}
+                self._json(api.case_reply_response(result))
+            elif path.startswith("/api/voc2/"):
                 try:
                     if not self.headers.get("Content-Type", "").lower().startswith("application/json") or len(data)>64*1024:
                         raise voc_service.ServiceError("新整理请求须为最多 64 KB 的 JSON。")

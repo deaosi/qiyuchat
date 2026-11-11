@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiGet, type ApiFilters } from '@/lib/api'
 import type { ChatCitation } from '@/lib/voc-chat'
@@ -46,6 +46,44 @@ describe('citation cases and full conversation', () => {
     expect(screen.queryByText('补充的信息')).toBeNull()
     expect(screen.getAllByText('2026-11-10 12:34:56')).toHaveLength(2)
     expect(query).toHaveBeenCalledWith('voc2/topic', { ...filters, id: 'topic-a' }, 0, true)
+  })
+
+  it('prefers verified duplicates and preserves the order within each reply group', () => {
+    items = [
+      event(41, { question: '去重前未核验问题', staff_source_verified: false }),
+      event(42, { question: '第一条有核验回复的问题' }),
+      event(43, { question: '第一条没有回复的问题', answer: '', claims: [] }),
+      event(41, { qa_id: '41', question: '第二条有核验回复的问题', answer: '', id: 'verified-event-41' }),
+      event(44, { question: '第二条未核验问题', staff_source_verified: false }),
+    ]
+    render(<VocSourceInspector citation={citation} filters={filters} />)
+    const [first, second, third, fourth] = screen.getAllByRole('article').map(article => within(article))
+    expect(first.getByText('第一条有核验回复的问题')).toBeTruthy()
+    expect(first.getByText('已核验客服回复')).toBeTruthy()
+    expect(second.getByText('第二条有核验回复的问题')).toBeTruthy()
+    expect(second.getByText('已核验客服回复')).toBeTruthy()
+    expect(third.getByText('第一条没有回复的问题')).toBeTruthy()
+    expect(third.getByText('当前问答片段未提取到客服回复。')).toBeTruthy()
+    expect(fourth.getByText('第二条未核验问题')).toBeTruthy()
+    expect(fourth.getByText('来源回复摘要（客服来源未核验）')).toBeTruthy()
+    expect(screen.getByText('4 条')).toBeTruthy()
+    expect(screen.queryByText('去重前未核验问题')).toBeNull()
+    expect(screen.queryByText('当前案例中没有已核验的客服回复。')).toBeNull()
+  })
+
+  it('does not treat missing or unverified reply text as an available verified reply', () => {
+    items = [event(41, { answer: ' ', claims: [] }), event(42, { staff_source_verified: false })]
+    render(<VocSourceInspector citation={citation} filters={filters} />)
+    expect(screen.getByText('当前案例中没有已核验的客服回复。')).toBeTruthy()
+    expect(screen.queryByText('已核验客服回复')).toBeNull()
+  })
+
+  it('explains an entirely unanswered case list once while preserving access to the records', () => {
+    items = [event(41, { answer: '', claims: [] }), event(42, { answer: '', claims: [] })]
+    render(<VocSourceInspector citation={citation} filters={filters} />)
+    expect(screen.getByText('当前案例的问答片段均未提取到客服回复。')).toBeTruthy()
+    expect(screen.queryByText('当前问答片段未提取到客服回复。')).toBeNull()
+    expect(screen.getAllByRole('button', { name: '查看详情' })).toHaveLength(2)
   })
 
   it('opens the QA transcript inside the same panel and returns to the cases', async () => {

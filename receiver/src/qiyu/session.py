@@ -48,10 +48,11 @@ _SESSION_ID_MARKERS = ("id", "会话id", "sessionid")
 
 
 class SessionExporter:
-    def __init__(self, cfg: QiyuConfig, poll_interval: float = 3.0, max_wait: float = 600.0):
+    def __init__(self, cfg: QiyuConfig, poll_interval: float = 3.0, max_wait: float = 600.0, *, retries: int = 3):
         self.cfg = cfg
         self.poll_interval = poll_interval
         self.max_wait = max_wait
+        self.retries = retries
         self.last_files: dict[str, bytes] = {}
 
     # ---------- 1. 建任务 ----------
@@ -230,7 +231,7 @@ class SessionExporter:
         body = {"sessionId": int(session_id)}
         qs, raw = signed_query(self.cfg.app_key, self.cfg.app_secret, body)
         url = f"{self.cfg.base_url}{ONE_ENDPOINT}?{qs}"
-        data = ensure_ok(request("POST", url, body=raw, timeout=self.cfg.timeout), ONE_ENDPOINT)
+        data = ensure_ok(request("POST", url, body=raw, timeout=self.cfg.timeout, retries=self.retries), ONE_ENDPOINT)
         return data if isinstance(data, dict) else {}
 
 
@@ -240,7 +241,7 @@ class SessionExporter:
             raise ValueError("会话 ID 须为正整数")
         qs, raw = signed_query(self.cfg.app_key, self.cfg.app_secret, {"sessionId": session_id})
         data = ensure_ok(request("POST", f"{self.cfg.base_url}{MESSAGE_ENDPOINT}?{qs}",
-                                 body=raw, timeout=self.cfg.timeout), MESSAGE_ENDPOINT)
+                                 body=raw, timeout=self.cfg.timeout, retries=self.retries), MESSAGE_ENDPOINT)
         return validate_messages(data, session_id)
 
 
