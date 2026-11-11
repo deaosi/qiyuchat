@@ -200,6 +200,68 @@ def customers(cfg: Settings | None = None, top: int = 50, **filters: Any) -> dic
     return {"items": items}
 
 
+def _matches_customer(members: list[dict[str, Any]], customer_id: str, query: str) -> bool:
+    if query in customer_id.casefold():
+        return True
+    if any(query in row[field].casefold()
+           for row in members for field in ("customer_name", "group_name")):
+        return True
+    alias = query.removeprefix("匿名客户 ")
+    if len(alias) == 5 and alias.isascii() and alias.isdecimal():
+        # Keep the alias searchable using the same hash as the UI customer label.
+        value = 2166136261
+        for char in customer_id:
+            value = ((value ^ ord(char)) * 16777619) & 0xffffffff
+        return alias == f"{value % 100000:05d}"
+    return False
+
+
+def directory(cfg: Settings, entity: str, *, limit: int = 20, offset: int = 0,
+              entity_q: str = "", entity_sort: str = "questions", top: int = 10,
+              **filters: Any) -> dict[str, Any]:
+    sort_field = {"questions": "total_questions", "unanswered": "unanswered",
+                  "recent": "last_seen"}.get(entity_sort)
+    if sort_field is None:
+        raise ValueError("未知列表排序")
+
+    is_group = entity == "groups"
+    key = "group_name" if is_group else "customer_id"
+    query = entity_q.strip().casefold()
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in _rows(cfg, **filters):
+        buckets[row[key]].append(row)
+
+    matches = []
+    for value, members in buckets.items():
+        if query and not (query in value.casefold() if is_group
+                          else _matches_customer(members, value, query)):
+            continue
+        matches.append({
+            key: value,
+            "total_questions": len(members),
+            "unanswered": sum(not row["replied"] for row in members),
+            "last_seen": max(int(row.get("asked_at") or 0) for row in members),
+        })
+    matches.sort(key=lambda item: (-item[sort_field], -item["total_questions"], item[key]))
+    limit, offset = max(1, min(limit, 100)), max(0, offset)
+    items = matches[offset:offset + limit]
+    page_rows = [row for item in items for row in buckets[item[key]]]
+    details = E.by_group(page_rows, top_n=top) if is_group else E.by_customer(page_rows, top_n=3)
+    by_key = {item[key]: item for item in details}
+    for item in items:
+        item.update(by_key[item[key]])
+        item["last_seen"] = _day(item["last_seen"])
+        if not is_group:
+            item["first_seen"] = _day(item["first_seen"])
+            groups = Counter(row["group_name"] for row in buckets[item[key]]
+                             if row["group_name"] != "未分组")
+            item["group_count"] = len(groups)
+            item["group_names"] = sorted(groups, key=lambda name: (-groups[name], name))[:3]
+    return {"items": items, "total": len(matches), "offset": offset, "limit": limit,
+            "totals": {"questions": sum(item["total_questions"] for item in matches),
+                       "unanswered": sum(item["unanswered"] for item in matches)}}
+
+
 def pairs(cfg: Settings | None = None, limit: int = 25, offset: int = 0,
           **filters: Any) -> dict[str, Any]:
     rows = sorted(_rows(cfg or settings(), **filters),

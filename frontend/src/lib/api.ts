@@ -11,6 +11,8 @@ export interface ApiFilters {
   cluster?: string | number
   customer?: string
   q?: string
+  entity_q?: string
+  entity_sort?: 'questions' | 'unanswered' | 'recent'
   replied?: string
   limit?: number
   offset?: number
@@ -331,7 +333,12 @@ function validateVocResponse(name: string, data: unknown): void {
 }
 
 /** Reject an older/incompatible backend instead of rendering missing fields as zero. */
-function validateGetResponse(name: string, data: unknown): void {
+function hasAudiencePage(data: Record<string, unknown>): boolean {
+  return hasCounts(data, ['total', 'offset', 'limit']) && isRecord(data.totals) && hasCounts(data.totals, ['questions', 'unanswered'])
+}
+
+function validateGetResponse(name: string, data: unknown, filters: ApiFilters): void {
+  const paged = filters.limit !== undefined || filters.offset !== undefined || filters.entity_q !== undefined || filters.entity_sort !== undefined
   let valid = true
   if (['summary', 'meta', 'trend', 'pairs', 'questions', 'clusters', 'groups', 'customers', 'detail', 'status'].includes(name)) {
     if (!isRecord(data)) valid = false
@@ -358,14 +365,18 @@ function validateGetResponse(name: string, data: unknown): void {
         break
       case 'groups':
         valid = Array.isArray(data.items) && data.items.every(item => isRecord(item)
-          && typeof item.group_name === 'string' && hasCounts(item, ['total_questions', 'customer_count', 'unanswered'])
+          && typeof item.group_name === 'string' && (!paged || typeof item.last_seen === 'string') && hasCounts(item, ['total_questions', 'customer_count', 'unanswered'])
           && Array.isArray(item.top) && item.top.every(top => isRecord(top) && typeof top.question === 'string'
             && hasCounts(top, ['cluster_id', 'count'])))
+        valid &&= !paged || hasAudiencePage(data)
         break
       case 'customers':
         valid = Array.isArray(data.items) && data.items.every(item => isRecord(item)
           && typeof item.customer_id === 'string' && typeof item.group_name === 'string'
-          && typeof item.last_seen === 'string' && hasCounts(item, ['total_questions', 'distinct_clusters', 'unanswered']))
+          && typeof item.last_seen === 'string'
+          && (!paged || typeof item.customer_name === 'string' && isStringArray(item.group_names) && isCount(item.group_count))
+          && hasCounts(item, ['total_questions', 'distinct_clusters', 'unanswered']))
+        valid &&= !paged || hasAudiencePage(data)
         break
       case 'detail':
         valid = isPair(data.pair) && typeof data.archived === 'boolean'
@@ -442,7 +453,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
     const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
       credentials: 'same-origin', cache: 'no-store', signal,
     }))
-    validateGetResponse(name, data)
+    validateGetResponse(name, data, filters)
     validateVocResponse(name, data)
     validateVoc2Response(name, data, filters.workbench === 1)
     validateGatewayResponse(name, data)
