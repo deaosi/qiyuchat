@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ApiFilters } from '@/lib/api'
 import { createChatStore, type ChatAnswer } from '@/lib/voc-chat'
@@ -17,6 +17,33 @@ function setup(filters: ApiFilters) {
   render(<VocChatWorkspace filters={filters} onScopeChange={vi.fn()} store={store} />)
   return { transport, input: screen.getByRole<HTMLTextAreaElement>('textbox', { name: '向语海Voc提问' }) }
 }
+
+it('rotates the empty placeholder and fills the question currently shown', () => {
+  vi.useFakeTimers()
+  try {
+    const { transport, input } = setup({ source: 'local', days: 7 })
+    input.focus()
+    expect(input.placeholder).toBe('当前范围的高频咨询有哪些？')
+
+    act(() => vi.advanceTimersByTime(5000))
+    const shown = '客服通常怎么回复场景未触发的问题？'
+    expect(input.placeholder).toBe(shown)
+    expect(input.value).toBe('')
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(input.value).toBe(shown)
+    expect(transport).not.toHaveBeenCalled()
+
+    act(() => vi.advanceTimersByTime(10000))
+    expect(input.value).toBe(shown)
+    expect(input.placeholder).toBe(shown)
+    fireEvent.change(input, { target: { value: '' } })
+    act(() => vi.advanceTimersByTime(5000))
+    expect(input.placeholder).toBe('哪些答案已通过会话验证，可以直接复用？')
+  } finally {
+    vi.useRealTimers()
+  }
+})
 
 it.each([
   [undefined, '当前范围的高频咨询有哪些？'],

@@ -13,16 +13,21 @@ import { LoadingMark, LoadingState } from './loading-state'
 type Selection = { threadId: string; citation: ChatCitation; message: ChatMessage; filters: ApiFilters }
 type Preset = { prompt: string; keywords: string[] }
 const draftLimit = 2000
+const presetRotationMs = 5000
 const suggestions: Preset[] = [
   { prompt: '当前范围的高频咨询有哪些？', keywords: ['高频问题', '高频咨询', '查高频'] },
   { prompt: '客服通常怎么回复场景未触发的问题？', keywords: ['话术', '客服回复', '接待答复', '场景未触发'] },
   { prompt: '哪些答案已通过会话验证，可以直接复用？', keywords: ['知识库', '可复用答案', '验证结果'] },
   { prompt: '机器人不回复时应先检查哪些设置？请附上案例依据。', keywords: ['排查', '机器人不回复', '功能异常'] },
+  { prompt: '和上一个同等时段相比，哪些咨询明显增多？', keywords: ['趋势', '环比', '咨询增多'] },
+  { prompt: '有哪些客户问题还缺少明确的处理办法？', keywords: ['知识缺口', '处理办法缺失'] },
 ]
 const topicSuggestions: Preset[] = [
   { prompt: '这个问题怎么排查？给出适用条件和来源。', keywords: ['排查', '排查依据'] },
   { prompt: '这个问题有哪些可以直接复用的客服答复？', keywords: ['话术', '客服回复', '知识库', '可复用答案'] },
   { prompt: '只给数字，比较这个问题本期和上期的咨询量。', keywords: ['趋势', '对比', '咨询量', '高频问题'] },
+  { prompt: '列出这个问题的代表案例，并附上会话依据。', keywords: ['案例', '原话', '会话依据'] },
+  { prompt: '这个问题目前还缺哪些证据，才能判断原因？', keywords: ['证据缺口', '判断原因'] },
 ]
 
 function matchPreset(draft: string, presets: Preset[]) {
@@ -46,6 +51,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
   const [deleting, setDeleting] = useState<ChatThread | null>(null)
   const [atBottom, setAtBottom] = useState(true)
   const [copied, setCopied] = useState('')
+  const [presetIndex, setPresetIndex] = useState(0)
   const [dismissedCompletion, setDismissedCompletion] = useState<{ threadId: string; draft: string } | null>(null)
   const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null), previousThread = useRef('')
   const nearBottom = useRef(true)
@@ -54,14 +60,21 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
   const focus = useApi<{ topic: { question: string } }>('voc2/topic', { ...filters, id: filters.focus_topic }, refreshKey, Boolean(filters.focus_topic))
   const topicTitle = filters.focus_topic ? focus.data?.topic.question || '当前问题' : ''
   const presets = filters.focus_topic ? topicSuggestions : suggestions
-  const defaultPrompt = presets[0].prompt
+  const displayedPrompt = presets[presetIndex % presets.length].prompt
   const emptyDraft = !pending && current?.draft === ''
   const completionDismissed = current && dismissedCompletion?.threadId === current.id && dismissedCompletion.draft === current.draft
   const completion = current && !pending && !completionDismissed ? matchPreset(current.draft, presets) : undefined
-  const enterPrompt = completion ?? (emptyDraft ? defaultPrompt : undefined)
+  const enterPrompt = completion ?? (emptyDraft ? displayedPrompt : undefined)
 
   useEffect(() => { store.ensureScope(filters) }, [scopeKey, store])
   useEffect(() => { setSelection(null) }, [state.activeId])
+  useEffect(() => {
+    if (!emptyDraft) return
+    const timer = window.setInterval(() => {
+      setPresetIndex(index => (index + 1) % presets.length)
+    }, presetRotationMs)
+    return () => window.clearInterval(timer)
+  }, [emptyDraft, presets])
   useEffect(() => {
     const area = input.current
     if (area) { area.style.height = 'auto'; area.style.height = `${Math.min(area.scrollHeight, 160)}px` }
@@ -152,7 +165,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
         {state.storageWarning && <p role="status" className="mb-2 text-xs text-muted-foreground">本窗口暂时无法保存聊天历史，刷新后可能无法恢复当前对话。</p>}
         {current?.error && <p role="alert" className="mb-2 text-sm text-destructive">{current.error}</p>}
         <form onSubmit={event => { event.preventDefault(); send() }} className="voc-chat-composer rounded-lg border border-input bg-background/75 p-3">
-          <textarea ref={input} rows={2} aria-label="向语海Voc提问" aria-describedby={completion ? completionId : undefined} placeholder={defaultPrompt} maxLength={draftLimit} value={current?.draft || ''} disabled={!current || pending} onChange={event => {
+          <textarea ref={input} rows={2} aria-label="向语海Voc提问" aria-describedby={completion ? completionId : undefined} placeholder={displayedPrompt} maxLength={draftLimit} value={current?.draft || ''} disabled={!current || pending} onChange={event => {
             if (!current) return
             setDismissedCompletion(null)
             store.setDraft(current.id, event.target.value)
