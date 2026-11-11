@@ -351,10 +351,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(api.questions(cfg, top=_int(qs, "top", 20), **filters))
         elif name == "clusters":
             self._json(api.clusters(cfg, **filters))
-        elif name == "groups":
-            self._json(api.groups(cfg, top=_int(qs, "top", 10), **filters))
-        elif name == "customers":
-            self._json(api.customers(cfg, top=_int(qs, "top", 500), **filters))
+        elif name in ("groups", "customers"):
+            if {"limit", "offset", "entity_q", "entity_sort"} & qs.keys():
+                self._json(api.directory(cfg, name, limit=_int(qs, "limit", 20),
+                                         offset=_int(qs, "offset", 0), entity_q=_str(qs, "entity_q"),
+                                         entity_sort=_str(qs, "entity_sort", "questions"),
+                                         top=_int(qs, "top", 10), **filters))
+            elif name == "groups":
+                self._json(api.groups(cfg, top=_int(qs, "top", 10), **filters))
+            else:
+                self._json(api.customers(cfg, top=_int(qs, "top", 500), **filters))
         elif name == "pairs":
             self._json(api.pairs(cfg, limit=_int(qs, "limit", 25),
                                  offset=_int(qs, "offset", 0), **filters))

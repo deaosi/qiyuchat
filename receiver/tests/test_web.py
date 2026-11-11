@@ -201,6 +201,73 @@ class TestWeb(LocalFixture):
         self.assertEqual((after["qa_pair"], after["customer_count"]), (before["qa_pair"], before["customer_count"]))
 
 
+    def test_group_directory_pages_and_matches_shared_filters(self):
+        self.seed()
+        path = "/api/groups?limit=1&entity_sort=unanswered&entity_q=" + quote("售")
+        status, first, _ = self.call(path)
+        self.assertEqual(status, 200)
+        self.assertEqual(first["total"], 2)
+        self.assertEqual(first["totals"], {"questions": 5, "unanswered": 3})
+        self.assertEqual(first["items"][0]["group_name"], "售后")
+        self.assertEqual(first["items"][0]["last_seen"], "2026-11-02")
+        second = self.call(path + "&offset=1")[1]
+        self.assertEqual(second["totals"], first["totals"])
+        self.assertEqual(second["items"][0]["group_name"], "售前")
+        legacy = self.call("/api/groups")[1]
+        self.assertEqual(set(legacy), {"items"})
+        self.assertNotIn("last_seen", legacy["items"][0])
+
+        scope = "start=2026-11-01&end=2026-11-01&group=" + quote("售前") + "&staff=" + quote("小林")
+        page = self.call("/api/groups?entity_sort=recent&" + scope)[1]
+        unanswered = self.call("/api/pairs?replied=unanswered&" + scope)[1]
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["unanswered"], unanswered["total"])
+        self.assertEqual(page["totals"]["unanswered"], unanswered["total"])
+        self.assertEqual(self.call("/api/groups?entity_sort=invalid")[0], 400)
+
+    def test_customer_directory_searches_all_public_groups_and_keeps_legacy_cap(self):
+        phone = "13812345678"
+        stamp = int(time.time() * 1000)
+        rows = [
+            (f"s{n}", 1, f"fixture-{n:03d}", "合成客户", "", "", stamp, "如何设置", "")
+            for n in range(501)
+        ]
+        rows.extend(
+            (f"alias{n}", 1, phone, "", name, "合成客服", stamp - 5000 + n, "如何设置", answer)
+            for n, (name, answer) in enumerate([
+                ("群 A", "按说明设置"), ("群 B", "   "), ("群 C", ""), (f"群 D {phone}", ""),
+            ])
+        )
+        with app.get_db(self.cfg).tx() as conn:
+            conn.executemany(
+                "INSERT INTO qa_pair(session_id,idx,customer_id,customer_name,group_name,staff_name,"
+                "asked_at,question,answer) VALUES (?,?,?,?,?,?,?,?,?)", rows,
+            )
+        status, result, _ = self.call("/api/customers?entity_q=" + quote("群 D"))
+        self.assertEqual(status, 200)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["totals"], {"questions": 4, "unanswered": 3})
+        item = result["items"][0]
+        self.assertEqual(item["group_names"], ["群 A", "群 B", "群 C"])
+        self.assertEqual(item["group_count"], 4)
+        self.assertNotIn(phone, str(result))
+        self.assertEqual(self.call("/api/customers?entity_q=" + quote("匿名客户 30778"))[1], result)
+        self.assertEqual(self.call("/api/customers?entity_q=" + phone)[1]["total"], 0)
+        self.assertEqual(self.call("/api/customers?entity_q=FIXTURE-500")[1]["total"], 1)
+        scoped = self.call("/api/pairs?replied=unanswered&customer=" + quote(item["customer_id"]))[1]
+        self.assertEqual(item["unanswered"], scoped["total"])
+
+        recent = self.call("/api/customers?entity_sort=recent&limit=1")[1]
+        self.assertEqual(recent["items"][0]["customer_id"], "fixture-000")
+        tail = self.call("/api/customers?limit=200&offset=500")[1]
+        self.assertEqual((tail["total"], tail["offset"], tail["limit"]), (502, 500, 100))
+        self.assertEqual([row["customer_id"] for row in tail["items"]], ["fixture-499", "fixture-500"])
+        legacy = self.call("/api/customers")[1]
+        self.assertEqual(set(legacy), {"items"})
+        self.assertEqual(len(legacy["items"]), 500)
+        self.assertNotIn("group_names", legacy["items"][0])
+
+
 class TestAdminKey(LocalFixture):
     """单管理员密钥：设了 ADMIN_KEY 之后，整站必须先过密钥。"""
 

@@ -39,7 +39,11 @@ beforeEach(() => {
   query.mockImplementation((endpoint: string, _filters: unknown, _key: number, enabled = true) => ({
     data: !enabled ? null : {
       meta: { total: 3, groups: [], staff: [] },
-      groups: { items: [{ group_name: '测试群', total_questions: 3, customer_count: 2, unanswered: 1, top: [] }] },
+      groups: { items: [{ group_name: '测试群', total_questions: 3, customer_count: 2, unanswered: 1, last_seen: '2026-11-10', top: [] }],
+        total: 1, offset: 0, limit: 20, totals: { questions: 3, unanswered: 1 } },
+      customers: { items: [{ customer_id: 'fixture-shop', customer_name: '测试商家', group_name: '测试群', group_names: ['测试群'], group_count: 1,
+        total_questions: 3, distinct_clusters: 1, unanswered: 1, first_seen: '2026-11-09', last_seen: '2026-11-10', top: [] }],
+        total: 1, offset: 0, limit: 20, totals: { questions: 3, unanswered: 1 } },
       'voc2/summary': { source_pairs: 6, total_events: 5, consultation_count: 3, topic_count: 1, coverage: { processed_pairs: 5, pending_pairs: 1 }, semantics: { ready: true }, latest_job: null },
       'voc2/topics': { items: [topic], total: 1 },
       'voc2/topic': { topic, events: [evidence] },
@@ -200,6 +204,27 @@ describe('VOC navigation', () => {
     fireEvent.mouseDown(screen.getByRole('tab', { name: '有回复' }), { button: 0 })
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '导出脱敏问答' })))
     expect(downloadExport).toHaveBeenCalledWith(expect.objectContaining({ days: 30, staff: '测试客服', q: '权限', replied: 'answered' }))
+  })
+
+  it('keeps the selected group when drilling from a customer to their unanswered conversations', async () => {
+    const fetchPairs = vi.fn(async (_url: string) => Response.json({ items: [], total: 0 }))
+    vi.stubGlobal('fetch', fetchPairs)
+    window.history.replaceState(null, '', '#groups')
+    render(<QiyuApp />)
+    fireEvent.click(screen.getByRole('button', { name: '查看客户：测试群' }))
+    const customerEntry = history.state
+    expect(location.hash).toBe('#customers')
+    expect(query).toHaveBeenCalledWith('customers', expect.objectContaining({ group: '测试群', days: 7, limit: 20 }), expect.any(Number))
+    fireEvent.click(screen.getByRole('button', { name: '测试商家，未发现回复 1 条' }))
+    expect(location.hash).toBe('#pairs')
+    await screen.findByText(/共 0 条匹配记录/)
+    const pairRequest = fetchPairs.mock.calls.find(([url]) => url.startsWith('/api/pairs?'))
+    const params = new URL(pairRequest![0], location.origin).searchParams
+    expect(Object.fromEntries(params)).toMatchObject({ group: '测试群', customer: 'fixture-shop', replied: 'unanswered', days: '7' })
+
+    act(() => { history.replaceState(customerEntry, '', '#customers'); window.dispatchEvent(new PopStateEvent('popstate')) })
+    expect(screen.getByRole('button', { name: '测试商家' })).toBeTruthy()
+    expect(query.mock.calls.filter(([endpoint]) => endpoint === 'customers').at(-1)?.[1]).toMatchObject({ group: '测试群' })
   })
 
   it('clears an unrelated drill when browser navigation reopens the plain details route', async () => {

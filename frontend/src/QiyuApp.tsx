@@ -17,6 +17,7 @@ import { QiyuSectionCards } from '@/components/qiyu/section-cards'
 import { QiyuAreaChart } from '@/components/qiyu/area-chart'
 import { QATable } from '@/components/qiyu/qa-table'
 import { QADetail } from '@/components/qiyu/qa-detail'
+import { AudienceWorkspace } from '@/components/qiyu/audience-workspace'
 import { VocFrequencyWorkspace, VocKnowledgeWorkspace } from '@/components/qiyu/voc-next-workspace'
 import { VocChatWorkspace } from '@/components/qiyu/voc-chat-workspace'
 import { VocBriefingDialog } from '@/components/qiyu/voc-briefing-dialog'
@@ -46,10 +47,8 @@ const navigation = [
 
 type View = typeof navigation[number]['id']
 type Reply = 'all' | 'unanswered' | 'answered'
-interface GroupItem { group_name: string; total_questions: number; customer_count: number; unanswered: number; top: { cluster_id: number; question: string; count: number }[] }
-interface CustomerItem { customer_id: string; customer_name: string; group_name: string; total_questions: number; distinct_clusters: number; unanswered: number; first_seen: string; last_seen: string }
-type ListItem = ClusterItem | GroupItem | CustomerItem
 const readView = (): View => { const id = location.hash.slice(1).split('?')[0]; return navigation.some(item => item.id === id) ? id as View : 'overview' }
+const readCustomerGroup = (): string => readView() === 'customers' && typeof history.state?.customerGroup === 'string' ? history.state.customerGroup : ''
 const numberText = (value: unknown) => typeof value === 'number' ? value.toLocaleString('zh-CN') : '—'
 
 const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport }: { view: View; total?: number; navigate: (view: View) => void; onImport: () => void }) {
@@ -75,6 +74,7 @@ function Workspace() {
   const [briefingOpen, setBriefingOpen] = useState(false)
   const [jobsOpen, setJobsOpen] = useState(false)
   const [drillFilters, setDrillFilters] = useState<Partial<ApiFilters>>({})
+  const [customerGroup, setCustomerGroup] = useState(readCustomerGroup)
   const [drillCustomerName, setDrillCustomerName] = useState('')
   const [tableExport, setTableExport] = useState<{ key: string; filters: ApiFilters } | null>(null)
   const [initialReply, setInitialReply] = useState<Reply>('all')
@@ -109,14 +109,15 @@ function Workspace() {
   const { days, start, end, group, staff } = filters
   const sharedScope = useMemo<ApiFilters>(() => ({ source, days, start, end, group, staff }), [days, start, end, group, staff])
   const effectiveFilters = useMemo<ApiFilters>(() => ({ ...sharedScope, ...drillFilters }), [sharedScope, drillFilters])
-  const tableScope = view === 'pairs' ? effectiveFilters : sharedScope
+  const audienceScope = useMemo<ApiFilters>(() => customerGroup ? { ...sharedScope, group: customerGroup } : sharedScope, [sharedScope, customerGroup])
+  const activeGroup = view === 'customers' ? audienceScope.group : group
+  const tableScope = view === 'pairs' ? effectiveFilters : view === 'customers' ? audienceScope : sharedScope
   const tableExportKey = JSON.stringify([view, tableScope, view === 'pairs' ? initialReply : 'all'])
   const captureTableFilters = useCallback((filters: ApiFilters) => setTableExport({ key: tableExportKey, filters }), [tableExportKey])
   const meta = useApi<MetaData>('meta', { source }, refreshKey)
   const summary = useApi<SummaryData>('summary', sharedScope, refreshKey, view === 'overview')
   const trend = useApi<TrendData>('trend', sharedScope, refreshKey, view === 'overview')
-  const listEnabled = ['clusters', 'groups', 'customers'].includes(view)
-  const list = useApi<{ items: ListItem[]; total?: number }>(listEnabled ? view : 'clusters', { ...sharedScope, top: view === 'customers' ? 500 : view === 'groups' ? 3 : 100 }, refreshKey, listEnabled)
+  const list = useApi<{ items: ClusterItem[] }>('clusters', { ...sharedScope, top: 100 }, refreshKey, view === 'clusters')
   const status = useApi<LocalStatus>('status', { source }, refreshKey, view === 'cleaning')
   const recent = useMemo(() => summary.data?.recent?.map(normalizePair) ?? [], [summary.data])
   const page = navigation.find(item => item.id === view)!
@@ -132,6 +133,7 @@ function Workspace() {
   useEffect(() => {
     const handler = () => {
       setView(readView())
+      setCustomerGroup(readCustomerGroup())
       clearDrill()
       setSelected(null)
       setTableExport(null)
@@ -155,7 +157,8 @@ function Workspace() {
   useEffect(() => { if (view === 'voc-chat' && location.hash !== chatHref(filters)) history.replaceState(null, '', chatHref(filters)) }, [view, filters])
   useEffect(() => { document.documentElement.classList.toggle('dark', theme === 'dark'); try { localStorage.setItem('qiyu-theme', theme) } catch { /* Storage may be unavailable. */ } }, [theme])
   useEffect(() => { document.documentElement.dataset.motion = motion ? 'on' : 'off' }, [motion])
-  const navigate = useCallback((next: View, scope = filters) => {
+  const navigate = useCallback((next: View, scope = filters, nextCustomerGroup = '') => {
+    setCustomerGroup(nextCustomerGroup)
     setView(next)
     setSelected(null)
     setLinkedTopic(null)
@@ -163,7 +166,9 @@ function Workspace() {
     setJobsOpen(false)
     if (next !== view) setTableExport(null)
     const href = next === 'voc-chat' ? chatHref(scope) : `#${next}`
-    if (location.hash !== href) history.pushState(null, '', href)
+    const state = nextCustomerGroup ? { customerGroup: nextCustomerGroup } : null
+    if (location.hash !== href) history.pushState(state, '', href)
+    else if (next === 'customers' && readCustomerGroup() !== nextCustomerGroup) history.replaceState(state, '', href)
   }, [filters, view])
   const clearLinkedTopic = useCallback(() => {
     setLinkedTopic(null)
@@ -173,9 +178,22 @@ function Workspace() {
   const openChat = (next: ApiFilters) => { setChatScope(next); navigate('voc-chat', next) }
   const sideNavigate = useCallback((next: View) => { clearDrill(); navigate(next) }, [clearDrill, navigate])
   const drill = (next: Partial<ApiFilters> = {}, reply: Reply = 'all', customerName?: string) => { setDrillFilters(next); setDrillCustomerName(next.customer ? customerLabel(customerName, next.customer) : ''); setInitialReply(reply); navigate('pairs') }
+  const openGroupCustomers = (group: string) => { clearDrill(); navigate('customers', filters, group) }
+  const clearCustomerGroup = () => {
+    if (!customerGroup) return
+    setCustomerGroup('')
+    if (readView() === 'customers') history.replaceState(null, '', location.href)
+  }
+  const changeGroup = (value: string) => {
+    clearCustomerGroup()
+    setFilters(current => ({ ...current, group: value === 'all' ? '' : value }))
+    clearDrill()
+  }
+  const drillAudience = (next: Partial<ApiFilters>, reply: Reply = 'all', customerName?: string) =>
+    drill({ ...(view === 'customers' && customerGroup ? { group: customerGroup } : {}), ...next }, reply, customerName)
   const openImport = useCallback(() => { if (!busy) setImportOpen(true) }, [busy])
   const changeDays = (days: number) => { setRange(String(days)); setFilters(current => ({ ...current, days, start: undefined, end: undefined })); setDrillFilters({}) }
-  const reset = () => { setFilters({ source, days: 7 }); setRange('7'); setCustomStart(''); setCustomEnd(''); setDrillFilters({}); setInitialReply('all') }
+  const reset = () => { clearCustomerGroup(); setFilters({ source, days: 7 }); setRange('7'); setCustomStart(''); setCustomEnd(''); setDrillFilters({}); setInitialReply('all') }
   const applyCustom = () => { if (!customStart && !customEnd) { toast.error('请至少填写一个日期边界'); return } if (customStart && customEnd && customStart > customEnd) { toast.error('开始日期不能晚于结束日期'); return } setFilters(current => ({ ...current, days: 0, start: customStart, end: customEnd })); setDrillFilters({}) }
   const cardNavigate = (next: string) => next === 'unanswered' ? drill({}, 'unanswered') : next === 'pairs' ? drill() : sideNavigate(next as View)
   const clean = async () => { setCleanOpen(false); setCleaning(true); try { const result = await apiPost<{ sessions_scanned: number; qa_pairs: number; clusters: number }>('clean', { source }); setDrillFilters({}); setSelected(null); setRefreshKey(key => key + 1); toast.success(`规则清洗完成：处理 ${result.sessions_scanned} 个会话，${result.qa_pairs} 条问答，${result.clusters} 个问题簇。`) } catch (error) { toast.error(error instanceof Error ? error.message : '清洗失败，请重试。') } finally { setCleaning(false) } }
@@ -201,7 +219,7 @@ function Workspace() {
         {meta.error && view !== 'settings' && <div className="px-4 lg:px-6"><QueryState error={meta.error} retry={meta.retry} /></div>}
         {view !== 'cleaning' && view !== 'settings' && <div className={`flex shrink-0 flex-wrap items-center gap-2 px-4 lg:px-6 ${view === 'voc-chat' ? 'py-3' : ''}`}>
           <div className="mr-auto hidden items-center gap-2 text-sm text-muted-foreground xl:flex"><CalendarDays className="size-4" />{scopeLabel}</div>
-          <Select value={filters.group || 'all'} onValueChange={value => { setFilters(current => ({ ...current, group: value === 'all' ? '' : value })); setDrillFilters({}) }}><SelectTrigger size="sm" className="w-[156px]" aria-label="客户群筛选"><UsersRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客户群</SelectItem>{meta.data?.groups.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}</SelectContent></Select>
+          <Select value={activeGroup || 'all'} onValueChange={changeGroup}><SelectTrigger size="sm" className="w-[156px]" aria-label="客户群筛选"><UsersRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客户群</SelectItem>{activeGroup && !meta.data?.groups.includes(activeGroup) && <SelectItem value={activeGroup}>{activeGroup}</SelectItem>}{meta.data?.groups.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}</SelectContent></Select>
           <Select value={filters.staff || 'all'} onValueChange={value => { setFilters(current => ({ ...current, staff: value === 'all' ? '' : value })); setDrillFilters({}) }}><SelectTrigger size="sm" className="w-[134px]" aria-label="客服筛选"><ContactRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客服</SelectItem>{meta.data?.staff.map(staff => <SelectItem key={staff} value={staff}>{staff}</SelectItem>)}</SelectContent></Select>
           <Select value={range} onValueChange={value => { setRange(value); if (value !== 'custom') changeDays(Number(value)) }}><SelectTrigger size="sm" className="w-[128px]" aria-label="时间筛选"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="7">最近 7 天</SelectItem><SelectItem value="30">最近 30 天</SelectItem><SelectItem value="90">最近 90 天</SelectItem><SelectItem value="0">全部时间</SelectItem><SelectItem value="custom">自定义日期</SelectItem></SelectContent></Select>
           <Button variant="ghost" size="sm" onClick={reset}>重置</Button>{view !== 'voc-chat' && <><RefreshDataButton onRefresh={() => setRefreshKey(key => key + 1)} />{showQaExport && <Button variant="outline" size="sm" onClick={exportCsv} disabled={exporting} aria-busy={exporting}>{exporting ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowDownToLine className="size-3.5" />}<span className="hidden sm:inline">导出脱敏问答</span></Button>}</>}
@@ -219,11 +237,14 @@ function Workspace() {
         {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace key={linkedTopic ?? 'ranking'} initialTopic={linkedTopic} onCloseLinkedTopic={clearLinkedTopic} filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} onOpenChat={openChat} /></div>}
         {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
-        {listEnabled && <div className="px-4 lg:px-6"><QueryState loading={list.loading} error={list.error} retry={list.retry} empty={!list.data?.items.length}>
-          {view === 'clusters' && <div className="grid gap-4 lg:grid-cols-2">{(list.data?.items as ClusterItem[] | undefined)?.map(item => <Card key={item.cluster_id} className="min-w-0"><CardHeader className="min-w-0"><div className="mb-1 flex flex-wrap items-center justify-between gap-2"><Badge variant="outline">问题簇 {item.cluster_id}</Badge><span className="text-xs text-muted-foreground">{item.variants} 种问法</span></div><CardTitle className="min-w-0 whitespace-normal text-lg leading-relaxed [overflow-wrap:anywhere]">{item.question}</CardTitle><CardDescription>{item.count} 条问答 · {item.customers} 位客户 · {item.groups} 个客户群</CardDescription></CardHeader><CardContent className="min-w-0"><ul className="space-y-2 text-sm text-muted-foreground">{item.samples.map(sample => <li key={sample} className="flex min-w-0 gap-2"><MessageSquareText className="mt-0.5 size-4 shrink-0 opacity-50" /><span className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{sample}</span></li>)}</ul></CardContent><CardFooter className="flex-wrap justify-between gap-2"><Badge variant="secondary">{item.unanswered} 条未发现回复</Badge><Button variant="outline" size="sm" onClick={() => drill({ cluster: item.cluster_id })}>追溯问答<ArrowRight /></Button></CardFooter></Card>)}</div>}
-          {view === 'groups' && <Card className="min-w-0"><CardHeader><CardTitle>客户群咨询分布</CardTitle><CardDescription>按当前范围的有效问答量排序，点击客户群或高频问题下钻。</CardDescription></CardHeader><CardContent className="min-w-0"><div className="overflow-x-auto"><Table className="table-fixed min-w-[720px]"><TableHeader><TableRow><TableHead className="w-1/4">客户群</TableHead><TableHead className="w-24">有效问答</TableHead><TableHead className="w-24">客户数</TableHead><TableHead className="w-24">未发现回复</TableHead><TableHead>高频问题</TableHead></TableRow></TableHeader><TableBody>{(list.data?.items as GroupItem[] | undefined)?.map(item => <TableRow key={item.group_name}><TableCell className="min-w-0 whitespace-normal align-top"><Button variant="link" className="h-auto w-full min-w-0 justify-start whitespace-normal p-0 text-left text-foreground [overflow-wrap:anywhere]" onClick={() => drill({ group: item.group_name })}>{item.group_name}</Button></TableCell><TableCell>{numberText(item.total_questions)}</TableCell><TableCell>{numberText(item.customer_count)}</TableCell><TableCell>{numberText(item.unanswered)}</TableCell><TableCell className="min-w-0 whitespace-normal align-top">{item.top.slice(0, 3).map(question => <button key={question.cluster_id} className="block w-full min-w-0 whitespace-normal text-left text-sm [overflow-wrap:anywhere] hover:underline" onClick={() => drill({ group: item.group_name, cluster: question.cluster_id })}>{question.question} <span className="whitespace-nowrap text-muted-foreground">{question.count} 次</span></button>)}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card>}
-          {view === 'customers' && <Card><CardHeader><CardTitle>客户咨询记录</CardTitle><CardDescription>按问答量展示前 {list.data?.items.length ?? 0} 位客户，最多 500 位；同一客户的问答合并统计。</CardDescription></CardHeader><CardContent><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>客户</TableHead><TableHead>客户群</TableHead><TableHead>问答数</TableHead><TableHead>问题簇</TableHead><TableHead>未发现回复</TableHead><TableHead>最近咨询</TableHead></TableRow></TableHeader><TableBody>{(list.data?.items as CustomerItem[] | undefined)?.map(item => <TableRow key={item.customer_id}><TableCell><Button variant="link" className="h-auto p-0 text-foreground" onClick={() => drill({ customer: item.customer_id }, 'all', item.customer_name)}>{customerLabel(item.customer_name, item.customer_id)}</Button></TableCell><TableCell>{item.group_name}</TableCell><TableCell>{numberText(item.total_questions)}</TableCell><TableCell>{numberText(item.distinct_clusters)}</TableCell><TableCell>{numberText(item.unanswered)}</TableCell><TableCell className="text-muted-foreground">{item.last_seen || '时间未知'}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card>}
+        {view === 'clusters' && <div className="px-4 lg:px-6"><QueryState loading={list.loading} error={list.error} retry={list.retry} empty={!list.data?.items.length}>
+          <div className="grid gap-4 lg:grid-cols-2">{list.data?.items.map(item => <Card key={item.cluster_id} className="min-w-0"><CardHeader className="min-w-0"><div className="mb-1 flex flex-wrap items-center justify-between gap-2"><Badge variant="outline">问题簇 {item.cluster_id}</Badge><span className="text-xs text-muted-foreground">{item.variants} 种问法</span></div><CardTitle className="min-w-0 whitespace-normal text-lg leading-relaxed [overflow-wrap:anywhere]">{item.question}</CardTitle><CardDescription>{item.count} 条问答 · {item.customers} 位客户 · {item.groups} 个客户群</CardDescription></CardHeader><CardContent className="min-w-0"><ul className="space-y-2 text-sm text-muted-foreground">{item.samples.map(sample => <li key={sample} className="flex min-w-0 gap-2"><MessageSquareText className="mt-0.5 size-4 shrink-0 opacity-50" /><span className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{sample}</span></li>)}</ul></CardContent><CardFooter className="flex-wrap justify-between gap-2"><Badge variant="secondary">{item.unanswered} 条未发现回复</Badge><Button variant="outline" size="sm" onClick={() => drill({ cluster: item.cluster_id })}>追溯问答<ArrowRight /></Button></CardFooter></Card>)}</div>
         </QueryState></div>}
+        {(view === 'groups' || view === 'customers') && <div className="px-4 lg:px-6">
+          <AudienceWorkspace key={view} kind={view} filters={view === 'customers' ? audienceScope : sharedScope} refreshKey={refreshKey}
+            scopedGroup={view === 'customers' ? customerGroup : undefined} onClearScopedGroup={() => changeGroup('all')}
+            onViewCustomers={openGroupCustomers} onDrill={drillAudience} />
+        </div>}
         {view === 'cleaning' && <div className="space-y-6 px-4 lg:px-6"><div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><FileSpreadsheet className="mb-3 size-6" /><CardTitle>导入会话数据</CardTitle><CardDescription>上传 CSV / XLSX，先检查字段和脱敏样本，确认后写入业务库并执行规则清洗。</CardDescription></CardHeader><CardFooter className="gap-3"><Button onClick={openImport} disabled={busy}><Upload />选择文件并预览</Button><Button variant="outline" onClick={() => void exportTemplate()} disabled={downloadingTemplate} aria-busy={downloadingTemplate}>{downloadingTemplate && <LoaderCircle className="size-3.5 animate-spin" />}下载模板</Button></CardFooter></Card><Card><CardHeader><ListFilter className="mb-3 size-6" /><CardTitle>重新执行规则清洗</CardTitle><CardDescription>重新抽取业务库保留的会话，配对问答并重算问题簇。不会调用模型。</CardDescription></CardHeader><CardFooter><Button variant="outline" onClick={() => setCleanOpen(true)} disabled={busy || !status.data?.sessions}>{cleaning ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{cleaning ? '正在规则清洗' : '重新规则清洗'}</Button></CardFooter></Card></div>
           <QueryState loading={status.loading} error={status.error} retry={status.retry}><div className="grid gap-4 lg:grid-cols-[1fr_1.6fr]"><Card><CardHeader><CardTitle>处理状态</CardTitle><CardDescription>当前数据源全库统计，不受分析页筛选影响。</CardDescription></CardHeader><CardContent><dl className="space-y-3 text-sm">{[['原始会话', 'sessions'], ['有正文的会话', 'with_content'], ['已处理', 'processed'], ['待规则清洗', 'pending'], ['抽取到问答', 'with_pairs'], ['正文无有效问题', 'no_question'], ['缺少正文', 'no_content'], ['正文已归档', 'archived'], ['有效问答', 'total_pairs']].map(([label, key]) => <div key={key} className="flex justify-between gap-3"><dt className="text-muted-foreground">{label}</dt><dd className="tabular-nums">{numberText(status.data?.[key])}</dd></div>)}</dl></CardContent><CardFooter className="text-xs text-muted-foreground">规则版本 {status.data?.version || '—'}</CardFooter></Card><Card><CardHeader><CardTitle>最近处理记录</CardTitle><CardDescription>当前数据源的导入与规则清洗结果。</CardDescription></CardHeader><CardContent>{status.data?.tasks.length ? <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>时间</TableHead><TableHead>操作</TableHead><TableHead>摘要</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{status.data.tasks.map((task, index) => <TableRow key={`${task.created_at_text}-${index}`}><TableCell className="whitespace-nowrap">{task.created_at_text}</TableCell><TableCell className="whitespace-nowrap">{task.kind === 'local_import' ? '导入并清洗' : '规则清洗'}</TableCell><TableCell className="min-w-48 text-sm text-muted-foreground">{task.kind === 'local_import' ? `${String(task.result.filename || '文件')}：新增 ${task.result.new_sessions ?? 0} / 更新 ${task.result.updated_sessions ?? 0} 个会话；跳过错误行 ${task.result.skipped_rows ?? 0}` : `处理 ${task.result.sessions_scanned ?? 0} 个会话，${task.result.qa_pairs ?? 0} 条问答`}</TableCell><TableCell><Badge variant="outline">{task.status === 'success' || task.status === 'ok' ? '完成' : task.status || '已记录'}</Badge></TableCell></TableRow>)}</TableBody></Table></div> : <p className="py-8 text-center text-sm text-muted-foreground">暂无本地处理记录</p>}</CardContent></Card></div></QueryState>
         </div>}
