@@ -23,7 +23,7 @@ type Domain = { primary_intent: PrimaryIntent; fragment_role: 'request' | 'follo
 type Topic = { id: string; question: string; theme: string; primary_intent?: PrimaryIntent; consultation_count?: number; event_count: number; customer_count: number; session_count: number; mention_count: number; last_seen: string; samples: string[] }
 export type Knowledge = { id: string; topic_id: string; variant_id?: string; kind?: VocKnowledgeKind; diagnosis_status?: DiagnosisStatus; effect_status?: 'suggested' | 'verified'; applicability?: Ref[]; confirmed_cause?: Ref | null; conversation_verification?: VocConversationVerification; question: string; answer: string; scope: string; steps: string[]; cautions: string[]; reply_patterns: string[]; evidence_count: number; status: 'ready'; version: number; updated_at: string; evidence: Evidence[] }
 type Exception = { id: string; topic_id?: string; question: string; kind: string; reason: string; created_at: string }
-export type Evidence = { id: string; event_id: string; qa_id?: number; question: string; answer: string; question_quote?: string; customer_name?: string; staff_name?: string; asked_at?: string; session_id?: string; domain?: Domain; staff_source_verified: boolean; claims: { role: string; quote: string; start: number; end: number; source_refs: { message_id: string | number; start: number; end: number }[] }[] }
+export type Evidence = { id: string; event_id: string; qa_id?: number | string; question: string; answer: string; question_quote?: string; customer_name?: string; customer_id?: string; group_name?: string; staff_name?: string; asked_at?: string | number; asked_at_text?: string; session_id?: string; domain?: Domain; staff_source_verified: boolean; claims: { role: string; quote: string; start: number; end: number; source_refs: { message_id: string | number; start: number; end: number }[] }[] }
 type ResultList<T> = { items: T[]; total: number }
 type Job = { id: string; status: string; total: number; failed: number; skipped: number; processed: number; error: string; created_at: string; updated_at: string; usage_tokens: number }
 type Summary = { source_pairs: number; total_events: number; answered_events: number; topic_count: number; ready_knowledge: number; auto_reusable_knowledge?: number; exception_count: number; coverage: { processed_pairs: number; pending_pairs: number; answered_pairs: number }; semantics: { ready: boolean; model: string; error?: string }; latest_job: Job | null }
@@ -41,8 +41,9 @@ const exceptionLabels: Record<string, string> = {
   incomplete_answer: '答复不完整', incomplete_claim_coverage: '引文需要核对', condition_omitted: '缺少限定条件',
   number_conflict: '数值口径冲突', negation_conflict: '肯否口径冲突', policy_needs_support: '政策依据不足', answer_variation: '客服口径不一致',
 }
-function displayTime(value?: string): string {
-  if (!value) return ''
+function displayTime(input?: string | number): string {
+  if (!input) return ''
+  const value = String(input)
   if (!/^\d+$/.test(value)) return value
   const parsed = Number(value)
   const date = new Date(parsed < 100_000_000_000 ? parsed * 1000 : parsed)

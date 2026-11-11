@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .. import extract as E
 from ..app import get_db
 from ..clean.rules import mask_pii
 from ..config import Settings, settings
 from ..extract.concepts import concept_signature
-from ..extract.identity import HIDDEN_ROLES, sender_context
-from ..extract.text import clean_visible_text
+from ..extract.identity import HIDDEN_ROLES, SOURCE_IDENTITY_ROLE, sender_context
+from ..extract.text import _attachment, _structured, clean_visible_text
 from ..local import csv_bytes
+
+try:
+    _DETAIL_ZONE = ZoneInfo('Asia/Shanghai')
+except ZoneInfoNotFoundError:
+    _DETAIL_ZONE = timezone(timedelta(hours=8), 'Asia/Shanghai')
 
 
 def _day(ms: int) -> str:
@@ -201,21 +208,109 @@ def pairs(cfg: Settings | None = None, limit: int = 25, offset: int = 0,
             "items": rows[offset:offset + limit]}
 
 
+def _detail_time(value: Any) -> tuple[int, str]:
+    try:
+        stamp = int(value or 0)
+        if stamp <= 0:
+            return 0, '时间未知'
+        return stamp, datetime.fromtimestamp(stamp / 1000, _DETAIL_ZONE).strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError, OverflowError, OSError):
+        return 0, '时间未知'
+
+
+def _media_kinds(value: Any, depth: int = 0) -> list[str]:
+    if depth > 8:
+        return []
+    if isinstance(value, str):
+        try:
+            return _media_kinds(json.loads(value), depth + 1)
+        except (ValueError, RecursionError):
+            return []
+    if isinstance(value, list):
+        return [kind for item in value for kind in _media_kinds(item, depth + 1)]
+    if not isinstance(value, dict):
+        return []
+    keys = {str(key).lower(): item for key, item in value.items()}
+    if _attachment(value):
+        kind = str(keys.get('type') or keys.get('msgtype') or '').lower()
+        mime = str(keys.get('mimetype') or keys.get('mime') or keys.get('contenttype') or '').lower()
+        image = kind in ('image', 'picture', 'photo') or mime.startswith('image/')
+        if not kind and not mime:
+            suffixes = [str(keys.get(name) or '').lower().split('?', 1)[0].rsplit('.', 1)[-1]
+                        for name in ('ext', 'url', 'downloadurl', 'name', 'filename')]
+            image = any(ext in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'heic', 'avif') for ext in suffixes)
+        return ['image' if image else 'attachment']
+    return [kind for key in ('attach', 'attachment', 'attachments')
+            for kind in _media_kinds(keys.get(key), depth + 1)]
+
+
+def _detail_content(value: Any) -> str:
+    raw = str(value or '')
+    content = clean_visible_text(raw)
+    if content:
+        return mask_pii(content)
+    # Only a recognized, text-empty media object gets a placeholder. Ordinary
+    # customer JSON remains ordinary text; transport/identity rows stay hidden.
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        recognized, _text = _structured(payload)
+        kinds = _media_kinds(payload) if recognized else []
+        if kinds:
+            return '[图片]' if all(kind == 'image' for kind in kinds) else '[附件]'
+    except (ValueError, TypeError, RecursionError):
+        pass
+    return ''
+
+
+def _detail_origin(db: Any, raw: dict[str, Any]) -> tuple[set[str], set[str], bool]:
+    tables = {row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    question_ids, answer_ids = set(), set()
+    if 'qa_origin' in tables:
+        origin = db._conn.execute('SELECT * FROM qa_origin WHERE qa_id=? AND active=1', (raw['qa_id'],)).fetchone()
+        if origin is not None and origin['session_id'] == raw['session_id']:
+            try:
+                question, answer = json.loads(origin['question_message_ids']), json.loads(origin['answer_message_ids'])
+                if all(isinstance(items, list) and all(isinstance(item, str) and item for item in items) for items in (question, answer)):
+                    question_ids, answer_ids = set(question), set(answer)
+            except (ValueError, TypeError):
+                pass
+    partial = False
+    if 'push_sync_state' in tables:
+        state = db._conn.execute('SELECT status,archive_reason FROM push_sync_state WHERE session_id=?', (raw['session_id'],)).fetchone()
+        partial = bool(state and (state['archive_reason'] or state['status'] != 'completed'))
+    return question_ids, answer_ids, partial
+
+
 def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
-    raw = get_db(cfg).get_pair(qa_id)
+    db = get_db(cfg)
+    raw = db.get_pair(qa_id)
     if not raw:
         return None
     pair = _public(raw)
     if not pair["question"].strip():
         return None
-    messages = get_db(cfg).get_messages(raw["session_id"])
+    # Use the original session identity. The public pair's ID may be masked.
+    messages = db.get_messages(raw["session_id"])
+    question_ids, answer_ids, partial = _detail_origin(db, raw)
     visible_messages = []
     for message in sender_context(messages, raw["session_id"], str(raw.get("customer_id") or "")):
-        content = clean_visible_text(message["content"])
-        if message["role"] not in HIDDEN_ROLES and content:
-            visible_messages.append({"role": message["role"], "content": mask_pii(content),
-                                     "time": _time(int(message.get("ts") or 0))})
-    return {"pair": pair, "messages": visible_messages, "archived": not bool(messages)}
+        if message['role'] in HIDDEN_ROLES:
+            continue
+        content = _detail_content(message['content'])
+        if content:
+            stamp, display_time = _detail_time(message.get('ts'))
+            source_id = str(message.get('source_message_id') or '')
+            visible_messages.append({'role': message['role'], 'content': content, 'time': display_time,
+                                     'ts': stamp, 'source_message_id': source_id,
+                                     'is_question': message['role'] == 'user' and source_id in question_ids,
+                                     'is_answer': message['role'] == 'staff' and source_id in answer_ids})
+    archived = not bool(messages)
+    availability = 'archived' if archived else 'empty' if not visible_messages else 'partial' if partial else 'available'
+    return {'pair': pair, 'messages': visible_messages, 'archived': archived,
+            'message_count': len(visible_messages), 'time_zone': 'Asia/Shanghai', 'availability': availability,
+            'context_scope': 'session_customer' if any(m.get('role') == SOURCE_IDENTITY_ROLE for m in messages) else 'legacy_session'}
 
 
 def meta(cfg: Settings | None = None) -> dict[str, Any]:

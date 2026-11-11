@@ -4,11 +4,10 @@ import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { type ApiFilters, type GatewayConfig } from '@/lib/api'
 import { chatScopeKey, chatScopeLabel, citationFilters, getVocChatStore, type ChatCitation, type ChatMessage, type ChatThread, type VocChatStore } from '@/lib/voc-chat'
-import type { QAPair } from '@/lib/demo-data'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
-import { EvidenceList, KnowledgeContent, QueryPanel, type Evidence, type Knowledge, type TopicDetail } from './voc-next-workspace'
+import { VocSourceInspector } from './voc-source-inspector'
 import { LoadingMark, LoadingState } from './loading-state'
 
 type Selection = { threadId: string; citation: ChatCitation; message: ChatMessage; filters: ApiFilters }
@@ -19,23 +18,7 @@ const suggestions = [
 ]
 const timestamp = (value: number) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value)
 
-function SourceInspector({ selection, onOpenPair }: { selection: Selection; onOpenPair: (pair: QAPair) => void }) {
-  const { citation, filters } = selection
-  const topic = useApi<TopicDetail>('voc2/topic', { ...filters, id: citation.id }, 0, citation.kind === 'topic')
-  const knowledge = useApi<{ item: Knowledge }>('voc2/knowledge', { ...filters, id: citation.id }, 0, citation.kind === 'knowledge')
-  const event = useApi<{ event: Evidence }>('voc2/event', { ...filters, id: citation.id }, 0, citation.kind === 'event')
-  const query = citation.kind === 'topic' ? topic : citation.kind === 'knowledge' ? knowledge : event
-  return <div className="space-y-5">
-    <div className="space-y-2"><p className="text-xs text-muted-foreground">{citation.kind === 'topic' ? '问题主题' : citation.kind === 'knowledge' ? '知识与验证' : '会话事件'}</p><h3 className="text-base font-semibold leading-6">{citation.title}</h3><p className="text-xs leading-5 text-muted-foreground">查询范围：{chatScopeLabel(filters)}</p></div>
-    <QueryPanel hasData={query.data !== null} loading={query.loading} error={query.error} retry={query.retry}>
-      {citation.kind === 'topic' && topic.data && <><p className="text-sm leading-6 text-muted-foreground">代表问法：{topic.data.topic.question}</p><EvidenceList evidence={topic.data.events} onOpenPair={onOpenPair} /></>}
-      {citation.kind === 'knowledge' && knowledge.data && <KnowledgeContent item={knowledge.data.item} onOpenPair={onOpenPair} />}
-      {citation.kind === 'event' && event.data && <EvidenceList evidence={[event.data.event]} onOpenPair={onOpenPair} />}
-    </QueryPanel>
-  </div>
-}
-
-export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, onOpenPair, store = getVocChatStore() }: { filters: ApiFilters; refreshKey?: number; onScopeChange: (filters: ApiFilters) => void; onOpenPair: (pair: QAPair) => void; store?: VocChatStore }) {
+export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store = getVocChatStore() }: { filters: ApiFilters; refreshKey?: number; onScopeChange: (filters: ApiFilters) => void; store?: VocChatStore }) {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const scopeKey = chatScopeKey(filters)
   const thread = state.threads.find(t => t.id === state.activeId)
@@ -136,7 +119,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, onOpe
 
       </div></div>
     <Sheet open={historyOpen} onOpenChange={setHistoryOpen}><SheetContent side="left" className="w-72 gap-0 p-0 data-[state=open]:duration-250 data-[state=closed]:duration-200" onCloseAutoFocus={event => { if (deleting) event.preventDefault() }}><SheetHeader className="border-b p-4"><SheetTitle>对话记录</SheetTitle><SheetDescription>本窗口保留的最近对话</SheetDescription></SheetHeader>{history}</SheetContent></Sheet>
-    <Sheet open={!!selection} onOpenChange={open => { if (!open) setSelection(null) }}><SheetContent className="w-full overflow-y-auto sm:max-w-2xl data-[state=open]:duration-250 data-[state=closed]:duration-200"><SheetHeader><SheetTitle>回答依据</SheetTitle><SheetDescription>按这条回答的实际查询范围读取原始依据。</SheetDescription></SheetHeader><div className="px-4 pb-6">{selection && <SourceInspector selection={selection} onOpenPair={onOpenPair} />}</div></SheetContent></Sheet>
+    <Sheet open={!!selection} onOpenChange={open => { if (!open) setSelection(null) }}><SheetContent className="w-full overflow-y-auto sm:max-w-3xl data-[state=open]:duration-250 data-[state=closed]:duration-200"><SheetHeader><SheetTitle>回答依据</SheetTitle><SheetDescription>查看来源案例及对应会话记录。</SheetDescription></SheetHeader><div className="px-4 pb-6">{selection && <VocSourceInspector citation={selection.citation} filters={selection.filters} />}</div></SheetContent></Sheet>
     <AlertDialog open={!!deleting} onOpenChange={open => { if (!open) setDeleting(null) }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>删除本窗口对话？</AlertDialogTitle><AlertDialogDescription>将删除本窗口保存的“{deleting?.title}”。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={() => { if (deleting) { const next = store.remove(deleting.id); onScopeChange(next.filters) } setDeleting(null) }}>删除对话</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </section>
 }

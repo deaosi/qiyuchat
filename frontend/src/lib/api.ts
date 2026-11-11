@@ -304,7 +304,14 @@ function validateGetResponse(name: string, data: unknown): void {
       case 'detail':
         valid = isPair(data.pair) && typeof data.archived === 'boolean'
           && Array.isArray(data.messages) && data.messages.every(message => isRecord(message)
-            && typeof message.role === 'string' && typeof message.content === 'string' && typeof message.time === 'string')
+            && typeof message.role === 'string' && typeof message.content === 'string' && typeof message.time === 'string'
+            && (message.ts === undefined || isCount(message.ts))
+            && (message.source_message_id === undefined || message.source_message_id === null || typeof message.source_message_id === 'string' || typeof message.source_message_id === 'number')
+            && (message.is_question === undefined || typeof message.is_question === 'boolean')
+            && (message.is_answer === undefined || typeof message.is_answer === 'boolean'))
+          && (data.message_count === undefined || isCount(data.message_count) && data.message_count === (data.messages as unknown[]).length)
+          && (data.availability === undefined || ['available', 'partial', 'archived', 'empty'].includes(String(data.availability)))
+          && (data.context_scope === undefined || ['session_customer', 'legacy_session'].includes(String(data.context_scope)))
         break
       case 'status':
         valid = hasCounts(data, ['sessions', 'total_pairs']) && Array.isArray(data.tasks)

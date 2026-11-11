@@ -164,7 +164,7 @@ class TestHistoricalProjection(LocalFixture):
         self.db.upsert_messages(row['session_id'], messages)
         raw_before = self.db.get_messages(row['session_id'])
         detail = api.detail(self.cfg, row['qa_id'])
-        self.assertEqual([m['content'] for m in detail['messages']], ['这个型号怎么安装？', '按说明固定底座'])
+        self.assertEqual([m['content'] for m in detail['messages']], ['这个型号怎么安装？', '[图片]', '按说明固定底座'])
         self.assertEqual(detail['pair']['q_norm'], normalize('这个型号怎么安装？'))
         self.assertEqual(self.db.get_messages(row['session_id']), raw_before)
 
