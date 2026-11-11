@@ -3,7 +3,7 @@ import { ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, CircleAlert, LoaderC
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
-import { apiPost, normalizePair, type ApiFilters, type VocConversationVerification, type VocKnowledgeKind } from '@/lib/api'
+import { apiPost, normalizePair, type ApiFilters, type VocConversationVerification, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,7 +20,7 @@ type DiagnosisStatus = 'reported' | 'pending' | 'config_cause_confirmed' | 'plat
 type Ref = { source: 'question' | 'answer'; quote: string; start: number; end: number; role: string; alignment: 'exact' }
 type Domain = { primary_intent: PrimaryIntent; fragment_role: 'request' | 'follow_up' | 'reproduction_context'; platforms: Ref[]; modules: Ref[]; merchant_goal: Ref | null; expected: Ref | null; actual: Ref | null; reproduction_context: Ref[]; prerequisites: Ref[]; operation_path: Ref[]; diagnosis: { status: DiagnosisStatus; cause_code: string; cause: Ref | null; evidence: Ref[] }; actions: { method_code: string; instruction: Ref; effect_status: 'suggested' | 'verified'; verification: Ref | null }[]; tags: string[] }
 type Topic = { id: string; question: string; theme: string; primary_intent?: PrimaryIntent; consultation_count?: number; event_count: number; customer_count: number; session_count: number; mention_count: number; last_seen: string; samples: string[] }
-export type Knowledge = { id: string; topic_id: string; variant_id?: string; kind?: VocKnowledgeKind; diagnosis_status?: DiagnosisStatus; effect_status?: 'suggested' | 'verified'; applicability?: Ref[]; confirmed_cause?: Ref | null; conversation_verification?: VocConversationVerification; question: string; answer: string; scope: string; steps: string[]; cautions: string[]; reply_patterns: string[]; evidence_count: number; status: 'ready'; version: number; updated_at: string; evidence: Evidence[] }
+export type Knowledge = { id: string; topic_id: string; variant_id?: string; kind?: VocKnowledgeKind; diagnosis_status?: DiagnosisStatus; effect_status?: 'suggested' | 'verified'; applicability?: Ref[]; confirmed_cause?: Ref | null; conversation_verification?: VocConversationVerification; knowledge_reuse?: VocKnowledgeReuse; question: string; answer: string; scope: string; steps: string[]; cautions: string[]; reply_patterns: string[]; evidence_count: number; status: 'ready'; version: number; updated_at: string; evidence: Evidence[] }
 export type Evidence = { id: string; event_id: string; qa_id?: number | string; question: string; answer: string; question_quote?: string; customer_name?: string; customer_id?: string; group_name?: string; staff_name?: string; asked_at?: string | number; asked_at_text?: string; session_id?: string; domain?: Domain; staff_source_verified: boolean; claims: { role: string; quote: string; start: number; end: number; source_refs: { message_id: string | number; start: number; end: number }[] }[] }
 type ResultList<T> = { items: T[]; total: number }
 type Job = { id: string; status: string; total: number; failed: number; skipped: number; processed: number; error: string; created_at: string; updated_at: string; usage_tokens: number }
@@ -33,7 +33,16 @@ const active = (job: Job | null | undefined) => job?.status === 'queued' || job?
 const labels: Record<string, string> = { queued: '排队中', running: '整理中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '已跳过' }
 const intentLabels: Record<PrimaryIntent, string> = { configuration_guidance: '场景配置与使用指导', functional_anomaly: '功能异常与排障', unclear: '待识别背景' }
 const diagnosisLabels: Record<DiagnosisStatus, string> = { reported: '商家报告', pending: '待定位', config_cause_confirmed: '配置原因已确认', platform_limit_confirmed: '平台约束已确认', defect_confirmed: '缺陷已确认', not_applicable: '不适用' }
-const knowledgeLabels: Record<VocKnowledgeKind, string> = { configuration_guide: '配置指导', troubleshooting_advice: '排查建议（效果未验证）', verified_workaround: '已验证绕行', capability_fact: '功能说明' }
+const knowledgeLabels: Record<VocKnowledgeKind, string> = { configuration_guide: '配置指引', troubleshooting_advice: '排查建议', verified_workaround: '绕行方案', capability_fact: '功能说明' }
+const reuseLabels: Record<VocKnowledgeReuse['level'], string> = { verified: '操作效果已验证', guidance: '来源已核验', reference: '来源记录' }
+
+function knowledgeReuseLevel(item: Knowledge): VocKnowledgeReuse['level'] {
+  if (item.knowledge_reuse) return item.knowledge_reuse.level
+  const closure = item.conversation_verification
+  return closure?.auto_reusable && closure.status === 'accepted' && closure.acceptance === 'resolved'
+    && closure.effect === 'customer_reported_success' ? 'verified' : 'reference'
+}
+
 function displayTime(input?: string | number): string {
   if (!input) return ''
   const value = String(input)
@@ -88,17 +97,23 @@ export function EvidenceList({ evidence, onOpenPair }: { evidence: Evidence[]; o
 }
 
 export function KnowledgeContent({ item, onOpenPair }: { item: Knowledge; onOpenPair: (pair: QAPair) => void }) {
-  const kind = item.kind === 'verified_workaround' && item.effect_status !== 'verified'
-    ? '排查建议（效果未验证）' : item.kind ? knowledgeLabels[item.kind] : '类型待识别'
+  const kind = item.kind ? knowledgeLabels[item.kind] : '类型待识别'
   const confirmed = item.diagnosis_status && ['config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed'].includes(item.diagnosis_status)
   const closure = item.conversation_verification
-  const coverageCount = (key: string) => count(typeof closure?.coverage[key] === 'number' ? closure.coverage[key] : undefined)
-  const acceptance = closure?.auto_reusable
-    ? closure.acceptance === 'resolved' ? '客户反馈操作成功' : closure.acceptance === 'understood' ? '客户已接受解答' : '多例闭环支持'
-    : closure?.status === 'negative' ? '后续仍有疑问' : closure?.status === 'weak' ? '闭环证据待积累' : '闭环证据不足'
+  const feedbackEvidence = item.knowledge_reuse?.evidence ?? closure?.evidence
+  const level = knowledgeReuseLevel(item)
+  const guidanceDescription = item.kind === 'configuration_guide'
+    ? '客服原话和适用条件已核验，可按所列条件使用。'
+    : '客服原话和适用条件已核验，可用于排查。操作效果待验证。'
+  const reuseDescription = level === 'verified' ? '客户明确反馈操作成功，可按所列条件复用。'
+    : level === 'guidance' ? guidanceDescription : '保留此记录供查阅原始会话。'
   return <div className="space-y-3">
-    <div className="flex flex-wrap items-center gap-2"><Badge variant="secondary" className="font-normal">{kind}</Badge><Badge variant={closure?.auto_reusable ? 'default' : 'outline'} className="font-normal">{acceptance}</Badge>{item.diagnosis_status && item.diagnosis_status !== 'not_applicable' && <Badge variant="outline" className="font-normal">{diagnosisLabels[item.diagnosis_status] || '待核对'}</Badge>}</div>
-    <div className="rounded-lg border bg-muted/20 p-3 text-sm"><p>{closure?.auto_reusable ? '会话验证通过，按所列条件可直接复用。' : '客服原话有依据；尚不能作为客户已认可的最终答案。'}</p>{closure && <p className="mt-1 text-xs text-muted-foreground">完整来源 {coverageCount('complete_sources')} / {coverageCount('sources')} · 明确接受 {coverageCount('accepted_sources')} · 独立弱闭环 {coverageCount('independent_weak_supports')}（阈值 {coverageCount('weak_threshold')}）</p>}{closure?.acceptance === 'understood' && <p className="mt-1 text-muted-foreground">客户接受了解释，操作效果尚未据此确认。</p>}{closure?.evidence.map((ref, index) => <p key={index} className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">“{ref.quote}” · {ref.role === 'user' || ref.role === 'merchant' ? '客户反馈' : '会话证据'}{ref.ts ? ` · ${displayTime(String(ref.ts))}` : ''}{ref.message_id ? ` · 消息 ${ref.message_id}` : ''}</p>)}</div>
+    <div className="flex flex-wrap items-center gap-2"><Badge variant="secondary" className="font-normal">{kind}</Badge><Badge variant={level === 'verified' ? 'default' : 'outline'} className="font-normal">{reuseLabels[level]}</Badge>{item.diagnosis_status && item.diagnosis_status !== 'not_applicable' && <Badge variant="outline" className="font-normal">{diagnosisLabels[item.diagnosis_status] || '待核对'}</Badge>}</div>
+    <div className="rounded-lg border bg-muted/20 p-3 text-sm">
+      <p>{reuseDescription}</p>
+      {closure?.acceptance === 'understood' && <p className="mt-1 text-muted-foreground">客户已接受解释。</p>}
+      {feedbackEvidence?.map((ref, index) => <p key={index} className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">“{ref.quote}” · {ref.role === 'user' || ref.role === 'merchant' ? '客户反馈' : '会话证据'}{ref.ts ? ` · ${displayTime(ref.ts)}` : ''}{ref.message_id ? ` · 消息 ${ref.message_id}` : ''}</p>)}
+    </div>
     <h3 className="font-medium">{item.question}</h3><p className="whitespace-pre-wrap break-words text-sm">{item.answer}</p>
     {item.steps.length > 0 && <div className="text-sm"><span className="font-medium">步骤</span><ol className="mt-1 list-inside list-decimal space-y-1">{item.steps.map((step, i) => <li key={i}>{step}</li>)}</ol></div>}
     {item.scope && <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">适用范围：{item.scope}</p>}
@@ -255,16 +270,19 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
 
 export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: WorkspaceProps) {
   const [revision, setRevision] = useState(0)
+  const [referencesOpen, setReferencesOpen] = useState(false)
   const key = refreshKey + revision
   const knowledge = useApi<ResultList<Knowledge>>('voc2/knowledge', filters, key)
   const refreshResults = useCallback(() => setRevision(value => value + 1), [])
   useBackgroundRefresh(refreshResults, false, knowledge.loading || knowledge.refreshing, key)
-  const reusableItems = knowledge.data?.items.filter(item => item.status === 'ready' && item.conversation_verification?.auto_reusable === true) ?? []
+  const readyItems = knowledge.data?.items.filter(item => item.status === 'ready') ?? []
+  const reusableItems = readyItems.filter(item => knowledgeReuseLevel(item) !== 'reference')
+  const referenceItems = readyItems.filter(item => item.knowledge_reuse?.level === 'reference')
 
   return <Card>
     <CardHeader>
       <CardTitle>可复用答案</CardTitle>
-      <CardDescription>从人工客服回复中自动沉淀，按原会话中的适用条件和客户反馈验证。</CardDescription>
+      <CardDescription>自动核验客服原话、适用条件和操作反馈，沉淀配置指引与处理方法。</CardDescription>
     </CardHeader>
     <CardContent>
       <QueryPanel hasData={knowledge.data !== null} loading={knowledge.loading} error={knowledge.error} retry={knowledge.retry}>
@@ -273,8 +291,14 @@ export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: W
         )}</div> : <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground">
           <BookOpen aria-hidden="true" className="mb-1 size-5" />
           <p className="font-medium text-foreground">当前范围暂无可复用答案</p>
-          <p>会话中的客服回复和后续反馈积累到足够证据后，答案将自动出现。</p>
+          <p>有足够证据的指引和处理方法会自动出现。</p>
         </div>}
+        {referenceItems.length > 0 && <details className="mt-4 rounded-lg border p-4" open={referencesOpen} onToggle={event => setReferencesOpen(event.currentTarget.open)}>
+          <summary className="w-fit cursor-pointer text-sm font-medium">来源记录（{count(referenceItems.length)}）</summary>
+          {referencesOpen && <div className="mt-4 grid gap-4 lg:grid-cols-2">{referenceItems.map(item =>
+            <article key={item.id} className="min-w-0 rounded-lg border p-4"><KnowledgeContent item={item} onOpenPair={onOpenPair} /></article>
+          )}</div>}
+        </details>}
       </QueryPanel>
     </CardContent>
   </Card>

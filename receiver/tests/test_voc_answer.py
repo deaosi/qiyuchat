@@ -17,10 +17,15 @@ class EvidenceBoundComposition(unittest.TestCase):
         self.scope = {'label': '本轮筛选范围'}
 
     def source(self, *, scope='仅适用于子账号。', answer_text='如果使用子账号，请检查商品权限。',
-               kind='knowledge', knowledge_kind='troubleshooting_advice', acceptance='unknown', auto=False):
+               kind='knowledge', knowledge_kind='troubleshooting_advice', acceptance='unknown', auto=False,
+               effect='not_established', reuse=None, evidence=None):
         row = {'kind': knowledge_kind, 'answer': answer_text, 'scope': scope,
                'conversation_verification': {'status': 'accepted' if auto else 'unknown',
-                   'acceptance': acceptance, 'effect': 'not_established', 'auto_reusable': auto}}
+                   'acceptance': acceptance, 'effect': effect, 'auto_reusable': auto}}
+        if reuse is not None:
+            row['knowledge_reuse'] = {'level': reuse, 'reason_codes': []}
+            if evidence is not None:
+                row['knowledge_reuse']['evidence'] = evidence
         return answer.material(kind, 'source-1', answer_text, answer_text,
                                citation={'kind': 'knowledge', 'id': 'private-source-id'}, row=row)
 
@@ -132,6 +137,78 @@ class EvidenceBoundComposition(unittest.TestCase):
     def test_understanding_feedback_cannot_be_promoted_to_operational_success(self):
         source = self.source(scope='', acceptance='understood', auto=True)
         result, model = self.compose(self.draft('客户已经操作成功。'), sources=[source])
+        self.assert_rejected(result)
+        self.assertEqual(model.call_count, 1)
+
+    def test_guidance_with_silent_feedback_can_be_reused_with_scope(self):
+        source = self.source(reuse='guidance')
+        text = '仅适用于子账号。可以检查商品权限，此指引可按条件复用。'
+        (composed, _, warning), model = self.compose(self.draft(text), sources=[source])
+        self.assertEqual(composed['answer'], text)
+        self.assertFalse(warning)
+        self.assertEqual(model.call_args_list[0].args[2]['sources'][0]['knowledge_reuse'], {'level': 'guidance'})
+
+    def test_effect_claim_requires_both_current_verified_reuse_and_reported_success(self):
+        for level, acceptance, effect in (
+            ('guidance', 'resolved', 'customer_reported_success'),
+            ('reference', 'resolved', 'customer_reported_success'),
+            ('verified', 'understood', 'not_established'),
+            ('verified', 'resolved', 'not_established'),
+        ):
+            with self.subTest(level=level, acceptance=acceptance, effect=effect):
+                source = self.source(scope='', reuse=level, acceptance=acceptance, auto=True, effect=effect)
+                result, model = self.compose(self.draft('来源案例中的设置已经生效。'), sources=[source])
+                self.assert_rejected(result)
+                self.assertEqual(model.call_count, 1)
+        source = self.source(scope='', acceptance='resolved', auto=True, effect='customer_reported_success')
+        text = '来源案例中的设置已经生效。'
+        (composed, _, warning), _ = self.compose(self.draft(text), sources=[source])
+        self.assertEqual(composed['answer'], text)
+        self.assertFalse(warning)
+
+    def effect_feedback(self):
+        quote = '我已经打开商品权限，重新测试后场景已经生效。'
+        return {'quote': quote, 'role': 'merchant', 'kind': 'resolved', 'message_id': 'synthetic-message', 'ts': 123,
+                'qa_id': 5, 'span_coordinate': 'clean_visible_text',
+                'source_refs': [{'message_id': 'synthetic-message', 'start': 0, 'end': len(quote)}]}
+
+    def test_exact_reuse_feedback_supports_effect_even_when_legacy_closure_unknown(self):
+        feedback = self.effect_feedback()
+        source = self.source(scope='', reuse='verified', evidence=[feedback])
+        text = '来源案例中，客户开启权限后复测，设置已经生效。'
+        (composed, _, warning), model = self.compose(self.draft(text, quote=feedback['quote']), sources=[source])
+        self.assertEqual(composed['answer'], text)
+        self.assertFalse(warning)
+        material = model.call_args_list[0].args[2]['sources'][0]
+        self.assertEqual(material['verification']['status'], 'unknown')
+        self.assertEqual(material['knowledge_reuse']['level'], 'verified')
+        self.assertIn(feedback['quote'], material['proof'])
+        self.assertNotIn('synthetic-message', str(material))
+
+    def test_operational_claim_must_cite_complete_feedback_when_available(self):
+        feedback = self.effect_feedback()
+        source = self.source(scope='', reuse='verified', evidence=[feedback])
+        for quote in ('如果使用子账号，请检查商品权限。', '场景已经生效。'):
+            with self.subTest(quote=quote):
+                result, model = self.compose(self.draft('来源案例中的设置已经生效。', quote=quote), sources=[source])
+                self.assert_rejected(result)
+                self.assertEqual(model.call_count, 1)
+
+    def test_missing_or_malformed_explicit_feedback_never_falls_back_to_legacy_success(self):
+        feedback = self.effect_feedback()
+        for evidence in (None, [], [{**feedback, 'role': 'staff'}], [{**feedback, 'kind': 'understood'}],
+                         [{**feedback, 'source_refs': [{**feedback['source_refs'][0], 'end': 0}]}]):
+            with self.subTest(evidence=evidence):
+                source = self.source(scope='', reuse='verified', evidence=evidence, acceptance='resolved',
+                                     auto=True, effect='customer_reported_success')
+                self.assertEqual(source['knowledge_reuse']['level'], 'reference')
+                result, model = self.compose(self.draft('来源案例中的设置已经生效。'), sources=[source])
+                self.assert_rejected(result)
+                self.assertEqual(model.call_count, 1)
+
+    def test_legacy_weak_acknowledgements_cannot_be_labeled_reusable(self):
+        source = self.source(scope='', acceptance='weak_closure', auto=True)
+        result, model = self.compose(self.draft('这条处理方法可直接复用。'), sources=[source])
         self.assert_rejected(result)
         self.assertEqual(model.call_count, 1)
 

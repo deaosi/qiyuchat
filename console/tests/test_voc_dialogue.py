@@ -47,7 +47,49 @@ class EvidenceDialogue(unittest.TestCase):
         self.assertEqual(result['usage_tokens'], 7)
         self.assertEqual(model.call_args_list[0].args[0].model_main, 'any-provider-model')
         self.assertEqual(model.call_args_list[1].args[1], W.VERIFY)
-        self.assertIn('尚未通过会话闭环验证', result['answer'])
+        self.assertIn('历史个案', result['answer'])
+
+    def test_silent_guidance_answers_as_instructions_with_citation(self):
+        row = {**self.knowledge(), 'kind': 'configuration_guide',
+               'knowledge_reuse': {'level': 'guidance', 'reason_codes': []}}
+        self.engine.search.return_value['knowledge'] = [row]
+        self.engine.knowledge.return_value = {'knowledge': row}
+        draft = {'paragraphs': [{'text': '使用子账号时，先开启商品权限，再重新测试当前场景。',
+                 'references': [{'id': 'S1', 'quote': row['answer']}]}], 'follow_up': ''}
+        with patch.object(A, 'complete_json', return_value={'data': {'ids': ['k1']}, 'usage_tokens': 1}), \
+             patch.object(A, '_plan', return_value=(self.plan(), 1)), \
+             patch.object(W, 'complete_json', side_effect=[{'data': draft, 'usage_tokens': 2},
+                  {'data': {'supported': True, 'unsupported': []}, 'usage_tokens': 3}]):
+            result = A.answer(self.cfg, {}, {'message': '子账号下要怎么配置？'})
+        self.assertEqual(result['answer_mode'], 'grounded_model')
+        self.assertEqual(result['answer'], draft['paragraphs'][0]['text'])
+        self.assertEqual(result['citations'][0]['id'], 'k1')
+        self.assertEqual(result['warnings'], [])
+
+    def test_changed_reuse_level_invalidates_inflight_answer(self):
+        row = {**self.knowledge(), 'knowledge_reuse': {'level': 'guidance', 'reason_codes': []}}
+        reference = {**row, 'knowledge_reuse': {'level': 'reference', 'reason_codes': ['conflicting_evidence']}}
+        self.engine.search.return_value['knowledge'] = [row]
+        self.engine.knowledge.side_effect = [{'knowledge': row}, {'knowledge': row}, {'knowledge': reference}]
+        with patch.object(A, 'complete_json', return_value={'data': {'ids': ['k1']}, 'usage_tokens': 1}), \
+             patch.object(A, '_plan', return_value=(self.plan(), 1)), \
+             patch.object(W, 'compose', return_value=({'answer': '旧指引', 'used_ids': {'S1'}}, 2, '')):
+            result = A.answer(self.cfg, {}, {'message': '子账号下要怎么配置？'})
+        self.assertEqual(result['answer_mode'], 'insufficient')
+        self.assertEqual(result['citations'], [])
+        self.assertNotIn('旧指引', result['answer'])
+
+    def test_new_knowledge_lists_current_reusable_items(self):
+        guidance = {**self.knowledge(), 'knowledge_reuse': {'level': 'guidance', 'reason_codes': []}}
+        reference = {**self.knowledge(), 'id': 'k2', 'updated_at': '2026-11-11T15:00:00',
+                     'knowledge_reuse': {'level': 'reference', 'reason_codes': []}}
+        self.engine.knowledge.side_effect = [
+            {'items': [guidance, reference]}, {'knowledge': guidance}, {'knowledge': guidance}, {'knowledge': guidance},
+        ]
+        plan = self.plan('new_knowledge', query='')
+        with patch.object(A, '_plan', return_value=(plan, 1)), patch.object(W, 'compose', return_value=(None, 0, '来源原文')):
+            result = A.answer(self.cfg, {}, {'message': '最近新增了哪些可复用知识？'})
+        self.assertEqual([item['id'] for item in result['citations']], ['k1'])
 
     def test_human_case_can_answer_with_explicit_case_boundary_before_ready_knowledge(self):
         row = self.staff_case()
@@ -109,12 +151,16 @@ class EvidenceDialogue(unittest.TestCase):
         self.assertEqual([r['id'] for r in result['citations']], ['t1'])
 
     def test_topic_coverage_counts_complete_knowledge_not_global_source_totals(self):
-        good = {**self.knowledge(), 'conversation_verification': {'auto_reusable': True}}
-        self.engine.relevant_items.return_value = [good, {**good, 'id': 'k2'}]
-        self.engine.knowledge.return_value = {'items': [good, {**good, 'id': 'k2'}, {**good, 'id': 'other', 'topic_id': 't2'}]}
+        good = {**self.knowledge(), 'knowledge_reuse': {'level': 'guidance', 'reason_codes': []}}
+        reference = {**self.knowledge(), 'id': 'k2', 'knowledge_reuse': {'level': 'reference', 'reason_codes': []}}
+        self.engine.relevant_items.return_value = [good, reference]
+        self.engine.knowledge.return_value = {'items': [good, reference, {**good, 'id': 'other', 'topic_id': 't2'}]}
         with patch.object(A, '_plan', return_value=(self.plan('coverage'), 1)), patch.object(W, 'compose', return_value=(None, 0, '原文统计')):
             result = A.answer(self.cfg, {}, {'message': '子账号相关验证答案多少条？'})
         self.assertIn('知识共 2 条', result['answer'])
+        self.assertIn('可直接复用 1 条', result['answer'])
+        self.assertIn('效果验证通过 0 条', result['answer'])
+        self.assertIn('来源已核验指引 1 条', result['answer'])
         self.assertNotIn('来源问答 100', result['answer'])
 
     def test_statistics_remain_program_output_after_model_explanation(self):

@@ -381,7 +381,7 @@ def _latest_assets(cfg: Settings, *, _current: dict | None = None, _plans: list[
 
 def _with_conversation_verification(cfg: Settings, items: list[dict], rows: list[dict], *, events: list[dict] | None = None) -> list[dict]:
     # Dynamic read-only certificates do not change extraction/compile identity.
-    from . import voc_outcome
+    from . import voc_knowledge_reuse, voc_outcome
     all_events = events if events is not None else rows
     by_event = {row["id"]: row for row in all_events}
     result = []
@@ -396,7 +396,8 @@ def _with_conversation_verification(cfg: Settings, items: list[dict], rows: list
             certificate["coverage"]["sources"] += missing
             certificate["coverage"]["incomplete_sources"] += missing
             certificate["fingerprint"] = assets.digest([certificate["fingerprint"], "incomplete_branch_citations", item["evidence"]])
-        result.append({**item, "conversation_verification": certificate})
+        reuse = voc_knowledge_reuse.evaluate(cfg, item, cited, certificate, all_events)
+        result.append({**item, "conversation_verification": certificate, "knowledge_reuse": reuse})
     return result
 
 
@@ -501,9 +502,11 @@ def summary(cfg: Settings, filters: dict) -> dict:
     know = [item for item in latest if item["status"] == "ready" and not item["stale"] and item["topic_id"] in visible
             and any(citation["event_id"] in event_ids for citation in item["evidence"])]
     know = _with_conversation_verification(cfg, know, events, events=all_events)
+    reuse_counts = Counter(item["knowledge_reuse"]["level"] for item in know)
     problems = _exception_items(cfg, source, visible, {item["fingerprint"]: item for item in latest}, filters=filters, event_ids=event_ids)
     return {"total_events": len(events), "topic_count": len(topic_items),
-            "ready_knowledge": len(know), "auto_reusable_knowledge": sum(item["conversation_verification"]["auto_reusable"] for item in know),
+            "ready_knowledge": len(know), "auto_reusable_knowledge": reuse_counts["verified"] + reuse_counts["guidance"],
+            "verified_effect_knowledge": reuse_counts["verified"], "guidance_knowledge": reuse_counts["guidance"],
             "exception_count": len(problems), "needs_compile": needs_compile,
             "answered_events": sum(bool(row["source"]["answer"]) for row in events), "source_pairs": len(source),
             "consultation_count": len({variants.consultation_key(row) for row in events}),

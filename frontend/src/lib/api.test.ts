@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apiPost } from './api'
+import { apiGet, apiPost } from './api'
 import { requestActivity } from './request-activity'
 
 const filters = { source: 'local', id: '21' } as const
@@ -13,6 +13,33 @@ function json(data: unknown): Response {
 }
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe('VOC knowledge reuse response', () => {
+  const item = {
+    id: 'knowledge-1', topic_id: 'topic-1', question: '如何启用规则？', answer: '在后台启用规则。', scope: '',
+    steps: [], reply_patterns: [], cautions: [], evidence: [], status: 'ready',
+  }
+
+  it.each([
+    undefined, { level: 'guidance', reason_codes: ['source_confirmed'] },
+    { level: 'verified', reason_codes: [], evidence: [{ quote: '打开后成功触发', role: 'merchant', message_id: 13, ts: 1794358801000 }] },
+  ])('accepts optional reuse metadata %#', async knowledge_reuse => {
+    const data = { items: [{ ...item, knowledge_reuse }], total: 1 }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(data)))
+    await expect(apiGet('voc2/knowledge', filters)).resolves.toEqual(JSON.parse(JSON.stringify(data)))
+  })
+
+  it.each([
+    null, { level: 'approved', reason_codes: [] }, { level: ['guidance'], reason_codes: [] },
+    { level: 'reference', reason_codes: [1] }, { level: 'verified' },
+    { level: 'verified', reason_codes: [], evidence: {} },
+    { level: 'verified', reason_codes: [], evidence: [{ quote: true, role: 'merchant' }] },
+    { level: 'verified', reason_codes: [], evidence: [{ quote: '成功', role: 'merchant', ts: false }] },
+  ])('rejects malformed reuse metadata %#', async knowledge_reuse => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ item: { ...item, knowledge_reuse } })))
+    await expect(apiGet('voc2/knowledge', filters)).rejects.toMatchObject({ status: 502 })
+  })
+})
 
 describe('official reply lookup transport', () => {
   it('uses the existing POST authorization headers without registering foreground activity', async () => {

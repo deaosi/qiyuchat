@@ -70,7 +70,7 @@ describe('VOC navigation', () => {
     expect(detail.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
   })
 
-  it('keeps all sidebar icons distinct and routes the knowledge entry to verified answers only', () => {
+  it('keeps all sidebar icons distinct and shows only explicitly successful legacy answers for reuse', () => {
     window.history.replaceState(null, '', '#questions')
     const { container } = render(<QiyuApp />)
     const menuButtons = [...container.querySelectorAll('[data-sidebar="menu-button"]')]
@@ -83,12 +83,65 @@ describe('VOC navigation', () => {
     expect(window.location.hash).toBe('#voc-next')
     expect(screen.getByRole('heading', { name: '沉淀知识库' })).toBeTruthy()
     expect(screen.getByText(reusable.question)).toBeTruthy()
+    expect(screen.getByText(/现在触发了.*客户反馈/)).toBeTruthy()
     expect(screen.getByText(reusable.scope, { exact: false })).toBeTruthy()
     expect(screen.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
     expect(screen.queryByText(sourceOnly.question)).toBeNull()
     expect(screen.queryByText('没有验证结果的知识')).toBeNull()
     expect(screen.queryByText('咨询主题排行')).toBeNull()
     expect(screen.queryByRole('button', { name: /整理当前范围|确认|审核/ })).toBeNull()
+  })
+
+  it('shows the verified operation feedback even when the general closure stays unknown', () => {
+    knowledge = [{
+      ...sourceOnly,
+      knowledge_reuse: { level: 'verified', reason_codes: [], evidence: [{ role: 'merchant', quote: '我重新保存以后，场景就触发了。', message_id: 51 }] },
+    }]
+    window.history.replaceState(null, '', '#voc-next')
+    render(<QiyuApp />)
+
+    expect(screen.getByText('操作效果已验证')).toBeTruthy()
+    expect(screen.getByText(/我重新保存以后，场景就触发了。.*客户反馈.*消息 51/)).toBeTruthy()
+    expect(screen.queryByText(/现在触发了.*客户反馈/)).toBeNull()
+  })
+
+  it('automatically shows qualified guidance and keeps reference records behind a disclosure', async () => {
+    const guidance: Knowledge = {
+      ...sourceOnly, id: 'guidance-1', question: '如何配置规则优先级？',
+      knowledge_reuse: { level: 'guidance', reason_codes: [] }, conversation_verification: undefined,
+    }
+    const advice: Knowledge = {
+      ...guidance, id: 'guidance-2', kind: 'troubleshooting_advice', question: '如何检查场景是否生效？',
+      conversation_verification: { ...verified, acceptance: 'understood', effect: 'not_established', evidence: [] },
+    }
+    const reference: Knowledge = {
+      ...reusable, id: 'reference-1', question: '历史会话中的说明', knowledge_reuse: { level: 'reference', reason_codes: [] },
+    }
+    const legacyAcknowledgement: Knowledge = { ...advice, id: 'legacy-2', question: '仅接受过解释', knowledge_reuse: undefined }
+    knowledge = [reusable, guidance, advice, reference, legacyAcknowledgement]
+    window.history.replaceState(null, '', '#voc-next')
+    render(<QiyuApp />)
+
+    expect(screen.getByText('操作效果已验证')).toBeTruthy()
+    const configurationCard = within(screen.getByRole('heading', { name: guidance.question }).closest('article')!)
+    expect(configurationCard.getByText('配置指引')).toBeTruthy()
+    expect(configurationCard.getByText('来源已核验')).toBeTruthy()
+    expect(configurationCard.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
+    const troubleshootingCard = within(screen.getByRole('heading', { name: advice.question }).closest('article')!)
+    expect(troubleshootingCard.getByText('排查建议')).toBeTruthy()
+    expect(troubleshootingCard.getByText(/操作效果待验证/)).toBeTruthy()
+    expect(troubleshootingCard.getByText('客户已接受解释。')).toBeTruthy()
+    expect(troubleshootingCard.queryByText('操作效果已验证')).toBeNull()
+    expect(screen.queryByText(legacyAcknowledgement.question)).toBeNull()
+    expect(screen.queryByText(reference.question)).toBeNull()
+
+    fireEvent.click(screen.getByText('来源记录（1）'))
+    const referenceHeading = await screen.findByRole('heading', { name: reference.question })
+    const referenceCard = within(referenceHeading.closest('article')!)
+    expect(referenceCard.getByText('保留此记录供查阅原始会话。')).toBeTruthy()
+    expect(referenceCard.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
+    expect(referenceCard.queryByText('操作效果已验证')).toBeNull()
+    expect(screen.queryByRole('button', { name: /确认|审核/ })).toBeNull()
   })
 
   it('shows an evidence-based empty state on the original knowledge route', () => {

@@ -98,7 +98,7 @@ def _ref(message: dict, qa_id: int, kind: str) -> dict:
             "source_refs": [{"message_id": message["source_message_id"], "start": 0, "end": len(quote)}]}
 
 
-def _assess(conn, row: dict, all_events: list[dict], snapshots: dict) -> dict:
+def _assess(conn, row: dict, all_events: list[dict], snapshots: dict, matches_success=None) -> dict:
     qa_id = int(row["qa_id"])
     result = {"status": "unknown", "acceptance": "unknown", "effect": "unknown", "complete": False,
               "evidence": [], "reasons": [], "key": str(qa_id), "fingerprint": ""}
@@ -212,7 +212,8 @@ def _assess(conn, row: dict, all_events: list[dict], snapshots: dict) -> dict:
             # Later success belongs to the new intervention, not this answer.
             continue
         positive = re.sub(r"[，,。！!\s]*(?:谢谢|感谢)(?:您|你)?[。！!\s]*$", "", text).strip("，,。！! ")
-        if not _PROSPECTIVE.search(text) and _SUCCESS.fullmatch(positive):
+        if not _PROSPECTIVE.search(text) and (_SUCCESS.fullmatch(positive) or
+                                               matches_success is not None and matches_success(row, text)):
             accepted = ("resolved", "customer_reported_success", message)
         elif _UNDERSTOOD.fullmatch(text):
             accepted = ("understood", "not_established", message)
@@ -243,7 +244,7 @@ def _assess(conn, row: dict, all_events: list[dict], snapshots: dict) -> dict:
     return result
 
 
-def evaluate(cfg, rows: list[dict], *, events: list[dict] | None = None) -> dict:
+def evaluate(cfg, rows: list[dict], *, events: list[dict] | None = None, matches_success=None) -> dict:
     """Evaluate every current cited source in this branch/scope, never a sample.
 
     Explicit acceptance can support a bounded reusable answer; 'understood' is
@@ -265,7 +266,8 @@ def evaluate(cfg, rows: list[dict], *, events: list[dict] | None = None) -> dict
             return unknown("complete_message_ledger_missing")
         snapshots = {}
         unique = {row.get("id", str(row["qa_id"])): row for row in rows}
-        assessed = [_assess(conn, row, events if events is not None else rows, snapshots) for row in unique.values()]
+        assessed = [_assess(conn, row, events if events is not None else rows, snapshots, matches_success)
+                    for row in unique.values()]
     except (sqlite3.Error, ValueError, TypeError, KeyError, RecursionError):
         return unknown("source_verification_unavailable")
     finally:

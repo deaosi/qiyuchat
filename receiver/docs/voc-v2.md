@@ -303,11 +303,13 @@ output. Domain classification uses distinct `domain_classification` feedback for
 ## Conversation-supported automatic answers
 
 The full Chinese business specification is [voc-algorithm.md](voc-algorithm.md).
-`ready_knowledge` counts source-supported compilations; it is not a count of
-customer-confirmed solutions. `auto_reusable_knowledge` counts the separate
-`conversation_verification.auto_reusable` decision. The default answer view uses
-the latter; source-supported guidance remains separately visible without an
-all-items manual approval queue.
+`ready_knowledge` counts source-supported compilations. `knowledge_reuse.level`
+drives the default answer view. `guidance` requires complete, exact human
+evidence for low-risk configuration instructions or read-only diagnostics with
+their applicable conditions. `verified` requires explicit customer application
+and effect for the displayed procedure. `reference` remains visible as a source
+record. `auto_reusable_knowledge` is the sum of `verified_effect_knowledge` and
+`guidance_knowledge`.
 
 `voc_outcome.py` reads complete, reproducible official message snapshots with
 current completed sync versions, exact question/answer anchors, verified roles
@@ -318,7 +320,7 @@ No business rows are changed and no inference is used for certificate reads.
 Explicit understanding is not operational success. Silence, END, truncated
 windows, unknown visitors, ambiguous/shared intents, prospective or interrogative
 success phrases, and abandonment never prove acceptance. Two independent weak
-closures may support bounded reuse, with their threshold and counts retained.
+closures may pass the feedback certificate, with their threshold and counts retained.
 Continuing questions, reopened topics or negative feedback block automatic reuse
 even if another source succeeded. New substantive staff intervention prevents
 assigning later success to the earlier answer; polite closing does not erase an

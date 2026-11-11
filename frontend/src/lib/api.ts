@@ -110,12 +110,15 @@ function validDetailImages(value: unknown): boolean {
 
 const vocKnowledgeKinds = ['configuration_guide', 'troubleshooting_advice', 'verified_workaround', 'capability_fact'] as const
 export type VocKnowledgeKind = typeof vocKnowledgeKinds[number]
+const vocKnowledgeReuseLevels = ['verified', 'guidance', 'reference'] as const
+type VocVerificationEvidence = { quote: string; role: string; message_id?: string | number; ts?: string | number }
+export type VocKnowledgeReuse = { level: typeof vocKnowledgeReuseLevels[number]; reason_codes: string[]; evidence?: VocVerificationEvidence[] }
 export type VocConversationVerification = {
   status: 'accepted' | 'weak' | 'negative' | 'unknown'
   acceptance: 'resolved' | 'understood' | 'weak_closure' | 'continuing' | 'rejected' | 'unknown'
   effect: 'customer_reported_success' | 'customer_reported_failure' | 'not_established' | 'unknown'
   auto_reusable: boolean
-  evidence: { quote: string; role: string; message_id?: string | number; ts?: string | number }[]
+  evidence: VocVerificationEvidence[]
   coverage: Record<string, unknown>
   reason_codes: string[]
   version: string
@@ -128,13 +131,17 @@ function validateVoc2Response(name: string, data: unknown): void {
     && typeof v.quote === 'string' && isCount(v.start) && isCount(v.end) && typeof v.role === 'string' && v.alignment === 'exact'
   const nullableRef = (v: unknown) => v === null || v === undefined || ref(v)
   const refs = (v: unknown) => Array.isArray(v) && v.every(ref)
+  const verificationEvidence = (v: unknown) => Array.isArray(v) && v.every(item => isRecord(item)
+    && typeof item.quote === 'string' && typeof item.role === 'string'
+    && (item.message_id === undefined || typeof item.message_id === 'string' || typeof item.message_id === 'number')
+    && (item.ts === undefined || typeof item.ts === 'string' || typeof item.ts === 'number'))
   const closure = (v: unknown) => isRecord(v) && ['accepted', 'weak', 'negative', 'unknown'].includes(String(v.status))
     && ['resolved', 'understood', 'weak_closure', 'continuing', 'rejected', 'unknown'].includes(String(v.acceptance))
     && ['customer_reported_success', 'customer_reported_failure', 'not_established', 'unknown'].includes(String(v.effect))
     && typeof v.auto_reusable === 'boolean' && (!v.auto_reusable || v.status === 'accepted')
     && isRecord(v.coverage) && isStringArray(v.reason_codes)
     && typeof v.version === 'string' && typeof v.fingerprint === 'string'
-    && Array.isArray(v.evidence) && v.evidence.every(item => isRecord(item) && typeof item.quote === 'string' && typeof item.role === 'string')
+    && verificationEvidence(v.evidence)
   const intents = ['configuration_guidance', 'functional_anomaly', 'unclear']
   const diagnoses = ['reported', 'pending', 'config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed', 'not_applicable']
   const domain = (v: unknown) => isRecord(v) && intents.includes(String(v.primary_intent))
@@ -156,6 +163,8 @@ function validateVoc2Response(name: string, data: unknown): void {
     && Array.isArray(v.claims) && v.claims.every(claim => isRecord(claim) && typeof claim.role === 'string'
       && typeof claim.quote === 'string' && isCount(claim.start) && isCount(claim.end) && Array.isArray(claim.source_refs))
     && (v.domain === undefined || domain(v.domain))
+  const reuse = (v: unknown) => isRecord(v) && vocKnowledgeReuseLevels.some(level => level === v.level)
+    && isStringArray(v.reason_codes) && (v.evidence === undefined || verificationEvidence(v.evidence))
   const knowledge = (v: unknown) => isRecord(v) && typeof v.id === 'string' && typeof v.topic_id === 'string'
     && typeof v.question === 'string' && typeof v.answer === 'string' && typeof v.scope === 'string'
     && isStringArray(v.steps) && isStringArray(v.reply_patterns) && isStringArray(v.cautions)
@@ -164,6 +173,7 @@ function validateVoc2Response(name: string, data: unknown): void {
     && (v.diagnosis_status === undefined || diagnoses.includes(String(v.diagnosis_status)))
     && (v.applicability === undefined || refs(v.applicability)) && nullableRef(v.confirmed_cause)
     && (v.conversation_verification === undefined || closure(v.conversation_verification))
+    && (v.knowledge_reuse === undefined || reuse(v.knowledge_reuse))
   const job = (v: unknown) => isRecord(v) && typeof v.id === 'string'
     && ['queued', 'running', 'completed', 'partial', 'failed', 'skipped'].includes(String(v.status))
     && hasCounts(v, ['total', 'processed', 'failed', 'skipped', 'usage_tokens'])
