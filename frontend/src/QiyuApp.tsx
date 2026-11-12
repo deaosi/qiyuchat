@@ -30,6 +30,7 @@ import { ImportDialog } from '@/components/qiyu/import-dialog'
 import { GatewaySettings } from '@/components/qiyu/gateway-settings'
 import { LoadingState, PageActivity, RefreshDataButton } from '@/components/qiyu/loading-state'
 import { useApi } from '@/hooks/use-api'
+import { useVocFirstPagePreload } from '@/hooks/use-voc-first-page-preload'
 import { apiPost, downloadExport, downloadTemplate, normalizePair, type ApiFilters, type LocalStatus, type MetaData, type SummaryData, type TrendData } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { customerLabel } from '@/lib/utils'
@@ -124,6 +125,7 @@ function Workspace() {
   const summary = useApi<SummaryData>('summary', sharedScope, refreshKey, view === 'overview')
   const trend = useApi<TrendData>('trend', sharedScope, refreshKey, view === 'overview')
   const status = useApi<LocalStatus>('status', { source }, refreshKey, view === 'cleaning')
+  useVocFirstPagePreload(view, sharedScope, refreshKey, busy || importOpen || cleanOpen || Boolean(selected))
   const recent = useMemo(() => summary.data?.recent?.map(normalizePair) ?? [], [summary.data])
   const page = navigation.find(item => item.id === view)!
   const showQaExport = view !== 'questions' && view !== 'voc-next'

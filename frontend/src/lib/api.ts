@@ -18,6 +18,7 @@ export interface ApiFilters {
   replied?: string
   limit?: number
   offset?: number
+  first_page?: 1
   id?: string | number
   top?: number
   status?: VocStatus | KnowledgeStatus | 'all'
@@ -93,9 +94,9 @@ export function apiUrl(name: string, filters: ApiFilters): string {
   return `/api/${name}?${params}`
 }
 
-async function readResponse<T>(response: Response): Promise<T> {
+async function readResponse<T>(response: Response, redirectOnUnauthorized = true): Promise<T> {
   if (response.status === 401) {
-    if (window.location.pathname !== '/login') window.location.assign('/login')
+    if (redirectOnUnauthorized && window.location.pathname !== '/login') window.location.assign('/login')
     throw new ApiError('登录已过期，请重新登录。', 401)
   }
   let data: unknown
@@ -234,6 +235,7 @@ export type VocPilotIssue = {
 export type VocIssuePilot = {
   items: VocPilotIssue[]
   total: number
+  first_page_total?: number
   coverage: { source_events: number; matched_consultations: number; classified_consultations: number; needs_context: number }
 }
 export type VocPlaybookBranch = {
@@ -275,7 +277,7 @@ export type VocCasePath = {
   solution?: VocCaseSolution
   outcome: 'not_recorded'
 }
-export type VocPlaybookResultsData = { items: VocPlaybook[]; total: number; case_paths?: VocCasePath[] }
+export type VocPlaybookResultsData = { items: VocPlaybook[]; total: number; case_paths?: VocCasePath[]; first_page_total?: number }
 
 function validateVoc2Response(name: string, data: unknown, workbench = false): void {
   if (!name.startsWith('voc2/')) return
@@ -688,17 +690,26 @@ function validateGatewayResponse(name: string, data: unknown): void {
   if (!valid) throw new ApiError('模型网关设置返回的数据不完整，请刷新后重试。', 502)
 }
 
-export async function apiGet<T>(name: string, filters: ApiFilters, signal?: AbortSignal, activity: { background?: boolean } = {}): Promise<T> {
-  return withRequestActivity('正在读取数据…', async () => {
+export async function apiGet<T>(name: string, filters: ApiFilters, signal?: AbortSignal, activity: { background?: boolean; prefetch?: boolean } = {}): Promise<T> {
+  const read = async () => {
     const data = await readResponse<unknown>(await fetch(apiUrl(name, filters), {
-      credentials: 'same-origin', cache: 'no-store', signal,
-    }))
+      credentials: 'same-origin', cache: 'no-store', signal, ...(activity.prefetch ? { priority: 'low' } : {}),
+    }), !activity.prefetch)
     validateGetResponse(name, data, filters)
     validateVocResponse(name, data)
     validateVoc2Response(name, data, filters.workbench === 1)
+    if (filters.first_page && (name === 'voc2/issue-pilot' || name === 'voc2/playbooks')) {
+      const page = data as VocIssuePilot & Pick<VocPlaybookResultsData, 'case_paths'>
+      const rows = page.items.length + (page.case_paths?.length ?? 0)
+      const limit = name === 'voc2/issue-pilot' ? 6 : 8
+      if (!Number.isSafeInteger(page.first_page_total) || rows !== Math.min(page.first_page_total ?? 0, limit)) {
+        throw new ApiError('首页返回的数据不完整，请重试。', 502)
+      }
+    }
     validateGatewayResponse(name, data)
     return data as T
-  }, activity.background)
+  }
+  return activity.prefetch ? read() : withRequestActivity('正在读取数据…', read, activity.background)
 }
 
 export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyInit, headers?: HeadersInit, signal?: AbortSignal): Promise<T> {

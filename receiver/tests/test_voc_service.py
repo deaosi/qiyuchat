@@ -469,6 +469,22 @@ class TestVocHttp(LocalFixture):
                 self.assertEqual(self.call("/api/voc2/topics" + query, headers=self.headers())[0], 400)
             get.assert_not_called()
 
+    def test_first_page_read_uses_the_normal_route_and_filters(self):
+        with patch("src.web.server.voc_service.get", return_value={}) as get:
+            for name in ("issue-pilot", "playbooks"):
+                path = "/api/voc2/" + name + "?source=local&days=7&first_page=1"
+                self.assertEqual(self.call(path)[0], 401)
+                self.assertEqual(self.call(path, headers=self.headers())[0], 200)
+                self.assertEqual(get.call_args.args[1], name)
+                self.assertEqual(get.call_args.args[2]["days"], 7)
+                self.assertEqual(get.call_args.kwargs, {"first_page": True})
+                self.assertEqual(self.call(path.replace("&first_page=1", ""), headers=self.headers())[0], 200)
+                self.assertEqual(get.call_args.kwargs, {})
+                get.reset_mock()
+                for query in ("first_page=2", "first_page=1&first_page=1"):
+                    self.assertEqual(self.call("/api/voc2/" + name + "?" + query, headers=self.headers())[0], 400)
+                get.assert_not_called()
+
     def test_workbench_options_reach_ranker_before_pagination(self):
         comparison = {"comparable": True}
         matches = [{"id": f"topic-{index}"} for index in range(23)]

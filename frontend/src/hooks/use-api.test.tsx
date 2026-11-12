@@ -2,6 +2,7 @@ import { Profiler, useCallback, useState } from 'react'
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, apiGet } from '@/lib/api'
+import { prefetchApi } from '@/lib/api-prefetch'
 import { useApi } from './use-api'
 import { useBackgroundRefresh } from './use-background-refresh'
 
@@ -17,6 +18,37 @@ function deferred<T>() {
 afterEach(() => { cleanup(); vi.resetAllMocks(); vi.useRealTimers() })
 
 describe('same-scope background updates', () => {
+  it('reuses an already prepared first page without showing a loading state or fetching it twice', async () => {
+    const filters = { source: 'local', days: 7, group: 'prefetch-test', offset: 0 } as const
+    vi.mocked(apiGet).mockResolvedValueOnce({ count: 5 })
+    await prefetchApi('voc2/topics', filters, 3)
+    const view = renderHook(() => useApi<{ count: number }>('voc2/topics', { ...filters }, 3, true, true))
+    expect(view.result.current.loading).toBe(false)
+    expect(view.result.current.data).toEqual({ count: 5 })
+    await act(async () => {})
+    expect(apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('joins a pending preload and never uses it for another scope or a later page', async () => {
+    const pending = deferred<{ count: number }>()
+    vi.mocked(apiGet).mockReturnValueOnce(pending.promise).mockResolvedValue({ count: 9 })
+    const filters = { source: 'local', days: 30, group: 'pending-prefetch-test', offset: 0 } as const
+    const warming = prefetchApi('voc2/topics', filters, 1)
+    const { result, rerender } = renderHook(({ group, offset }) =>
+      useApi<{ count: number }>('voc2/topics', { ...filters, group, offset }, 1, true, offset === 0),
+    { initialProps: { group: filters.group as string, offset: 0 } })
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    await act(async () => { pending.resolve({ count: 4 }); await warming })
+    expect(result.current.data).toEqual({ count: 4 })
+    rerender({ group: filters.group, offset: 20 })
+    await act(async () => {})
+    expect(result.current.data).toEqual({ count: 9 })
+    rerender({ group: 'another-scope', offset: 0 })
+    expect(result.current.loading).toBe(true)
+    await act(async () => {})
+    expect(apiGet).toHaveBeenCalledTimes(3)
+  })
+
   it('commits the first loading view once before the request resolves', async () => {
     const result = deferred<{ title: string }>()
     vi.mocked(apiGet).mockReturnValueOnce(result.promise)

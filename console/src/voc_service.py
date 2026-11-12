@@ -340,7 +340,7 @@ def execute(cfg: Settings, job_id: str) -> dict:
 
 
 def get(cfg: Settings, name: str, filters: dict, identity: str = '', *,
-        workbench: bool = False, trend: str = 'all') -> dict:
+        workbench: bool = False, trend: str = 'all', first_page: bool = False) -> dict:
     engine=_engine()
     if workbench and name=='topics':return engine.topics(cfg,filters,workbench=True,trend=trend)
     if workbench and name=='topic':return engine.topic_detail(cfg,filters,identity,workbench=True)
@@ -360,6 +360,13 @@ def get(cfg: Settings, name: str, filters: dict, identity: str = '', *,
                'event':lambda:engine.event_detail(cfg,filters,identity)}
     if name not in functions:raise ServiceError('新整理接口不存在。',404)
     result=functions[name]()
+    if first_page and name == 'issue-pilot':
+        return {**result, 'items': result['items'][:6], 'first_page_total': result['total']}
+    if first_page and name == 'playbooks':
+        paths = result['case_paths']
+        first_paths = paths[:8]
+        return {**result, 'case_paths': first_paths, 'items': result['items'][:8 - len(first_paths)],
+                'first_page_total': len(paths) + len(result['items'])}
     if name=='knowledge' and identity:
         return {'item':result['knowledge'],'evidence':result.get('evidence',[])}
     return result

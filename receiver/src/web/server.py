@@ -486,6 +486,10 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("高频问题趋势筛选无效。")
                     result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"),
                                              workbench=workbench == "1", trend=trend)
+                elif name in ("voc2/issue-pilot", "voc2/playbooks") and "first_page" in qs:
+                    if qs["first_page"] != ["1"]:
+                        raise ValueError("首页参数无效。")
+                    result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"), first_page=True)
                 else:
                     result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"))
                 if paged:
