@@ -37,6 +37,19 @@ const topicPageSize = 20
 const count = (n: number | undefined) => typeof n === 'number' ? n.toLocaleString('zh-CN') : '—'
 const active = (job: Job | null | undefined) => job?.status === 'queued' || job?.status === 'running'
 const labels: Record<string, string> = { queued: '排队中', running: '整理中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '已跳过' }
+
+function emptyTrendMessage(trend: TrendFilter, comparison?: TrendComparisonData) {
+  if (trend === 'all') return '当前范围暂无高频问题。'
+  const label = trendLabels[trend]
+  if (!comparison || comparison.comparable) return `当前范围暂无「${label}」问题。`
+  if (!comparison.previous) return `暂无法判断「${label}」，请选择有起止日期的范围进行对比。`
+  if (!comparison.current.source_pairs || !comparison.previous.source_pairs) {
+    const period = !comparison.current.source_pairs ? '本期' : '上期'
+    return `${period}暂无会话来源，暂无法判断「${label}」。`
+  }
+  return `两期已分类样本暂不足以判断「${label}」。`
+}
+
 export function QueryPanel({ loading, error, retry, children, hasData = false }: { loading: boolean; error: string | null; retry: () => void; children: ReactNode; hasData?: boolean }) {
   if (loading) return <LoadingState />
   if (error && !hasData) return <div role="alert" className="flex min-h-40 flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground"><CircleAlert className="size-5" /><p>{error}</p><Button variant="outline" size="sm" onClick={retry}><RefreshCw />重试</Button></div>
@@ -141,7 +154,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
       <CardContent className="space-y-4">
         <div role="group" aria-label="趋势筛选" className="flex w-fit max-w-full flex-wrap gap-1 rounded-lg border bg-muted/35 p-1">
           {(Object.entries(trendLabels) as [TrendFilter, string][]).map(([value, label]) => <Button key={value} type="button" size="sm" variant={trend === value ? 'default' : 'ghost'} aria-pressed={trend === value}
-            disabled={value !== 'all' && value !== trend && comparison?.comparable === false} onClick={() => setTrend(value)}>{label}</Button>)}
+            onClick={() => setTrend(value)}>{label}</Button>)}
         </div>
         {comparison ? <TrendComparison comparison={comparison} /> : summary.data && <p className="text-xs text-muted-foreground">当前范围已整理 {count(summary.data.coverage.processed_pairs)} / {count(summary.data.source_pairs)} 条问答，待整理 {count(summary.data.coverage.pending_pairs)} 条。</p>}
         <QueryPanel hasData={topics.data !== null} loading={pageLoading} error={topics.error} retry={topics.retry}>
@@ -165,7 +178,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
                 <ArrowUpRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
               </span>
             </button>
-          })}</div> : <p className="py-10 text-center text-sm text-muted-foreground">{trend === 'all' ? '当前范围暂无高频问题。' : comparison?.comparable === false ? '当前覆盖不足，暂无法筛选趋势。' : `当前范围暂无「${trendLabels[trend]}」问题。`}</p>}
+          })}</div> : <p role="status" className="py-10 text-center text-sm text-muted-foreground">{emptyTrendMessage(trend, comparison)}</p>}
         </QueryPanel>
       </CardContent>
       {(pageLoading || page > 0 || Boolean(topics.data?.total)) && <CardFooter className="flex-wrap justify-between gap-3 border-t text-xs text-muted-foreground">

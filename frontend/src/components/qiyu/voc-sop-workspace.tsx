@@ -1,13 +1,14 @@
-import { useCallback, useState } from 'react'
-import { ArrowUpRight, Copy } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowUpRight, ChevronLeft, ChevronRight, Copy, Search } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
 import { normalizePair, type ApiFilters, type VocSop, type VocSopEvidence, type VocSopStep } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { QueryPanel, VocKnowledgeWorkspace, type OpenEvidencePair } from './voc-next-workspace'
 import { displayTime } from './voc-topic-evidence'
@@ -22,7 +23,16 @@ const gaps: Record<string, string> = {
   later_counterevidence: '后续异议或失败的处理结果', unbound_condition: '步骤对应的前置条件',
 }
 const rank: Record<VocSop['status'], number> = { verified: 0, guidance: 1, incomplete: 2 }
-const pageSize = 12
+const kinds: Record<VocSop['kind'], string> = { configuration: '配置与使用', anomaly: '异常与排障' }
+const pageSize = 10
+const count = new Intl.NumberFormat('zh-CN').format
+const rowColumns = 'grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 lg:grid-cols-[minmax(0,1fr)_7.5rem_7.5rem_9rem_1rem]'
+const statusFilters = ['all', 'verified', 'guidance', 'incomplete'] as const
+type StatusFilter = typeof statusFilters[number]
+
+function missingLabels(item: VocSop) {
+  return [...new Set(item.missing.map(code => gaps[code] ?? '其他待核验信息'))]
+}
 
 function reusableSteps(item: VocSop) {
   return item.steps.filter(step => step.outcome !== 'failed')
@@ -45,10 +55,10 @@ async function copySop(item: VocSop) {
   }
 }
 
-function EvidenceLine({ evidence, onOpen, showQuote = true }: { evidence: VocSopEvidence; onOpen: (ref: VocSopEvidence) => void; showQuote?: boolean }) {
+function EvidenceLine({ evidence, onOpen }: { evidence: VocSopEvidence; onOpen: (ref: VocSopEvidence) => void }) {
   const time = displayTime(evidence.ts)
   return <div className="space-y-1">
-    {showQuote && <p className="whitespace-pre-wrap break-words text-sm [overflow-wrap:anywhere]">{evidence.quote}</p>}
+    <p className="whitespace-pre-wrap break-words text-sm leading-6 [overflow-wrap:anywhere]">{evidence.quote}</p>
     <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
       {time && <span className="tabular-nums">{time}</span>}
       <Button type="button" variant="ghost" size="xs" onClick={() => onOpen(evidence)}>定位原话<ArrowUpRight /></Button>
@@ -56,86 +66,165 @@ function EvidenceLine({ evidence, onOpen, showQuote = true }: { evidence: VocSop
   </div>
 }
 
-function SopCard({ item, onOpenPair }: { item: VocSop; onOpenPair: OpenEvidencePair }) {
+function SopDetail({ item, onOpenPair }: { item: VocSop; onOpenPair: OpenEvidencePair }) {
   const open = (ref: VocSopEvidence) => onOpenPair(normalizePair({
     qa_id: item.qa_id, question: item.problem.quote, asked_at: item.problem.ts,
   }), ref.message_id)
-  const missing = [...new Set(item.missing.map(code => gaps[code] ?? '其他待核验信息'))]
-  const sameProblem = item.title === item.problem.quote
-  return <article className="min-w-0 space-y-4 rounded-lg border p-4 sm:p-5">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0 space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant={item.status === 'verified' ? 'default' : 'secondary'}>{statuses[item.status]}</Badge>
-          <span className="text-xs text-muted-foreground">{item.kind === 'configuration' ? '配置与使用' : '异常与排障'}</span>
-        </div>
-        <h3 className="break-words font-medium [overflow-wrap:anywhere]">{item.title}</h3>
-        {sameProblem && <EvidenceLine evidence={item.problem} onOpen={open} showQuote={false} />}
+  const missing = missingLabels(item)
+  const canCopy = item.status !== 'incomplete' && reusableSteps(item).length > 0
+  return <>
+    <SheetHeader className="shrink-0 gap-2 border-b bg-linear-to-b from-muted/40 to-background px-5 py-5 pr-10 sm:px-7 sm:pr-12">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <Badge variant={item.status === 'verified' ? 'default' : 'secondary'} className="font-normal">{statuses[item.status]}</Badge>
+        <span>{kinds[item.kind]}</span>
       </div>
-      {item.status !== 'incomplete' && reusableSteps(item).length > 0 && <Button type="button" size="sm" variant="outline" onClick={() => void copySop(item)}><Copy />复制 SOP</Button>}
-    </div>
-    {(!sameProblem || item.conditions.length > 0) && <div className="grid gap-4 border-t pt-4 sm:grid-cols-2">
-      {!sameProblem && <section className="min-w-0 space-y-2"><h4 className="text-sm font-medium">问题现象</h4><EvidenceLine evidence={item.problem} onOpen={open} /></section>}
-      {item.conditions.length > 0 && <section className="min-w-0 space-y-2"><h4 className="text-sm font-medium">适用条件</h4>
-        {item.conditions.map((ref, index) => <EvidenceLine key={`${ref.message_id}-${index}`} evidence={ref} onOpen={open} />)}
+      <SheetTitle className="text-lg leading-7 [overflow-wrap:anywhere]">{item.title}</SheetTitle>
+      <SheetDescription className="sr-only">查看处理步骤、验证结果和原始会话。</SheetDescription>
+      <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+        <span className="tabular-nums">{displayTime(item.problem.ts)}</span>
+        <Button type="button" variant="ghost" size="xs" onClick={() => open(item.problem)}>定位问题原话<ArrowUpRight /></Button>
+      </div>
+    </SheetHeader>
+    <div className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-5 py-6 sm:px-7">
+      {item.title !== item.problem.quote && <section className="space-y-2"><h3 className="text-sm font-semibold">问题现象</h3><EvidenceLine evidence={item.problem} onOpen={open} /></section>}
+      {item.conditions.length > 0 && <section className="space-y-2 border-b pb-5"><h3 className="text-sm font-semibold">适用条件</h3>
+        <div className="space-y-2">{item.conditions.map((ref, index) => <EvidenceLine key={`${ref.message_id}-${index}`} evidence={ref} onOpen={open} />)}</div>
       </section>}
-    </div>}
-    {item.steps.length > 0 && <section className="space-y-2"><h4 className="text-sm font-medium">处理流程</h4>
-      <ol className="space-y-3">
-        {item.steps.map((step, index) => <li key={`${step.evidence.message_id}-${index}`} className="flex min-w-0 gap-3 rounded-md border bg-muted/15 p-3">
-          <span className="pt-0.5 text-xs tabular-nums text-muted-foreground" aria-hidden="true">{index + 1}.</span>
-          <div className="min-w-0 flex-1 space-y-1">
+      {item.steps.length > 0 && <section className="space-y-3"><h3 className="text-sm font-semibold">处理流程</h3>
+        <ol className="ml-2.5 space-y-4 border-l pl-4">
+          {item.steps.map((step, index) => <li key={`${step.evidence.message_id}-${index}`} className="relative min-w-0 space-y-1">
+            <span className="absolute -left-[1.7rem] top-0 grid size-5 place-items-center rounded-full border bg-background text-[10px] tabular-nums text-muted-foreground" aria-hidden="true">{index + 1}</span>
             <div className="flex flex-wrap items-center gap-2 text-xs"><span className="font-medium">{phases[step.phase]}</span><span className="text-muted-foreground">{outcomes[step.outcome]}</span></div>
             <EvidenceLine evidence={step.evidence} onOpen={open} />
-            {step.feedback && step.feedback.message_id !== item.result?.message_id && <div className="space-y-1 border-l pl-3 text-muted-foreground"><p className="text-xs">客户反馈</p><EvidenceLine evidence={step.feedback} onOpen={open} /></div>}
-          </div>
-        </li>)}
-      </ol>
-    </section>}
-    {!!item.replies?.length && <section className="space-y-2"><h4 className="text-sm font-medium">人工回复记录</h4>
-      {item.replies.map((ref, index) => <EvidenceLine key={`${ref.message_id}-${index}`} evidence={ref} onOpen={open} />)}
-    </section>}
-    {item.result && <section className="space-y-2 rounded-md border p-3"><h4 className="text-sm font-medium">复测结果</h4><EvidenceLine evidence={item.result} onOpen={open} /></section>}
-    {missing.length > 0 && <p className="text-xs leading-5 text-muted-foreground">待补充 {missing.join('、')}</p>}
-  </article>
+            {step.feedback && step.feedback.message_id !== item.result?.message_id && <div className="mt-2 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-muted-foreground"><p className="text-xs">客户反馈</p><EvidenceLine evidence={step.feedback} onOpen={open} /></div>}
+          </li>)}
+        </ol>
+      </section>}
+      {!!item.replies?.length && <section className="space-y-2"><h3 className="text-sm font-semibold">人工回复记录</h3>
+        <div className="divide-y">{item.replies.map((ref, index) => <div key={`${ref.message_id}-${index}`} className="py-2"><EvidenceLine evidence={ref} onOpen={open} /></div>)}</div>
+      </section>}
+      {item.result && <section className="space-y-2 border-t pt-5"><h3 className="text-sm font-semibold">复测结果</h3><EvidenceLine evidence={item.result} onOpen={open} /></section>}
+      {missing.length > 0 && <section className="space-y-1 rounded-lg bg-muted/45 px-4 py-3"><h3 className="text-sm font-medium">待补证据</h3>
+        <p className="text-sm leading-6 text-muted-foreground">{missing.join('、')}</p>
+      </section>}
+    </div>
+    {canCopy && <div className="flex shrink-0 justify-end border-t px-5 py-3 sm:px-7"><Button type="button" size="sm" onClick={() => void copySop(item)}><Copy />复制 SOP</Button></div>}
+  </>
 }
 
 export function VocSopWorkspace({ filters, refreshKey = 0, onOpenPair }: Props) {
   const [revision, setRevision] = useState(0)
   const [search, setSearch] = useState('')
-  const [limit, setLimit] = useState(pageSize)
+  const [status, setStatus] = useState<StatusFilter>('all')
+  const [page, setPage] = useState(1)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const rowTrigger = useRef<HTMLButtonElement>(null)
+  const searchInput = useRef<HTMLInputElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
+  const scopeKey = JSON.stringify(filters)
   const key = refreshKey + revision
   const sops = useApi<{ items: VocSop[]; total: number }>('voc2/sops', filters, key)
   const refresh = useCallback(() => setRevision(value => value + 1), [])
   useBackgroundRefresh(refresh, false, sops.loading || sops.refreshing, key)
+  const items = sops.data?.items ?? []
+  const totals = { all: items.length, verified: 0, guidance: 0, incomplete: 0 }
+  for (const item of items) totals[item.status]++
   const terms = search.normalize('NFKC').toLowerCase().split(/\s+/).filter(Boolean)
-  const matches = (sops.data?.items ?? []).filter(item => {
+  const matches = items.filter(item => {
+    if (status !== 'all' && item.status !== status) return false
     if (!terms.length) return true
     const content = [item.title, item.problem.quote, item.result?.quote, ...item.conditions.map(ref => ref.quote), ...(item.replies?.map(ref => ref.quote) ?? []),
       ...item.steps.flatMap(step => [step.evidence.quote, step.feedback?.quote])].join('\n').normalize('NFKC').toLowerCase()
     return terms.every(term => content.includes(term))
-  }).sort((a, b) => rank[a.status] - rank[b.status])
-  const reusable = sops.data?.items.filter(item => item.status !== 'incomplete').length
+  }).sort((a, b) => rank[a.status] - rank[b.status] || b.problem.ts - a.problem.ts)
+  const pageCount = Math.max(1, Math.ceil(matches.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const start = (currentPage - 1) * pageSize
+  const pages = pageCount <= 5 ? Array.from({ length: pageCount }, (_, index) => index + 1)
+    : [...new Set([1, currentPage - 1, currentPage, currentPage + 1, pageCount])].filter(value => value >= 1 && value <= pageCount)
+  const selected = items.find(item => item.id === selectedId)
+  useEffect(() => { setPage(1); setSelectedId(null); setDetailOpen(false) }, [scopeKey])
+  useEffect(() => { setPage(value => Math.min(value, pageCount)) }, [pageCount])
 
-  return <Card>
-    <CardHeader><CardTitle>问题处理 SOP</CardTitle><CardDescription>{sops.data && reusable !== undefined
-      ? `${reusable} 条可复用 · ${sops.data.total - reusable} 条待补证据`
-      : '按原始会话还原问题现象、排查、处理和复测。'}</CardDescription></CardHeader>
-    <CardContent>
+  function changePage(next: number) {
+    if (currentPage === next) return
+    setPage(next)
+    heading.current?.focus({ preventScroll: true })
+    heading.current?.scrollIntoView?.({ block: 'start' })
+  }
+
+  return <>
+    <Card className="gap-0 overflow-hidden py-0">
+      <div className="flex flex-wrap items-end justify-between gap-4 bg-linear-to-b from-muted/40 to-card px-4 py-5 sm:px-6">
+        <div className="space-y-1">
+          <h2 ref={heading} tabIndex={-1} className="scroll-mt-4 text-base font-semibold tracking-tight focus:outline-none">问题处理 SOP</h2>
+          {sops.data && <p className="text-xs tabular-nums text-muted-foreground">{count(totals.verified + totals.guidance)} 条可复用 · {count(totals.incomplete)} 条待补证据</p>}
+        </div>
+        <div className="relative w-full sm:w-64">
+          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input ref={searchInput} type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} maxLength={200}
+            placeholder="搜索问题、条件或步骤" aria-label="搜索处理 SOP" className="bg-background pl-9" />
+        </div>
+      </div>
+      <div role="group" aria-label="SOP 状态筛选" className="flex flex-wrap items-center gap-1 border-b px-4 pb-4 sm:px-6">
+        {statusFilters.map(value => {
+          const label = value === 'all' ? '全部' : statuses[value]
+          return <Button key={value} type="button" variant={status === value ? 'default' : 'ghost'} size="sm"
+            aria-label={sops.data ? `${label} ${count(totals[value])} 条` : label} aria-pressed={status === value}
+            onClick={() => { setStatus(value); setPage(1) }} className="gap-1.5">
+            {label}{sops.data && <span className="text-[11px] tabular-nums opacity-70">{count(totals[value])}</span>}
+          </Button>
+        })}
+      </div>
       <QueryPanel hasData={sops.data !== null} loading={sops.loading} error={sops.error} retry={sops.retry}>
-        <Input type="search" value={search} onChange={event => { setSearch(event.target.value); setLimit(pageSize) }} maxLength={200}
-          placeholder="搜索问题、条件或步骤" aria-label="搜索处理 SOP" className="mb-4 w-full sm:max-w-sm" />
-        {matches.length ? <div className="space-y-4">
-          {matches.slice(0, limit).map(item => <SopCard key={item.id} item={item} onOpenPair={onOpenPair} />)}
-          {matches.length > limit && <Button type="button" variant="outline" size="sm" onClick={() => setLimit(value => value + pageSize)}>显示更多 SOP</Button>}
-        </div> : <div className="flex min-h-44 flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
-          <p className="font-medium text-foreground">{terms.length ? '未找到匹配的处理 SOP' : '当前范围暂无可展示的处理流程'}</p>
-          {terms.length ? <Button type="button" variant="ghost" size="sm" onClick={() => setSearch('')}>清除搜索</Button>
-            : <p>整理到同一问题的人工处理步骤后，会在这里显示。</p>}
+        {matches.length ? <>
+          <div aria-hidden="true" className={`${rowColumns} hidden border-b bg-muted/25 px-6 py-2.5 text-xs text-muted-foreground lg:grid`}>
+            <span>问题</span><span>证据状态</span><span>处理进度</span><span>咨询时间</span><span />
+          </div>
+          <ul aria-label="SOP 案例" className="divide-y">{matches.slice(start, start + pageSize).map(item => <li key={item.id}>
+            <button type="button" aria-haspopup="dialog" aria-label={`${item.title}，${statuses[item.status]}`} onClick={event => { rowTrigger.current = event.currentTarget; setSelectedId(item.id); setDetailOpen(true) }}
+              className={`${rowColumns} grid w-full px-4 py-3.5 text-left transition-colors hover:bg-muted/45 focus-visible:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:px-6`}>
+              <span className="min-w-0 space-y-1">
+                <span className="line-clamp-2 break-words text-sm font-medium [overflow-wrap:anywhere]" title={item.title}>{item.title}</span>
+                <span className="flex flex-wrap gap-x-2 text-xs text-muted-foreground"><span>{kinds[item.kind]}</span>
+                  <span className="lg:hidden">{statuses[item.status]} · {item.steps.length ? `${count(item.steps.length)} 个步骤` : '待整理步骤'}</span>
+                </span>
+              </span>
+              <span className="hidden lg:block"><Badge variant={item.status === 'verified' ? 'default' : 'secondary'} className="font-normal">{statuses[item.status]}</Badge></span>
+              <span className="hidden text-xs tabular-nums text-muted-foreground lg:block">{item.steps.length ? `${count(item.steps.length)} 个步骤` : '待整理步骤'}</span>
+              <span className="hidden text-xs tabular-nums text-muted-foreground lg:block">{displayTime(item.problem.ts)}</span>
+              <ChevronRight aria-hidden="true" className="size-4 text-muted-foreground" />
+            </button>
+          </li>)}</ul>
+        </> : <div className="flex min-h-48 flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+          <p className="font-medium text-foreground">{terms.length ? '未找到匹配的处理 SOP' : status !== 'all' ? `当前范围暂无${statuses[status]}的案例` : '当前范围暂无处理案例'}</p>
+          {(terms.length > 0 || status !== 'all') && <Button type="button" variant="ghost" size="sm" onClick={() => { setSearch(''); setStatus('all'); setPage(1) }}>清除筛选</Button>}
         </div>}
       </QueryPanel>
-    </CardContent>
-  </Card>
+      {matches.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/15 px-4 py-3 text-xs text-muted-foreground sm:px-6">
+        <span aria-live="polite" className="tabular-nums">{count(start + 1)}–{count(Math.min(start + pageSize, matches.length))} / 共 {count(matches.length)} 条</span>
+        <nav aria-label="SOP 分页" className="flex flex-wrap items-center gap-1">
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="上一页" title="上一页" disabled={currentPage === 1} onClick={() => changePage(currentPage - 1)}><ChevronLeft /></Button>
+          {pages.map((number, index) => <Fragment key={number}>
+            {index > 0 && number - pages[index - 1] > 1 && <span aria-hidden="true" className="px-1">…</span>}
+            <Button type="button" variant={currentPage === number ? 'outline' : 'ghost'} size="icon-sm" aria-label={`第 ${number} 页`}
+              aria-current={currentPage === number ? 'page' : undefined} onClick={() => changePage(number)} className="tabular-nums">{number}</Button>
+          </Fragment>)}
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="下一页" title="下一页" disabled={currentPage === pageCount} onClick={() => changePage(currentPage + 1)}><ChevronRight /></Button>
+        </nav>
+      </div>}
+    </Card>
+    <Sheet open={detailOpen && Boolean(selected)} onOpenChange={setDetailOpen}>
+      <SheetContent className="w-full gap-0 data-[state=closed]:duration-200 data-[state=open]:duration-250 sm:max-w-2xl" onCloseAutoFocus={event => {
+        event.preventDefault()
+        if (rowTrigger.current?.isConnected) rowTrigger.current.focus()
+        else searchInput.current?.focus()
+      }}>
+        {selected && <SopDetail item={selected} onOpenPair={onOpenPair} />}
+      </SheetContent>
+    </Sheet>
+  </>
 }
 
 export function VocKnowledgeLibrary(props: Props) {

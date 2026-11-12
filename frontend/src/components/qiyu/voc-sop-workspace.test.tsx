@@ -26,19 +26,47 @@ it('opens exact conversation evidence and copies only reusable steps from a comp
   const open = vi.fn()
   render(<VocSopWorkspace filters={{ source: 'local', days: 7 }} onOpenPair={open} />)
 
-  const [first, second] = screen.getAllByRole('article')
-  const verifiedCard = within(first)
-  expect(verifiedCard.getByRole('heading', { name: complete.title })).toBeTruthy()
-  expect(verifiedCard.getByText('尝试未奏效')).toBeTruthy()
-  const result = verifiedCard.getByRole('heading', { name: '复测结果' }).closest('section')!
+  fireEvent.click(screen.getByRole('button', { name: /机器人场景未触发/ }))
+  const verified = within(screen.getByRole('dialog', { name: complete.title }))
+  expect(verified.getByText('尝试未奏效')).toBeTruthy()
+  const result = verified.getByRole('heading', { name: '复测结果' }).closest('section')!
   fireEvent.click(within(result).getByRole('button', { name: '定位原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '123' }), 'm6')
-  expect(within(second).queryByRole('button', { name: '复制 SOP' })).toBeNull()
-  expect(within(second).getByText('待补充 复测结果')).toBeTruthy()
 
-  fireEvent.click(verifiedCard.getByRole('button', { name: '复制 SOP' }))
+  fireEvent.click(verified.getByRole('button', { name: '复制 SOP' }))
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('开启子账号权限后保存。')))
   expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining('试过重新启动。'))
+  fireEvent.click(verified.getByRole('button', { name: 'Close' }))
+  fireEvent.click(screen.getByRole('button', { name: /待补复测的其他会话/ }))
+  const pending = within(screen.getByRole('dialog', { name: incomplete.title }))
+  expect(pending.queryByRole('button', { name: '复制 SOP' })).toBeNull()
+  expect(pending.getByText('复测结果')).toBeTruthy()
+  fireEvent.click(pending.getByRole('button', { name: 'Close' }))
   fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理 SOP' }), { target: { value: '回复正常' } })
-  expect(screen.getAllByRole('article')).toHaveLength(1)
+  expect(within(screen.getByRole('list', { name: 'SOP 案例' })).getAllByRole('listitem')).toHaveLength(1)
+})
+
+it('opens the next page, resets to page one on search or filter, and supports empty statuses', () => {
+  const items = Array.from({ length: 18 }, (_, index): VocSop => ({
+    id: `sop-${index + 1}`, topic_id: '', qa_id: index + 1, title: `场景案例 ${index + 1}`,
+    kind: 'configuration', status: 'incomplete', problem: ref(`m${index}`, '测试对话'),
+    conditions: [], steps: [], result: null, missing: ['action'],
+  }))
+  vi.mocked(useApi).mockReturnValue({ data: { items, total: items.length }, loading: false, refreshing: false, error: null, retry: vi.fn() })
+  render(<VocSopWorkspace filters={{ source: 'local', days: 7 }} onOpenPair={vi.fn()} />)
+
+  const list = within(screen.getByRole('list', { name: 'SOP 案例' }))
+  expect(list.getAllByRole('listitem')).toHaveLength(10)
+  fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+  expect(list.getAllByRole('listitem')).toHaveLength(8)
+  expect(screen.getByRole('button', { name: '第 2 页' }).getAttribute('aria-current')).toBe('page')
+  expect(screen.getByText('11–18 / 共 18 条')).toBeTruthy()
+  expect(list.getByRole('button', { name: /场景案例 18/ })).toBeTruthy()
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理 SOP' }), { target: { value: '18' } })
+  expect(list.getAllByRole('listitem')).toHaveLength(1)
+  expect(screen.getByRole('button', { name: '第 1 页' }).getAttribute('aria-current')).toBe('page')
+  fireEvent.click(screen.getByRole('button', { name: /效果已验证 0/ }))
+  expect(screen.queryByRole('list', { name: 'SOP 案例' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '清除筛选' }))
+  expect(within(screen.getByRole('list', { name: 'SOP 案例' })).getAllByRole('listitem')).toHaveLength(10)
 })

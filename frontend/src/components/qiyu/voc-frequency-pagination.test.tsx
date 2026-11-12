@@ -107,6 +107,46 @@ describe('VOC frequency ranking pagination', () => {
     expect(screen.getByRole('button', { name: /^排名\s*21.*示例主题 21/ })).toBeTruthy()
   })
 
+  it('opens all trend filters when the comparison range is unavailable and resets pagination', async () => {
+    const unbounded = { ...comparison, current: { ...comparison.current, start: '', end: '' }, previous: null, comparable: false }
+    vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+      if (name !== 'voc2/topics') return summary
+      return filters.trend === 'all'
+        ? { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison: unbounded }
+        : { items: [], total: 0, comparison: unbounded }
+    })
+    render(<VocFrequencyWorkspace filters={{ source: 'local', days: 0 }} {...handlers} />)
+
+    await screen.findByText('第 1 / 3 页')
+    fireEvent.click(nextPage())
+    await screen.findByText('第 2 / 3 页')
+    for (const [trend, label] of [['new', '新出现'], ['rising', '明显上升'], ['persistent', '持续高频']]) {
+      const button = screen.getByRole('button', { name: label })
+      fireEvent.click(button)
+      expect(await screen.findByText(`暂无法判断「${label}」，请选择有起止日期的范围进行对比。`)).toBeTruthy()
+      expect(button.getAttribute('aria-pressed')).toBe('true')
+      expect(topicCalls().at(-1)).toMatchObject({ trend, limit: 20, offset: 0 })
+      expect(rankedRows()).toHaveLength(0)
+    }
+    fireEvent.click(screen.getByRole('button', { name: '全部' }))
+    await screen.findByText('第 1 / 3 页')
+    expect(rankedRows()).toHaveLength(20)
+  })
+
+  it('explains which period lacks data when a dated trend filter is empty', async () => {
+    const unavailable = { ...comparison, previous: { ...comparison.previous, source_pairs: 0, processed_pairs: 0 }, comparable: false }
+    vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+      if (name !== 'voc2/topics') return summary
+      return filters.trend === 'all'
+        ? { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison: unavailable }
+        : { items: [], total: 0, comparison: unavailable }
+    })
+    render(<VocFrequencyWorkspace filters={initialScope} {...handlers} />)
+    await screen.findByText('第 1 / 3 页')
+    fireEvent.click(screen.getByRole('button', { name: '明显上升' }))
+    expect(await screen.findByText('上期暂无会话来源，暂无法判断「明显上升」。')).toBeTruthy()
+  })
+
   it('filters trends before pagination and opens an evidence-scoped decision with distinct reuse levels', async () => {
     const fact = (quote: string, messageId: string): Ref => ({
       quote, source: 'answer', role: 'staff', start: 0, end: quote.length, alignment: 'exact',
