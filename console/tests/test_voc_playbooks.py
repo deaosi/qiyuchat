@@ -4,6 +4,7 @@ from copy import deepcopy
 import unittest
 
 from src.voc_playbooks import build
+from tests import test_voc_sops as sop_fixture
 
 
 def ref(mid, quote, ts):
@@ -108,6 +109,68 @@ class TestPlaybooks(unittest.TestCase):
         [item] = build([issue(bad)], [bad])["items"]
         self.assertEqual(item["branches"][0]["status"], "guidance")
         self.assertEqual(item["branches"][0]["result_evidence"], [])
+
+    def test_exact_customer_record_recovers_performed_retest_without_staff_prompt(self):
+        fixture = sop_fixture.TestVocSops()
+        fixture.setUp()
+        quote = "我调整退款场景的触发条件并保存了，用同一个买家问法重新测试退款场景，已经触发了。"
+        feedback = sop_fixture.turn("s", "user", quote, 7)
+        example = fixture.compile([fixture.check, fixture.fix, feedback],
+                                  actions=[{"instruction": sop_fixture.ref(fixture.fix), "feedback": sop_fixture.ref(feedback), "outcome": "success"}])
+        self.assertEqual(example["status"], "verified")
+        self.assertEqual([step["phase"] for step in example["steps"]], ["diagnosis", "action"])
+        [item] = build([issue(example)], [example])["items"]
+        self.assertEqual(item["status"], "verified")
+        [branch] = item["branches"]
+        self.assertEqual(branch["retest"], f"客户实测原话：{quote}")
+        proof = {**example["result"], "qa_id": example["qa_id"]}
+        self.assertEqual(branch["retest_evidence"], [proof])
+        self.assertEqual(branch["result_evidence"], [proof])
+        self.assertEqual([entry["text"] for entry in branch["steps"]], [fixture.check["text"], fixture.fix["text"]])
+
+    def test_observed_retest_withholds_generic_or_out_of_scope_feedback(self):
+        base = case(1)
+        base["steps"].pop()
+        base["steps"][1]["evidence"]["quote"] = "请调整退款场景的触发条件并保存。"
+        samples = (
+            "调整退款场景的触发条件并保存了，现在好了。",
+            "调整退款场景的触发条件并保存了，重新测试后已经触发了。",
+            "调整退款场景的触发条件并保存了，重新测试退款场景，测试成功。",
+            "调整退款场景的触发条件并保存了，准备重新测试退款场景，已经触发了。",
+            "调整退款场景的触发条件并保存了，不用重新测试退款场景，已经触发了。",
+            "调整退款场景的触发条件并保存了，重新测试退款场景，可能已经触发了。",
+            "调整退款场景的触发条件并保存了，重新测试退款场景，页面已经显示了。",
+            "调整退款场景的触发条件并保存了，重新测试发货场景，已经触发了。",
+            "调整退款场景的退款金额并保存了，重新测试退款场景，已经触发了。",
+            "调整退款场景的触发条件并保存了，换到主账号重新测试退款场景，已经触发了。",
+            "调整退款场景的触发条件并保存了，在淘宝重新测试退款场景，已经触发了。",
+            "重新测试退款场景，已经触发了，然后调整退款场景的触发条件并保存了。",
+            "我按您说的步骤做完，重新测试退款场景，已经触发了。",
+        )
+        for quote in samples:
+            with self.subTest(quote=quote):
+                example = deepcopy(base)
+                result = ref("s1", quote, 15)
+                example["result"] = example["steps"][1]["feedback"] = result
+                [item] = build([issue(example)], [example])["items"]
+                self.assertEqual((item["status"], item["branches"]), ("investigation", []))
+                self.assertIn("post_change_retest", item["missing"])
+
+    def test_recovered_retest_cannot_override_a_later_same_scope_failure(self):
+        success, failure = case(1), case(2, result=False)
+        action = "请调整退款场景的触发条件并保存。"
+        feedback = ref("s1", "调整退款场景的触发条件并保存了，重新测试退款场景，已经触发了。", 15)
+        success["steps"].pop()
+        success["steps"][1]["evidence"]["quote"] = action
+        success["result"] = success["steps"][1]["feedback"] = feedback
+        [recovered] = build([issue(success)], [success])["items"]
+        self.assertEqual(recovered["status"], "verified")
+        failure["status"] = "incomplete"
+        failure["steps"][1]["evidence"]["quote"] = action
+        failure["steps"][1].update(outcome="failed", feedback=ref("f2", "重新测试退款场景，仍没有触发。", 30))
+        [item] = build([issue(success, failure)], [success, failure])["items"]
+        self.assertEqual((item["status"], item["branches"]), ("investigation", []))
+        self.assertIn("conflicting_case", item["missing"])
 
     def test_investigation_follows_the_actual_problem(self):
         base = issue()

@@ -58,13 +58,13 @@ class TestEpisodeReplay(unittest.TestCase):
         first, second = segments
         self.assertEqual(first['session_key'], second['session_key'])
         self.assertNotEqual(first['customer_key'], second['customer_key'])
-        self.assertEqual([m['role'] for m in first['messages']], ['user', 'staff', 'user', 'staff', 'user'])
-        self.assertEqual(second['messages'][-1]['role'], 'bot')
+        self.assertEqual([m['role'] for m in first['messages']], ['user', 'user', 'user'])
+        self.assertEqual([m['role'] for m in second['messages']], ['user'])
         serialized = json.dumps(segments, ensure_ascii=False, default=list)
         for private in ('13800138000', 'merchant-a', 'merchant-b', 'private.png', 'source:15429'):
             self.assertNotIn(private, serialized)
         staffed, _ = replay.load_batch(self.cfg, {}, 1, require_staff=True)
-        self.assertEqual(staffed, [first])
+        self.assertEqual(staffed, [])
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_comparison_uses_same_successful_input_and_returns_only_aggregates(self):

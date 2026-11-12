@@ -68,14 +68,7 @@ def _gather(cfg: Settings, *, filters: dict | None = None, session_ids: set[str]
                 snapshot = voc_outcome._snapshot(conn, sid)
             except (ValueError, KeyError, TypeError, OverflowError):
                 continue
-            users = {message["_owner"] for message in snapshot["messages"] if message["role"] == "user"}
-            if len(users) != 1:
-                continue
-            customer_id = next(iter(users))
-            if not customer_id or not customer_id.startswith(_VISITOR_PREFIXES):
-                continue
-            current_qa = {qa[0] for qa in conn.execute("SELECT qa_id FROM qa_pair WHERE session_id=? AND customer_id=?",
-                                                     (sid, customer_id))}
+            qa_owners = dict(conn.execute("SELECT qa_id,customer_id FROM qa_pair WHERE session_id=?", (sid,)))
             session_key = "s_" + voc_assets.digest(["raw-session", sid])
             names = sorted({name for key in ("user_name", "staff_name", "from_group")
                             if len(name := mask_pii((row[key] or "").strip())) >= 2}, key=lambda name: (-len(name), name))
@@ -84,8 +77,14 @@ def _gather(cfg: Settings, *, filters: dict | None = None, session_ids: set[str]
                      if message.get("source_message_id")}
             for segment in _segments(snapshot, session_key, names):
                 source_ids = segment.pop("source_ids")
+                owners = {by_id[mid]["_owner"] for mid in source_ids}
+                if len(owners) != 1:
+                    continue
+                customer_id = next(iter(owners))
+                if not customer_id or not customer_id.startswith(_VISITOR_PREFIXES):
+                    continue
                 customer_messages = {mid for mid in source_ids if by_id[mid]["role"] == "user" and by_id[mid]["_is_text"]}
-                segment_anchors = {qa: ids for qa, ids in anchors if qa in current_qa and ids <= customer_messages}
+                segment_anchors = {qa: ids for qa, ids in anchors if qa_owners.get(qa) == customer_id and ids <= customer_messages}
                 if not segment_anchors or selected is not None and not selected.intersection(segment_anchors):
                     continue
                 messages = segment["messages"]
@@ -285,7 +284,10 @@ def run(cfg: Settings, *, max_calls: int, max_tokens: int, filters: dict | None 
     extract = extract or voc_episode.extract
     segments = _gather(cfg, filters=filters)
     stored = _stored(cfg)
-    segments = [segment for segment in segments if _due(stored.get(segment["segment_key"]), segment, time.time())]
+    now = time.time()
+    segments = [segment for segment in segments if _due(stored.get(segment["segment_key"]), segment, now)]
+    # Spend the same hourly budget on potential handling evidence first.
+    segments.sort(key=lambda segment: not any(m["role"] == "staff" and m["kind"] == "text" for m in segment["messages"]))
     if not segments:
         return result
     from . import voc_episode_catalog

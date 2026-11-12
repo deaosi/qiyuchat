@@ -48,6 +48,20 @@ def _text(value: str) -> str:
     return mask_pii(clean_visible_text(value)).strip()
 
 
+def _visitor_owners(messages: list[dict], sid: str) -> set[str | None]:
+    owner = None
+    owners = set()
+    for message in messages:
+        if message["role"] == SOURCE_IDENTITY_ROLE:
+            identity = decode_identity(message["content"], sid)
+            owner = identity["customer_id"] if identity else None
+        elif message["role"] == "boundary":
+            owner = None
+        elif message["role"] == "user":
+            owners.add(owner)
+    return owners
+
+
 def _snapshot(conn, sid: str) -> dict:
     """Reproduce the official role/identity projection, never trust staffId alone."""
     from .push_sync import _project, PushSyncError, VERSION as PROJECTION_VERSION
@@ -74,6 +88,7 @@ def _snapshot(conn, sid: str) -> dict:
         raise ValueError("invalid_end_coverage")
     kinds = {f"source:{sid}:{r['id']}": r["mType"] for r in official}
     automated = {f"source:{sid}:{r['id']}" for r in official if r["from"] == 0 and source_auto_reply(r)}
+    mixed_visitors = len(_visitor_owners(raw, sid)) > 1
     owner, segment = None, 0
     for message in raw:
         if message["role"] == SOURCE_IDENTITY_ROLE:
@@ -84,6 +99,9 @@ def _snapshot(conn, sid: str) -> dict:
             owner = None
             segment += 1
         message["_owner"], message["_segment"] = owner, segment
+        # Sender controls prove who spoke next, not which visitor a reply was sent to.
+        if mixed_visitors and message["role"] in ("staff", "bot"):
+            message["_owner"] = None
         source_id = message.get("source_message_id")
         message["_is_text"] = kinds.get(source_id) == 1
         message["_automated"] = source_id in automated

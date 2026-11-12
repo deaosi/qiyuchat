@@ -29,6 +29,7 @@ from .knowledge_model import _staff_answer
 from .voc_extract import (VERSION, MAX_OUTPUT_TOKENS, MAX_SOURCE_CHARS, GatewayProvider,
                           LangExtractAligner, canonical, request_payload, validate, output_token_limit, correction_feedback)
 from .voc_model import VocModelError
+from .voc_outcome import _visitor_owners
 from .voc_semantics import LocalBGE, SemanticError, retrieve
 from .voc_search import rank_materials
 
@@ -91,6 +92,7 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
                 official_sessions = {row[0] for row in conn.execute("""SELECT session_id FROM push_sync_state
                     WHERE status='completed' AND source_json<>'' AND source_version=version""")}
         anchored_column = "raw_message" in tables and "source_message_id" in {row[1] for row in conn.execute("PRAGMA table_info(raw_message)")}
+        mixed_visitor_sessions = {}
         for qa_id in list(source):
             row = source[qa_id]
             row["_domain_mode"] = variants.mode(cfg)
@@ -130,7 +132,18 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
                 row["_known_merchant"] = assets.digest(["verified-merchant", raw_customer]) if known else ""
             row["_answer_parts"] = []
             row["_staff_verified"] = False
-            if row["answer"] and row["_question_parts"] and answer_ids and anchored_column:
+            raw_context = []
+            if row["_domain_mode"] and anchored_column and row["_question_parts"]:
+                raw_context = [dict(message) for message in conn.execute(
+                    "SELECT seq,role,content,ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq", (raw_sid,))]
+                if raw_sid not in mixed_visitor_sessions:
+                    mixed_visitor_sessions[raw_sid] = len(_visitor_owners(raw_context, raw_sid)) > 1
+            mixed_visitors = mixed_visitor_sessions.get(raw_sid, False)
+            if mixed_visitors:
+                # Keep the official conversation intact. Its ambiguous replies cannot support VOC claims.
+                row["answer"] = ""
+                row["answer_message_ids"] = []
+            elif row["answer"] and row["_question_parts"] and answer_ids and anchored_column:
                 answer, answer_parts = _anchored_text(conn, raw_sid, answer_ids, "staff")
                 if answer == row["answer"] and answer_parts:
                     row["_answer_parts"], row["_staff_verified"] = answer_parts, True
@@ -141,27 +154,26 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
                 staff = "\n".join(_staff_answer(message.get("content")) for message in visible if message.get("role") == "staff")
                 row["_staff_verified"] = row["answer"] in staff
             row["_context"] = []
-            if row["_domain_mode"] and anchored_column and row["_question_parts"]:
-                raw_context = [dict(message) for message in conn.execute(
-                    "SELECT seq,role,content,ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq", (raw_sid,))]
-                if any(message["role"] == SOURCE_IDENTITY_ROLE for message in raw_context):
-                    visible = sender_context(raw_context, raw_sid, raw_customer)
-                    anchors = {part["message_id"] for part in row["_question_parts"] + row["_answer_parts"]}
-                    current = [index for index, message in enumerate(visible) if message.get("source_message_id") in anchors]
-                    if current:
-                        near = visible[max(0, min(current) - 3):max(current) + 4]
-                        remaining = 1200
-                        for message in near:
-                            mid = message.get("source_message_id")
-                            if not mid or mid in anchors or message["role"] not in ("user", "staff"):
-                                continue
-                            text = mask_pii(clean_visible_text(str(message.get("content") or "")))
-                            if not text or len(text) > min(400, remaining):
-                                continue
-                            row["_context"].append({"source_ref": "ctx_" + assets.digest(mid)[:20],
-                                "role": "merchant" if message["role"] == "user" else "staff", "content": text,
-                                "comparison_only": True})
-                            remaining -= len(text)
+            if any(message["role"] == SOURCE_IDENTITY_ROLE for message in raw_context):
+                visible = sender_context(raw_context, raw_sid, raw_customer)
+                if mixed_visitors:
+                    visible = [message for message in visible if message["role"] == "user"]
+                anchors = {part["message_id"] for part in row["_question_parts"] + row["_answer_parts"]}
+                current = [index for index, message in enumerate(visible) if message.get("source_message_id") in anchors]
+                if current:
+                    near = visible[max(0, min(current) - 3):max(current) + 4]
+                    remaining = 1200
+                    for message in near:
+                        mid = message.get("source_message_id")
+                        if not mid or mid in anchors or message["role"] not in ("user", "staff"):
+                            continue
+                        text = mask_pii(clean_visible_text(str(message.get("content") or "")))
+                        if not text or len(text) > min(400, remaining):
+                            continue
+                        row["_context"].append({"source_ref": "ctx_" + assets.digest(mid)[:20],
+                            "role": "merchant" if message["role"] == "user" else "staff", "content": text,
+                            "comparison_only": True})
+                        remaining -= len(text)
             fingerprint_data = {key: row[key] for key in (
                 "session_id", "customer_id", "question", "answer", "asked_at", "group_name", "staff_name",
                 "question_message_ids", "answer_message_ids", "_evidence_key", "_staff_verified", "_origin_fingerprint", "_session_key")}

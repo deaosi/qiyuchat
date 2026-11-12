@@ -7,8 +7,9 @@ import re
 import unicodedata
 
 from .voc_assets import digest
-from .voc_issue_pilot import _GENERIC_MODULES, _MODULES
-from .voc_sops import _post_retest
+from .voc_episode_evidence import _APPLIED, _confirmed
+from .voc_issue_pilot import _AUDIENCES, _GENERIC_MODULES, _MODULES, _TRIGGERS, _VERSION
+from .voc_sops import _PRESCRIBED_ACTIONS, _post_retest
 from .voc_topic_insights import _PLATFORM_NAMES
 
 
@@ -76,6 +77,16 @@ _UNBOUND_SCOPE = {"", "未知", "未确认", "待确认", "未识别", "未明�
 _BLOCKERS = {"applicability", "unbound_condition", "unsafe_step", "later_counterevidence"}
 _PHASES = {"diagnosis", "action", "retest", "escalation"}
 _REF_LIMIT = 8
+_PERFORMED_RETEST = re.compile(r"重新测试|复测|实测|再(?:测|试)了(?:一次|一遍)?")
+_PROPOSED_RETEST = re.compile(r"如果|只要|尚未|未|没|不用|无需|不必|不要|不是|并非|应该|准备|计划|打算|将要|接下来|需要|还要|(?:^|\s)要|建议|请|可以|得先|等会|稍后")
+_UNCERTAIN_RESULT = re.compile(r"可能|大概|似乎|怀疑|听说|看起来|预计|应该|好像|估计|不确定|不清楚|尚待确认")
+_RETEST_SCOPE_CHANGE = re.compile(r"(?:换(?:了|到|成|用)?|改用|切换(?:到|成|为)?)[^，,。；;\n]{0,8}(?:店|平台|账号|版本)|(?:别的|另一(?:个|家)|不同的?)(?:店铺|平台|账号|版本)")
+_RETEST_OUTCOME = re.compile(
+    r"(?:已经|已|成功|正常|确实|顺利)[^，,。！？\n]{0,12}(?:触发|命中|回复|同步|生效|显示|恢复|登录|登陆|导入|导出|下发|送达)"
+    r"|(?:触发|命中|回复|同步|生效|显示|恢复|登录|登陆|导入|导出|下发|送达)(?:了|成功|正常|通过)"
+)
+_RETEST_BOUNDARY = re.compile(r"[。！？!?；;\n]")
+_OPERATION_BOUNDARY = re.compile(r"[，,。！？!?；;\n]|(?:之后|后再|后重新|再复测|然后|接着)")
 
 
 def _key(value: object) -> str:
@@ -244,7 +255,70 @@ def _failures(steps: list[dict], missing: set) -> list[tuple]:
     return contradicted
 
 
-def _branch(case: dict, steps: list[dict], label: str, scope_refs: list[dict], problem: dict, missing: set) -> tuple[dict | None, str]:
+def _scope_signals(text: str) -> tuple[set[str], ...]:
+    return (_platforms(text), {role for role in _AUDIENCES if role in text},
+            {re.search(r"\d+(?:\.\d+)+", match[0])[0] for match in _VERSION.finditer(text)},
+            {name for name, pattern in _TRIGGERS.items() if re.search(pattern, text, re.I)})
+
+
+def _completed_before_retest(actions: list[dict], before: str) -> bool:
+    count = [0] * len(_PRESCRIBED_ACTIONS)
+    reported = _key(before).replace("的", "")
+    for step in actions:
+        instruction = step["evidence"]["quote"]
+        occurrences = sorted((match.start(), match.end(), index) for index, pattern in enumerate(_PRESCRIBED_ACTIONS)
+                             for match in pattern.finditer(instruction))
+        if not occurrences:
+            return False
+        for i, (_, end, index) in enumerate(occurrences):
+            limit = occurrences[i + 1][0] if i + 1 < len(occurrences) else len(instruction)
+            target = _key(_OPERATION_BOUNDARY.split(instruction[end:limit], maxsplit=1)[0]).replace("的", "")
+            target = re.sub(r"^(?:这个|该|这条|此)", "", target)
+            if len(target) >= 2 and target not in reported:
+                return False
+            count[index] += 1
+    return all(len(list(pattern.finditer(before))) >= required for pattern, required in zip(_APPLIED, count) if required)
+
+
+def _retest_resolves_issue(issue: dict, observed: str, full_result: str) -> bool:
+    if issue["family"] != "no_reply":
+        return True
+    title = issue["title"]
+    if re.search(r"未触发|不触发|未命中|不命中|触发失败", title):
+        return bool(re.search(r"触发|命中", observed))
+    if re.search(r"回复错误|答非所问|答错|回错", title):
+        return "回复" in observed and bool(re.search(r"正确|符合预期|一致", full_result))
+    return bool(re.search(r"回复|下发|送达", observed))
+
+
+def _observed_customer_retest(issue: dict, scope_refs: list[dict], problem: dict, actions: list[dict], feedback: str) -> bool:
+    """Recover a performed, same-target retest without writing an instruction."""
+    module = issue["module"]
+    pattern = _MODULES.get(module) or _GENERIC_MODULES.get(module) or re.escape(module)
+    supported = "\n".join([problem["quote"], *(ref["quote"] for ref in scope_refs)])
+    if (_RETEST_SCOPE_CHANGE.search(feedback)
+            or any(not reported <= anchored for reported, anchored in zip(_scope_signals(feedback), _scope_signals(supported)))
+            or any(re.search(alias, feedback, re.I) and not re.search(alias, supported, re.I) for alias in _MODULES.values())
+            or not all(_confirmed(step["evidence"]["quote"], feedback) for step in actions)):
+        return False
+
+    for retest in _PERFORMED_RETEST.finditer(feedback):
+        before = feedback[:retest.start()]
+        leading_clause = re.split(r"[，,。！？!?；;\n]", before)[-1]
+        after = _RETEST_BOUNDARY.split(feedback[retest.end():], maxsplit=1)[0]
+        outcome = _RETEST_OUTCOME.search(after)
+        if (_PROPOSED_RETEST.search(leading_clause) or outcome is None
+                or _UNCERTAIN_RESULT.search(after) or not _retest_resolves_issue(issue, outcome[0], after[outcome.start():])
+                or not re.search(pattern, before, re.I) or not re.search(pattern, after[:outcome.end()], re.I)):
+            continue
+        # Each action type in every separate staff turn must be reported as
+        # completed before the test. Generic “按步骤做完” cannot satisfy it.
+        if _completed_before_retest(actions, before):
+            return True
+    return False
+
+
+def _branch(issue: dict, case: dict, steps: list[dict], label: str, scope_refs: list[dict], problem: dict, missing: set) -> tuple[dict | None, str]:
     if missing.intersection(_BLOCKERS) or case.get("status") not in ("guidance", "verified"):
         return None, "complete_procedure"
     failed_through = max((step["feedback"]["ts"] if step["feedback"] else step["evidence"]["ts"]
@@ -253,22 +327,32 @@ def _branch(case: dict, steps: list[dict], label: str, scope_refs: list[dict], p
     actions = [step for step in path if step["phase"] == "action"]
     if not actions:
         return None, "complete_procedure"
-    retest = _post_retest(path, require_action=True)
-    if retest is None:
-        return None, "post_change_retest"
-    retest_step, retest_text = retest
-    procedure = [step for step in path[:retest_step + 1] if step["phase"] in ("diagnosis", "action")]
-    # An escalation is optional and kept as an exact sourced fallback.
-    escalation = next((step for step in path[retest_step + 1:] if step["phase"] == "escalation"), None)
     result = _ref(case.get("result"), problem["qa_id"])
     verified = (case["status"] == "verified" and result is not None
-                and result["ts"] > path[retest_step]["evidence"]["ts"]
-                and all(step["outcome"] == "verified" and step["feedback"] == result for step in actions))
+                and all(step["evidence"]["ts"] < result["ts"] and step["outcome"] == "verified" and step["feedback"] == result
+                        for step in actions))
+    retest = _post_retest(path, require_action=True)
+    if retest is None:
+        if (not verified or any(step["evidence"]["ts"] >= result["ts"] for step in path if step["phase"] != "escalation")
+                or not _observed_customer_retest(issue, scope_refs, problem, actions, result["quote"])):
+            return None, "post_change_retest"
+        retest_text = f"客户实测原话：{result['quote']}"
+        retest_ref = result
+        before_retest = path
+        after_retest = [step for step in path if step["evidence"]["ts"] > result["ts"]]
+    else:
+        retest_step, retest_text = retest
+        retest_ref = path[retest_step]["evidence"]
+        before_retest, after_retest = path[:retest_step + 1], path[retest_step + 1:]
+        verified = verified and result["ts"] > retest_ref["ts"]
+    procedure = [step for step in before_retest if step["phase"] in ("diagnosis", "action")]
+    # An escalation is optional and kept as an exact sourced fallback.
+    escalation = next((step for step in after_retest if step["phase"] == "escalation"), None)
     return {"condition": label, "condition_evidence": _refs(scope_refs),
             "status": "verified" if verified else "guidance", "case_count": 1,
             "_actions": _action_key(procedure),
             "steps": [{"text": step["evidence"]["quote"], "evidence": [step["evidence"]]} for step in procedure],
-            "retest": retest_text, "retest_evidence": [path[retest_step]["evidence"]],
+            "retest": retest_text, "retest_evidence": [retest_ref],
             "escalation": escalation["evidence"]["quote"] if escalation else "",
             "escalation_evidence": [escalation["evidence"]] if escalation else [],
             "result_evidence": [result] if verified else []}, ""
@@ -335,7 +419,7 @@ def build(issues: list[dict], sops: list[dict]) -> dict:
             case_missing = set(case.get("missing") or [])
             for actions, ref in _failures(steps, case_missing):
                 conflicts[(scope_key, actions)].append(ref)
-            branch, gap = _branch(case, steps, label, scope_refs, problem, case_missing)
+            branch, gap = _branch(issue, case, steps, label, scope_refs, problem, case_missing)
             if branch is None:
                 missing.add(gap)
                 continue
