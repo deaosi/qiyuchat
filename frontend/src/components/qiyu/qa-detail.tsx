@@ -106,10 +106,12 @@ function fullTime(value: string) {
 function messageSender(message: ContextMessage, pair: QAPair) {
   if (message.senderKind === 'fuke_staff') return message.senderName || message.senderAccount || '福客 AI 员工'
   if (message.senderKind === 'unidentified') return ['身份未确认', message.senderName || message.senderAccount].filter(Boolean).join(' · ')
-  if (message.official) return ['人工客服', message.senderName].filter(Boolean).join(' · ')
   switch (message.role) {
-    case 'user': return `客户 · ${message.senderName || customerLabel(pair.customerName, pair.customerId)}`
-    case 'staff': return `客服 · ${message.senderName || pair.staffName || '未记录'}`
+    case 'user': return message.senderName || customerLabel(pair.customerName, pair.customerId)
+    case 'staff': {
+      const name = message.senderName || (message.official ? '' : pair.staffName.trim())
+      return ['', '未记录', '未记录客服'].includes(name) ? '客服' : name
+    }
     case 'bot': return '机器人'
     case 'system': return '系统'
     default: return '消息'

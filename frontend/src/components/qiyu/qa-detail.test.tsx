@@ -54,8 +54,8 @@ describe('embedded case conversation details', () => {
     const transcript = screen.getByRole('list', { name: '会话消息' })
     expect(screen.getByText('案例21完整客户原问题')).toBe(within(transcript).getByText('案例21完整客户原问题'))
     expect(within(transcript).getAllByRole('listitem')).toHaveLength(260)
-    expect(within(transcript).getAllByText('客户 · 合成客户')).toHaveLength(130)
-    expect(within(transcript).getAllByText('客服 · 合成客服')).toHaveLength(130)
+    expect(within(transcript).getAllByText('合成客户')).toHaveLength(130)
+    expect(within(transcript).getAllByText('合成客服')).toHaveLength(130)
     expect(within(transcript).getByText('2026-11-11 09:00:00', { selector: 'time' })).toBeTruthy()
     expect(within(transcript).getAllByText('本次咨询')).toHaveLength(1)
     expect(screen.queryByText('归一化问题')).toBeNull()
@@ -89,12 +89,13 @@ describe('embedded case conversation details', () => {
   })
 
   it.each([true, false])('aligns customer, staff and other messages by sender (embedded=%s)', async embedded => {
-    vi.mocked(apiGet).mockResolvedValue(response('21', [
+    const detail = response('21', [
       message(0, '客户提问'),
       { ...message(1, '自动回复'), role: 'bot' },
       message(3, '客服回答'),
       { ...message(4, '角色未记录的原话'), role: '__proto__' },
-    ]))
+    ])
+    vi.mocked(apiGet).mockResolvedValue({ ...detail, pair: { ...detail.pair, staff_name: '未记录客服' } })
     render(<QADetail pair={pair()} onClose={vi.fn()} embedded={embedded} />)
 
     const transcript = await screen.findByRole('list', { name: '会话消息' })
@@ -104,6 +105,7 @@ describe('embedded case conversation details', () => {
     expect(bot.dataset.side).toBe('center')
     expect(unknown.dataset.side).toBe('center')
     expect(within(customer).getByText('客户提问')).toBeTruthy()
+    expect(within(staff).getByText('客服')).toBeTruthy()
     expect(within(staff).getByText('客服回答')).toBeTruthy()
     expect(within(staff).getByText('2026-11-11 09:00:03', { selector: 'time' })).toBeTruthy()
     expect(within(unknown).getByText('消息')).toBeTruthy()
@@ -125,14 +127,14 @@ describe('embedded case conversation details', () => {
     const rows = within(transcript).getAllByRole('listitem')
     const [customer, employee, accountOnly, unknown, staff, unverifiedName] = rows
     expect(rows.map(row => row.dataset.side)).toEqual(['left', 'right', 'right', 'center', 'right', 'center'])
-    expect(within(customer).getByText('客户 · 客户联系人')).toBeTruthy()
+    expect(within(customer).getByText('客户联系人')).toBeTruthy()
     expect(within(employee).getByText('技术支持王小明')).toBeTruthy()
     expect(within(employee).getByText('福客 AI · 七鱼未识别为客服')).toBeTruthy()
     expect(employee.hasAttribute('data-evidence-anchor')).toBe(true)
     expect(within(employee).queryByText('fallback-id')).toBeNull()
     expect(within(accountOnly).getByText('support-user')).toBeTruthy()
     expect(within(unknown).getByText('身份未确认 · unknown-user')).toBeTruthy()
-    expect(within(staff).getByText('客服 · 坐席赵晓华')).toBeTruthy()
+    expect(within(staff).getByText('坐席赵晓华')).toBeTruthy()
     expect(within(unverifiedName).getByText('身份未确认 · 来源昵称')).toBeTruthy()
     expect(within(transcript).getAllByText('本次咨询')).toEqual([within(customer).getByText('本次咨询')])
     expect(screen.getByText('咨询客户', { selector: 'dt' })).toBeTruthy()
@@ -183,7 +185,7 @@ describe('embedded case conversation details', () => {
 
     expect(within(transcript).getAllByRole('listitem')).toEqual([customer, employee])
     expect(customer.dataset.side).toBe('left')
-    expect(within(customer).getByText('客户 · 客户联系人')).toBeTruthy()
+    expect(within(customer).getByText('客户联系人')).toBeTruthy()
     expect(within(customer).getByText('本次咨询')).toBeTruthy()
     expect(employee.dataset.side).toBe('right')
     expect(employee.hasAttribute('data-evidence-anchor')).toBe(true)
@@ -293,8 +295,8 @@ describe('embedded case conversation details', () => {
     const bodies = rows.map(row => within(row).getByText(/^(已保存的|补取的)/).textContent)
     expect(bodies).toEqual([first.content, '补取的第一条回复', next.content, sameTime.content, '补取的同一时刻回复'])
     expect(rows.map(row => row.dataset.side)).toEqual(['left', 'right', 'left', 'left', 'right'])
-    expect(within(transcript).getByText('人工客服')).toBeTruthy()
-    expect(within(rows[1]).getByText('人工客服 · 实际回复坐席')).toBeTruthy()
+    expect(within(transcript).getByText('客服')).toBeTruthy()
+    expect(within(rows[1]).getByText('实际回复坐席')).toBeTruthy()
     expect(within(transcript).getByText('2026-11-11 09:00:01')).toBeTruthy()
     expect(within(transcript).getByAltText('会话图片').getAttribute('src')).toBe('https://ysf.nosdn.127.net/official-reply.png')
     expect(screen.queryByText(noStaffNotice)).toBeNull()
