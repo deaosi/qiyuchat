@@ -72,7 +72,7 @@ def _candidates(cfg, sources, *, session_ids=None) -> list[dict]:
             records.append({"qa_id": qa_id, "session_id": segment["session_id"], "segment_key": segment["segment_key"],
                             "messages": messages, "anchors": anchor_ids, "original": segment["original"],
                             "fingerprint": assets.digest([_VERSION, voc_solution.VERSION, *fingerprint_parts]),
-                            "previous_fingerprint": assets.digest([_VERSION, "voc-solution-v3", *fingerprint_parts]),
+                            "previous_fingerprint": assets.digest([_VERSION, "voc-solution-v4", *fingerprint_parts]),
                             "size": size, "asked_at": source["asked_at"]})
     return records
 
@@ -91,7 +91,7 @@ def _rows(path: Path, ids=None) -> dict[int, dict]:
 
 
 def _due(row, candidate, now) -> bool:
-    if row is not None and row["state"] == "complete" and row["solution"] and row["fingerprint"] == candidate["previous_fingerprint"]:
+    if row is not None and row["state"] == "running" and row["retry_at"] > now:
         return False
     return (row is None or row["fingerprint"] != candidate["fingerprint"]
             or row["state"] in ("retry", "running") and row["retry_at"] <= now)
@@ -272,7 +272,7 @@ def enrich(cfg, sources, cases, *, proof_by_qa=None):
                 continue
             kinds = {section["kind"] for section in solution["sections"]}
             sections = [*solution["sections"], *(section for section in literal if section["kind"] not in kinds)]
-            order = {"problem": 0, "diagnosis": 1, "action": 2, "decision": 3, "verification": 4}
+            order = {"problem": 0, "diagnosis": 1, "action": 2, "decision": 3, "verification": 4, "next_step": 5}
             sections.sort(key=lambda section: order[section["kind"]])
             solution = {"title": literal[0]["text"][:120], "sections": sections}
         anchors = candidate["anchors"]

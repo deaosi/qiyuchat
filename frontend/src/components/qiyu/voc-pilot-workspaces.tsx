@@ -61,7 +61,7 @@ function SourceLine({ source, onOpenPair, anchored = true, label, children }: { 
     {children}
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       {source.ts > 0 && <span className="tabular-nums">{displayTime(source.ts)}</span>}
-      <Button type="button" variant="ghost" size="xs" onClick={() => openSource(source, onOpenPair, hasAnchor)}>{hasAnchor ? '定位原话' : '查看会话'}<ArrowUpRight /></Button>
+      <Button type="button" variant="outline" size="xs" onClick={() => openSource(source, onOpenPair, hasAnchor)}>{hasAnchor ? '查看原话' : '查看会话'}</Button>
     </div>
   </div>
 }
@@ -241,18 +241,25 @@ const caseStepLabels: Record<VocCasePath['steps'][number]['state'], string> = {
   proposed: '提出建议', reported: '说明处理情况', instructed: '给出操作步骤',
 }
 
-const solutionSectionLabels: Record<VocCaseSolution['sections'][number]['kind'], string> = {
-  problem: '客户问题', diagnosis: '排查判断', action: '处理操作', decision: '处理决定', verification: '验证情况',
+type SolutionSection = VocCaseSolution['sections'][number]
+
+function solutionLabel(section: SolutionSection) {
+  if (section.kind === 'verification') {
+    return section.mode === 'expected' ? '通过标准' : section.mode === 'observed' ? '实际复测' : '会话中的验证说明'
+  }
+  return { problem: '客户问题', diagnosis: '排查判断', action: '客服处理记录',
+    decision: '适用限制', next_step: '下一步怎么做' }[section.kind]
 }
 
-function CaseSolution({ solution, onOpenPair }: { solution: VocCaseSolution; onOpenPair: OpenEvidencePair }) {
-  return <div className="divide-y">{solution.sections.map((section, index) =>
-    <section className="space-y-1 py-3 first:pt-0" key={`${section.kind}-${index}`}>
-      <h3 className="text-sm font-medium">{solutionSectionLabels[section.kind]}</h3>
-      <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{section.text}</p>
-      <div className="flex flex-wrap gap-x-2">{section.evidence.map((source, sourceIndex) =>
-        <Button key={`${source.qa_id}-${source.message_id}-${sourceIndex}`} type="button" variant="ghost" size="xs" onClick={() => openSource(source, onOpenPair)}>
-          {section.evidence.length === 1 ? '定位原话' : `定位原话 ${sourceIndex + 1}`}<ArrowUpRight />
+function CaseSolutionSections({ sections, onOpenPair }: { sections: SolutionSection[]; onOpenPair: OpenEvidencePair }) {
+  return <div className="divide-y">{sections.map((section, index) =>
+    <section className={section.kind === 'next_step' ? 'space-y-2 rounded-md border bg-muted/40 px-4 py-3' : 'space-y-1 py-3'}
+      key={`${section.kind}-${index}`}>
+      <h3 className="text-sm font-medium">{solutionLabel(section)}</h3>
+      <p className={`whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere] ${section.kind === 'next_step' ? 'font-medium' : ''}`}>{section.text}</p>
+      <div className="flex flex-wrap gap-2">{section.evidence.map((source, sourceIndex) =>
+        <Button key={`${source.qa_id}-${source.message_id}-${sourceIndex}`} type="button" variant="outline" size="xs" onClick={() => openSource(source, onOpenPair)}>
+          {section.evidence.length === 1 ? '查看原话' : `查看原话 ${sourceIndex + 1}`}
         </Button>)}</div>
     </section>)}</div>
 }
@@ -286,27 +293,30 @@ function CasePathSource({ item, onOpenPair }: { item: VocCasePath; onOpenPair: O
 }
 
 function CasePathDetail({ item, onOpenPair }: { item: VocCasePath; onOpenPair: OpenEvidencePair }) {
-  const summarizedActions = new Set(item.solution?.sections.filter(section => section.kind === 'action')
-    .flatMap(section => section.evidence.map(source => `${source.qa_id}:${source.message_id}`)))
-  const recordedActions = item.solution ? item.steps.filter(step => step.actor === 'staff'
-    && !summarizedActions.has(`${step.evidence.qa_id}:${step.evidence.message_id}`)) : []
+  const sections = item.solution?.sections ?? []
+  const next = sections.find(section => section.kind === 'next_step')
+  const expected = sections.filter(section => section.kind === 'verification' && section.mode === 'expected')
+  const observed = sections.filter(section => section.kind === 'verification' && section.mode === 'observed')
+  const limits = sections.filter(section => section.kind === 'decision')
+  const context = sections.filter(section => section.kind === 'problem' || section.kind === 'diagnosis' || section.kind === 'action'
+    || section.kind === 'verification' && section.mode === undefined)
   return <>
     <SheetHeader className="shrink-0 gap-2 border-b px-5 py-5 pr-10">
       <SheetTitle className="text-lg [overflow-wrap:anywhere]">{item.solution?.title ?? '案例处理记录'}</SheetTitle>
       <SheetDescription className={item.platform ? undefined : 'sr-only'}>{item.platform || '查看客户咨询和会话中的处理经过。'}</SheetDescription>
     </SheetHeader>
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
-      {item.solution ? <CaseSolution solution={item.solution} onOpenPair={onOpenPair} /> : <CasePathSource item={item} onOpenPair={onOpenPair} />}
-      {recordedActions.length > 0 && <section className="space-y-2 border-t pt-3">
-        <h3 className="text-sm font-medium">客服原话中的其他操作</h3>
-        <ul className="divide-y">{recordedActions.map((step, index) => <li key={`${step.evidence.message_id}-${index}`}>
-          <SourceLine source={step.evidence} onOpenPair={onOpenPair} label={step.state === 'reported' ? '客服称已执行' : '客服提到的做法'} />
-        </li>)}</ul>
-      </section>}
-      {!item.solution?.sections.some(section => section.kind === 'verification') && <p className="border-t pt-3 text-sm text-muted-foreground">未记录复测结果</p>}
+      {item.solution ? <>
+        {!next && <p className="text-sm text-muted-foreground">未提炼出有会话依据的下一步。</p>}
+        <CaseSolutionSections sections={[...(next ? [next] : []), ...expected, ...limits, ...observed]} onOpenPair={onOpenPair} />
+      </> : <CasePathSource item={item} onOpenPair={onOpenPair} />}
+      {observed.length === 0 && <p className="border-t pt-3 text-sm text-muted-foreground">未记录复测结果</p>}
       {item.solution && <details className="border-t pt-3 text-sm">
-        <summary className="w-fit cursor-pointer font-medium">{item.steps.length > 0 ? '原始处理记录' : '原始咨询'}</summary>
-        <div className="mt-3 space-y-4"><CasePathSource item={item} onOpenPair={onOpenPair} /></div>
+        <summary className="w-fit cursor-pointer font-medium">处理经过与原始记录</summary>
+        <div className="mt-3 space-y-4">
+          <CaseSolutionSections sections={context} onOpenPair={onOpenPair} />
+          <CasePathSource item={item} onOpenPair={onOpenPair} />
+        </div>
       </details>}
     </div>
   </>
@@ -344,7 +354,8 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { item
           onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'case', id: item.id }) }}>
           <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
             <span className="line-clamp-2 font-medium">{item.solution?.title ?? item.problem.quote}</span>
-            <span className="line-clamp-1 text-sm text-muted-foreground">{item.solution?.sections.find(section => section.kind === 'action')?.text ?? item.steps[0]?.action}</span>
+            <span className="line-clamp-1 text-sm text-muted-foreground">{item.solution?.sections.find(section => section.kind === 'next_step')?.text
+              ?? item.steps[0]?.action}</span>
             <span className="block text-xs text-muted-foreground">{[item.platform, item.problem.ts > 0 ? displayTime(item.problem.ts) : ''].filter(Boolean).join(' · ')}</span>
           </span>
           <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />

@@ -33,7 +33,7 @@ it('shows an unfamiliar product issue and opens its exact conversation anchor', 
   expect(detail.queryByText('核对授权回执。')).toBeNull()
   expect(detail.getByText('原因确认', { exact: false })).toBeTruthy()
   expect(detail.getByRole('link', { name: '查看处理手册' }).getAttribute('href')).toBe(`#voc-next?issue=${issueId}`)
-  fireEvent.click(detail.getByRole('button', { name: '定位原话' }))
+  fireEvent.click(detail.getByRole('button', { name: '查看原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-3')
 })
 
@@ -72,7 +72,7 @@ it('shows the actual authorization consultation and exact message instead of a s
   expect(detail.getByText('使用的平台、完整处理记录')).toBeTruthy()
   expect(detail.queryByText(/授权角色|排查决策|检查账户权限|旧版会话依据/)).toBeNull()
   expect(detail.queryByRole('button', { name: '复制处理步骤' })).toBeNull()
-  fireEvent.click(detail.getByRole('button', { name: '定位原话' }))
+  fireEvent.click(detail.getByRole('button', { name: '查看原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: question.quote }), 'source-3')
   fireEvent.click(detail.getByRole('button', { name: '查看会话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '61' }), undefined)
@@ -109,7 +109,7 @@ it('shows the sourced operation ahead of pending consultations and keeps the act
   const original = detail.getByText('查看客服原话').closest('details')!
   expect(within(original).getByText(evidence.quote)).toBeTruthy()
   fireEvent.click(original.querySelector('summary')!)
-  fireEvent.click(within(original).getByRole('button', { name: '定位原话' }))
+  fireEvent.click(within(original).getByRole('button', { name: '查看原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-4')
 })
 
@@ -128,7 +128,9 @@ it('makes the model summary searchable and opens the exact evidence for a model-
       { kind: 'problem', text: '客户反馈回复「稍等」后没有待办。', evidence: [problem] },
       { kind: 'diagnosis', text: '问题发生在机器人回复后的待办生成环节。', evidence: [problem] },
       { kind: 'action', text: '客服将当前知识配置为加入待办。', evidence: [action] },
-      { kind: 'verification', text: '本案例中，客户再次发送相同内容后看到了待办。', evidence: [followup] },
+      { kind: 'next_step', text: '保持 AI 回复，用同样的“稍等”场景复测。', evidence: [problem, action] },
+      { kind: 'verification', mode: 'expected', text: '同时确认 AI 照常回复并生成待办。', evidence: [problem] },
+      { kind: 'verification', mode: 'observed', text: '本案例中，客户再次发送相同内容后看到了待办。', evidence: [followup] },
     ] },
   }
   const open = vi.fn()
@@ -137,24 +139,27 @@ it('makes the model summary searchable and opens the exact evidence for a model-
   fireEvent.click(screen.getByRole('button', { name: /拼多多回复后未生成待办/ }))
 
   const detail = within(screen.getByRole('dialog', { name: '拼多多回复后未生成待办' }))
-  const operation = detail.getByRole('heading', { name: '处理操作' }).closest('section')!
+  const next = detail.getByRole('heading', { name: '下一步怎么做' }).closest('section')!
+  expect(within(next).getByText('保持 AI 回复，用同样的“稍等”场景复测。')).toBeTruthy()
+  const criteria = detail.getByRole('heading', { name: '通过标准' }).closest('section')!
+  expect(next.compareDocumentPosition(criteria) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(within(criteria).getByText('同时确认 AI 照常回复并生成待办。')).toBeTruthy()
+  const original = detail.getByText('处理经过与原始记录').closest('details')!
+  expect(original.open).toBe(false)
+  fireEvent.click(original.querySelector('summary')!)
+  const operation = within(original).getByRole('heading', { name: '客服处理记录' }).closest('section')!
   expect(within(operation).getByText('客服将当前知识配置为加入待办。')).toBeTruthy()
-  fireEvent.click(within(operation).getByRole('button', { name: '定位原话' }))
+  fireEvent.click(within(operation).getByRole('button', { name: '查看原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: action.quote }), 'source-4')
-  const additional = within(detail.getByRole('heading', { name: '客服原话中的其他操作' }).closest('section')!)
-  expect(additional.getByText(additionalSource.quote)).toBeTruthy()
-  expect(additional.getByText('客服提到的做法')).toBeTruthy()
-  expect(additional.queryByText('客服称已执行')).toBeNull()
-  expect(additional.queryByText(action.quote)).toBeNull()
-  fireEvent.click(additional.getByRole('button', { name: '定位原话' }))
-  expect(open).toHaveBeenLastCalledWith(expect.objectContaining({ id: '42' }), 'source-5')
+  expect(within(original).getByText(additionalSource.quote)).toBeTruthy()
+  expect(within(original).getByText('客服 · 提出建议')).toBeTruthy()
   expect(detail.getByText('本案例中，客户再次发送相同内容后看到了待办。')).toBeTruthy()
-  expect(detail.getByText('原始处理记录').closest('details')?.open).toBe(false)
   expect(detail.queryByText('未记录复测结果')).toBeNull()
   expect(detail.queryByText('效果已验证')).toBeNull()
   expect(detail.queryByRole('button', { name: '复制处理步骤' })).toBeNull()
   const { solution } = path
-  rerender(<VocPlaybookResults items={[]} casePaths={[{ ...path, solution: { ...solution!, sections: solution!.sections.filter(section => section.kind !== 'verification') } }]} onOpenPair={open} />)
+  rerender(<VocPlaybookResults items={[]} casePaths={[{ ...path, solution: { ...solution!, sections: solution!.sections.filter(section => section.mode !== 'observed') } }]} onOpenPair={open} />)
+  expect(detail.getByRole('heading', { name: '通过标准' })).toBeTruthy()
   expect(detail.getByText('未记录复测结果')).toBeTruthy()
 })
 
@@ -185,7 +190,7 @@ it('preserves the playbook deep link and copies only branches with sourced steps
   expect(detail.queryByText(/清空店铺授权|转交平台核对/)).toBeNull()
   const evidence = detail.getByText('步骤依据').closest('details')!
   fireEvent.click(evidence.querySelector('summary')!)
-  fireEvent.click(within(evidence).getByRole('button', { name: '定位原话' }))
+  fireEvent.click(within(evidence).getByRole('button', { name: '查看原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-3')
   fireEvent.click(detail.getByRole('button', { name: '复制处理步骤' }))
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('核对回执与子账号是否一致。')))

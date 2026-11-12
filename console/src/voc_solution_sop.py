@@ -58,6 +58,9 @@ def _sections(case: dict, indexed: dict, qa_id: int) -> dict[str, list[list[dict
         if not isinstance(section, dict) or not isinstance(section.get("evidence"), list):
             return {}
         kind = section.get("kind")
+        if kind == "next_step" or kind == "verification" and section.get("mode") == "expected":
+            # A proposed next action or acceptance target is not a performed SOP step.
+            continue
         if kind not in ("problem", "diagnosis", "action", "decision", "verification"):
             return {}
         refs = [_bind(ref, indexed, qa_id, full_turn=True) for ref in section["evidence"]]

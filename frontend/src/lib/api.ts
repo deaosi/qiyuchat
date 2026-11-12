@@ -210,7 +210,7 @@ const vocPilotFamilies = ['no_reply', 'scenario_config', 'configuration', 'anoma
 const vocPilotEvidenceStatuses = ['reported', 'staff_investigated', 'cause_confirmed'] as const
 const vocPlaybookStatuses = ['investigation', 'guidance', 'verified'] as const
 const vocCasePathStepStates = ['proposed', 'reported', 'instructed'] as const
-const vocCaseSolutionKinds = ['problem', 'diagnosis', 'action', 'decision', 'verification'] as const
+const vocCaseSolutionKinds = ['problem', 'diagnosis', 'action', 'decision', 'verification', 'next_step'] as const
 export type VocPilotFamily = typeof vocPilotFamilies[number]
 export type VocPilotEvidence = { qa_id: number; message_id: string; quote: string; ts: number }
 export type VocPilotCase = VocPilotEvidence & {
@@ -263,7 +263,7 @@ export type VocPlaybook = Pick<VocPilotIssue, 'id' | 'family' | 'title' | 'platf
 }
 export type VocCaseSolution = {
   title: string
-  sections: { kind: typeof vocCaseSolutionKinds[number]; text: string; evidence: VocPilotEvidence[] }[]
+  sections: { kind: typeof vocCaseSolutionKinds[number]; text: string; evidence: VocPilotEvidence[]; mode?: 'expected' | 'observed' }[]
 }
 export type VocCasePath = {
   id: string
@@ -353,6 +353,7 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
   const caseSolution = (v: unknown) => isRecord(v) && typeof v.title === 'string' && Boolean(v.title.trim())
     && Array.isArray(v.sections) && v.sections.length > 0 && v.sections.every(section => isRecord(section)
       && vocCaseSolutionKinds.some(kind => kind === section.kind)
+      && (section.mode === undefined || section.kind === 'verification' && (section.mode === 'expected' || section.mode === 'observed'))
       && typeof section.text === 'string' && Boolean(section.text.trim())
       && Array.isArray(section.evidence) && section.evidence.length > 0 && pilotEvidenceList(section.evidence))
   const casePath = (v: unknown) => isRecord(v) && typeof v.id === 'string' && Boolean(v.id.trim())

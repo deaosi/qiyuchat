@@ -105,6 +105,35 @@ class TestVocSolution(unittest.TestCase):
         self.assertEqual(len(complete.call_args_list[1].args[2]["sections"]), 3)
         self.assertEqual(result["solution"]["sections"][-1]["evidence"][0]["message_id"], "goal")
 
+    def test_handoff_checks_current_configuration_without_sacrificing_the_customer_goal(self):
+        applied = message("configured", "staff", 4500, "这是知识缺失，我这边已经配置为通用知识了。")
+        rejected = message("rejected", "staff", 5000, "要不要拦截 AI 的稍等回复直接转待办？")
+        keep_reply = message("keep-reply", "user", 5500, "我需要 AI 正常回复，同时加入待办。")
+        limit = message("limit", "staff", 6000, "仅参考聊天记录，没命中任何知识的话，不能加待办。")
+        result, complete = self.extract([*self.messages, applied, rejected, keep_reply, limit], [
+            self.question_claim,
+            claim("action", "已配置通用知识加入待办。", self.action, applied, actor="staff", state="reported"),
+            claim("next_step", "保留 AI 回复，用相同的“稍等”场景复测客服已配置的通用知识。", self.problem, self.action, applied, keep_reply),
+            claim("verification", "验收时要同时看到 AI 正常回复和新增待办。", self.goal, keep_reply, mode="expected"),
+            claim("decision", "仅参考聊天记录且未命中知识无法加入待办。拦截回复会牺牲客户要求保留的 AI 回复。", rejected, keep_reply, limit),
+        ], {"title_supported": True, "supported": [0, 1, 2, 3, 4]})
+        sections = {section["kind"]: section for section in result["solution"]["sections"]}
+        self.assertEqual(sections["next_step"]["evidence"][-1]["message_id"], "keep-reply")
+        self.assertEqual(sections["verification"]["mode"], "expected")
+        self.assertTrue(any(row[1] == "next_step" for row in complete.call_args_list[1].args[2]["sections"]))
+
+    def test_next_step_without_both_roles_or_independent_approval_is_not_published(self):
+        steps = [
+            (claim("next_step", "开启未提到的关键词开关。", self.problem, self.action), [0, 1]),
+            (claim("next_step", "直接关闭 AI。", self.action), [0, 1]),
+            (claim("next_step", "已经确认复测成功。", self.problem, self.action), [0, 1]),
+        ]
+        for step, supported in steps:
+            with self.subTest(step=step):
+                result, _ = self.extract(self.messages, [self.question_claim, self.action_claim, step],
+                                         {"title_supported": True, "supported": supported})
+                self.assertNotIn("next_step", [section["kind"] for section in result["solution"]["sections"]])
+
     def test_explicit_retest_can_be_reported_until_later_evidence_conflicts(self):
         problem = message("question", "user", 1000, "退款场景已保存，但买家申请退款时没有触发。")
         issue = claim("problem", "买家申请退款后场景未触发。", problem)

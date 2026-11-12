@@ -100,12 +100,18 @@ describe('VOC product evidence responses', () => {
   it('accepts model-discovered cases with sourced sections and no literal steps', async () => {
     const action = { kind: 'action', text: '客服协助将当前知识加入待办。',
       evidence: [{ ...anchor, message_id: 'msg-8', quote: '我这边配置为知识加入待办。' }] }
-    const solution = { title: '拼多多待办触发排查', sections: [action] }
+    const solution = { title: '拼多多待办触发排查', sections: [
+      action,
+      { ...action, kind: 'next_step', text: '保留回复，复测待办。' },
+      { ...action, kind: 'verification', mode: 'expected', text: 'AI 回复且生成待办。' },
+    ] }
     const path = { id: 'path-1', qa_id: anchor.qa_id, problem: anchor, steps: [], platform: '拼多多', outcome: 'not_recorded', solution }
     const data = { items: [], total: 0, case_paths: [path] }
     const invalidPaths = [
       { ...path, solution: undefined },
       { ...path, solution: { ...solution, sections: [{ ...action, kind: 'result' }] } },
+      { ...path, solution: { ...solution, sections: [{ ...action, kind: 'verification', mode: 'assumed' }] } },
+      { ...path, solution: { ...solution, sections: [{ ...action, kind: 'next_step', mode: 'observed' }] } },
       { ...path, solution: { ...solution, sections: [{ ...action, evidence: [] }] } },
       { ...path, solution: { ...solution, sections: [{ ...action, evidence: [{ ...anchor, message_id: '' }] }] } },
     ]

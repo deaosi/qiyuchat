@@ -84,6 +84,13 @@ class TestSolutionStore(unittest.TestCase):
             result = store.run(self.cfg, {}, max_calls=1, max_tokens=100_000, qa_ids={self.qa_id})
         self.assertEqual((result["generated"], result["calls"]), (1, 1))
 
+    def test_upgrade_leaves_an_active_claim_alone_and_refreshes_completed_old_output(self):
+        [candidate] = store._candidates(self.cfg, {self.qa_id: self.sources[self.qa_id]})
+        older = {"fingerprint": candidate["previous_fingerprint"], "state": "running", "retry_at": 1200}
+        self.assertFalse(store._due(older, candidate, 1000))
+        self.assertTrue(store._due(older, candidate, 1200))
+        self.assertTrue(store._due({**older, "state": "complete", "solution": "old"}, candidate, 1000))
+
     def test_partial_review_can_enrich_a_literal_case_but_never_supplies_a_sop_candidate(self):
         def source(number, quote, stamp):
             return {"qa_id": self.qa_id, "message_id": f"source:15429:{number}", "quote": quote, "ts": stamp}

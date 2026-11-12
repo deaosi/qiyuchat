@@ -72,6 +72,16 @@ class TestSolutionSop(unittest.TestCase):
         self.assertIsNone(sop["result"])
         self.assertEqual(playbook["branches"][0]["result_evidence"], [])
 
+    def test_recommended_step_and_expected_acceptance_cannot_be_used_as_retest_proof(self):
+        model, proof, member = fixture()
+        sections = model["solution"]["sections"]
+        sections.append({"kind": "next_step", "evidence": [member]})
+        sections[-2]["mode"] = "observed"
+        [sop] = voc_solution_sop.compile_supported([issue(member)], [model], {42: proof}, [])
+        self.assertEqual(sop["status"], "verified")
+        sections[-2]["mode"] = "expected"
+        self.assertEqual(voc_solution_sop.compile_supported([issue(member)], [model], {42: proof}, []), [])
+
     def test_wrong_issue_actor_chronology_and_source_refs_do_not_promote(self):
         model, proof, member = fixture()
         wrong_platform = {**issue(member), "platform": "淘宝"}
