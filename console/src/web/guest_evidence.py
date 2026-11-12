@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from contextlib import closing
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
-from html import escape
 import json
 import os
 from pathlib import Path
@@ -18,7 +18,7 @@ from ..clean.rules import mask_pii
 from ..config import Settings
 from ..extract.identity import SOURCE_IDENTITY_ROLE, decode_identity
 from ..voc_assets import connection
-from . import case_media
+from . import case_media, guest_evidence_view
 
 TOKEN_PATTERN = r"[A-Za-z0-9_-]{43}"
 PUBLIC_PATH = "/guest/evidence/"
@@ -27,6 +27,10 @@ _WEEK = 7 * 86400
 _TTL_WEEKS = 12
 _MAX_SOURCE_MESSAGES = 4000
 _MAX_CONTEXT_TEXT = 1200
+_FULL_MESSAGE_LIMIT = 6000
+_FULL_CONTEXT_MESSAGES = 400
+_FULL_CONTEXT_CHARS = 90_000
+_MAX_CASES = 20
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _TOKEN = re.compile(TOKEN_PATTERN)
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
@@ -50,18 +54,6 @@ CREATE TABLE IF NOT EXISTS guest_evidence (
 );
 CREATE INDEX IF NOT EXISTS guest_evidence_expires ON guest_evidence(expires);
 """
-
-_STYLE = """
-:root{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;color:#182334;background:#f4f6f9}
-body{margin:0;padding:32px 16px 48px}main{max-width:760px;margin:auto}
-article{background:#fff;border:1px solid #e2e7ed;border-radius:14px;padding:24px}
-.eyebrow,time,.note{color:#53637a;font-size:.875rem}h1{font-size:clamp(1.5rem,4vw,2rem);margin:.35em 0}
-h2{font-size:1.15rem;margin:24px 0 8px}.summary{font-weight:600}.detail,.text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}
-ol{padding:0;list-style:none}li{margin:12px 0;border:1px solid #e6ebf2;border-radius:8px;padding:12px 14px}
-li.staff{background:#f3f7fc}.speaker{font-weight:600;margin-right:10px}.text{margin:6px 0 0}
-@media(max-width:520px){article{padding:16px}}
-"""
-
 
 def _canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -133,7 +125,8 @@ def _private_names(pair: dict, session: dict, messages: list[dict]) -> re.Patter
     return re.compile("|".join(alternatives), re.I)
 
 
-def _message(role: str, stamp: object, value: object, names: re.Pattern[str] | None) -> dict | None:
+def _message(role: str, stamp: object, value: object, names: re.Pattern[str] | None,
+             limit: int = _MAX_CONTEXT_TEXT) -> dict | None:
     text = _clean(case_media.project(value)[0], names)
     if not text:
         return None
@@ -141,7 +134,7 @@ def _message(role: str, stamp: object, value: object, names: re.Pattern[str] | N
         time_text = datetime.fromtimestamp(int(stamp or 0) / 1000, _ZONE).strftime("%Y-%m-%d %H:%M:%S") if int(stamp or 0) > 0 else ""
     except (ValueError, TypeError, OverflowError, OSError):
         time_text = ""
-    return {"role": role, "time": time_text, "text": text[:_MAX_CONTEXT_TEXT] + ("…" if len(text) > _MAX_CONTEXT_TEXT else "")}
+    return {"role": role, "time": time_text, "text": text[:limit] + ("…" if len(text) > limit else "")}
 
 
 def _related_ids(value: object) -> set[str]:
@@ -155,12 +148,12 @@ def _related_ids(value: object) -> set[str]:
 
 
 def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
-                        names: re.Pattern[str] | None) -> list[dict]:
+                        names: re.Pattern[str] | None, *, full: bool) -> tuple[list[dict], bool]:
     customer = pair.get("customer_id")
     questions = _related_ids(origin.get("question_message_ids"))
     answers = _related_ids(origin.get("answer_message_ids"))
     if not questions or not isinstance(customer, str) or not customer or customer.startswith("qiyu-session:"):
-        return []
+        return [], False
     segments: list[list[dict]] = []
     current: list[dict] | None = None
     for row in rows:
@@ -172,14 +165,14 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
                 segments.append(current)
         elif role == "boundary":
             current = None
-        elif current is not None and role in _ROLE:
+        elif current is not None and (role in _ROLE or full and role == "bot"):
             current.append(row)
     matching = [
         segment for segment in segments
         if any(row["role"] == "user" and row["source_message_id"] in questions for row in segment)
     ]
     if len(matching) != 1:
-        return []
+        return [], False
     segment = matching[0]
     q_index = next(index for index, row in enumerate(segment) if row["role"] == "user" and row["source_message_id"] in questions)
     a_index = q_index
@@ -190,13 +183,34 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
             break
     # Always show the question, even when the SOP is anchored to a following answer.
     start, end = max(0, min(q_index, a_index) - 3), max(q_index, a_index) + 5
-    return [
-        message for row in segment[start:end]
-        if (message := _message(row["role"], row["ts"], row["content"], names)) is not None
-    ]
+    if not full:
+        return [message for row in segment[start:end]
+                if (message := _message(row["role"], row["ts"], row["content"], names)) is not None], False
+
+    # A verified identity segment contains the conversation for this case.
+    # For unusually large cases, keep the messages nearest the anchored question.
+    begin = max(0, min(q_index - _FULL_CONTEXT_MESSAGES // 2, len(segment) - _FULL_CONTEXT_MESSAGES))
+    stop = begin + _FULL_CONTEXT_MESSAGES
+    projected = [(index, message) for index, row in enumerate(segment[begin:stop], begin)
+                 if (message := _message(row["role"], row["ts"], row["content"], names,
+                                         _FULL_MESSAGE_LIMIT)) is not None]
+    limited = len(segment) > _FULL_CONTEXT_MESSAGES or any(
+        len(message["text"]) > _FULL_MESSAGE_LIMIT for _, message in projected
+    )
+    if sum(len(message["text"]) for _, message in projected) > _FULL_CONTEXT_CHARS:
+        limited = True
+        size = 0
+        kept = []
+        for index, message in sorted(projected, key=lambda item: (abs(item[0] - q_index), item[0])):
+            size += len(message["text"])
+            if size > _FULL_CONTEXT_CHARS:
+                break
+            kept.append((index, message))
+        projected = sorted(kept, key=lambda item: item[0])
+    return [message for _, message in projected], limited
 
 
-def _case(cfg: Settings, qa_id: int, anchor: str) -> tuple[str, list[dict], str, re.Pattern[str] | None] | None:
+def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tuple[str, list[dict], str, re.Pattern[str] | None] | None:
     source = Path(cfg.runtime.db_path)
     if not source.is_file() or type(qa_id) is not int or qa_id <= 0:
         return None
@@ -231,11 +245,13 @@ def _case(cfg: Settings, qa_id: int, anchor: str) -> tuple[str, list[dict], str,
     if not rows:
         return None
     names = _private_names(pair, dict(session_row), rows)
-    context = _controlled_context(pair, origin, rows, anchor, names) if len(rows) <= _MAX_SOURCE_MESSAGES else []
-    scope = "context" if context else "pair"
+    context, limited = (_controlled_context(pair, origin, rows, anchor, names, full=full)
+                        if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False))
+    scope = ("limited" if limited else "context") if context else "pair"
     if not context:
-        question = _message("user", pair.get("asked_at"), pair.get("question"), names)
-        answer = _message("staff", 0, pair.get("answer"), names)
+        limit = _FULL_MESSAGE_LIMIT if full else _MAX_CONTEXT_TEXT
+        question = _message("user", pair.get("asked_at"), pair.get("question"), names, limit)
+        answer = _message("staff", 0, pair.get("answer"), names, limit)
         if question is None:
             return None
         context = [question] + ([answer] if answer else [])
@@ -252,17 +268,91 @@ def _registry(cfg: Settings) -> Path:
     return Path(cfg.runtime.state_dir).resolve() / "voc-guest-evidence.db"
 
 
-def issue_url(cfg: Settings, qa_id: int | None, anchor_id: str = "", *, entry: dict) -> str:
-    """Persist only redacted published text and an optional source-bound reference."""
+def _sections(value, names) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value[:24]:
+        if not isinstance(item, dict):
+            continue
+        title = _clean(item.get("title"), names)[:180]
+        lines = item.get("lines")
+        if not title or not isinstance(lines, list):
+            continue
+        clean_lines = [line for value in lines[:80] if (line := _clean(value, names)[:3000])]
+        if clean_lines:
+            result.append({"title": title, "lines": clean_lines})
+    return result
+
+
+def _view(value, names) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    taxonomy, metrics = [], []
+    for item in (value["taxonomy"] if isinstance(value.get("taxonomy"), list) else [])[:100]:
+        if not isinstance(item, dict):
+            continue
+        primary, secondary = (_clean(item.get(key), names)[:250] for key in ("primary", "secondary"))
+        if primary or secondary:
+            row = {"primary": primary, "secondary": secondary}
+            if type(item.get("count")) is int and item["count"] >= 0:
+                row["count"] = item["count"]
+            taxonomy.append(row)
+    for item in (value["metrics"] if isinstance(value.get("metrics"), list) else [])[:16]:
+        if not isinstance(item, dict):
+            continue
+        label = _clean(item.get("label"), names)[:200]
+        metric_value = item.get("value")
+        display = _clean(str(metric_value) if type(metric_value) is int else metric_value, names)[:200]
+        if label and display:
+            metrics.append({"label": label, "value": display})
+    return {"taxonomy": taxonomy, "metrics": metrics, "sections": _sections(value.get("sections"), names)}
+
+
+def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
     anchor = _digest(anchor_id) if isinstance(anchor_id, str) and 0 < len(anchor_id) <= 1024 else ""
-    case = _case(cfg, qa_id, anchor) if qa_id is not None else None
-    if qa_id is not None and case is None:
-        return ""
-    safe = _entry(entry, case[3] if case else None)
+    primary = _case(cfg, qa_id, anchor) if qa_id is not None else None
+    if qa_id is not None and primary is None:
+        return None
+    names = primary[3] if primary else None
+    safe = _entry(entry, names)
     if safe is None:
-        return ""
-    binding = {"qa": qa_id, "anchor": anchor, "fingerprint": case[0]} if case else None
-    payload = _canonical({"v": 1, "entry": safe, "case": binding})
+        return None
+    safe.update(_view(view, names))
+    raw_cases = view.get("cases", []) if isinstance(view, dict) else []
+    raw_cases = raw_cases if isinstance(raw_cases, list) else []
+    candidates = raw_cases[:_MAX_CASES]
+    if qa_id is not None and not any(isinstance(item, dict) and item.get("qa_id") == qa_id for item in candidates):
+        if len(candidates) < _MAX_CASES:
+            candidates = [*candidates, {"qa_id": qa_id, "anchor_id": anchor_id}]
+
+    cases = []
+    seen = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = candidate.get("qa_id")
+        if type(source) is not int or source <= 0 or source in seen:
+            continue
+        raw_anchor = candidate.get("anchor_id")
+        pinned = _digest(raw_anchor) if isinstance(raw_anchor, str) and 0 < len(raw_anchor) <= 1024 else ""
+        evidence = _case(cfg, source, pinned, full=True)
+        if evidence is None:
+            continue
+        seen.add(source)
+        case_names = evidence[3]
+        cases.append({"qa": source, "anchor": pinned, "fingerprint": evidence[0],
+                      "title": _clean(candidate.get("title"), case_names)[:450],
+                      "category": _clean(candidate.get("category"), case_names)[:200],
+                      "time": _clean(candidate.get("time"), case_names)[:45],
+                      "sections": _sections(candidate.get("sections"), case_names)})
+    total = view.get("total_cases", len(cases)) if isinstance(view, dict) else len(cases)
+    total = max(total, len(cases)) if type(total) is int and total >= 0 else len(cases)
+    return {"v": 2, "entry": safe, "cases": cases, "total_cases": total}
+
+
+def _save(cfg: Settings, value: dict, replace_token: str = "") -> str:
+    payload = _canonical(value)
     now = int(time.time())
     expires = (now // _WEEK + _TTL_WEEKS + 1) * _WEEK
     dedupe = _digest([expires, payload])
@@ -278,40 +368,58 @@ def issue_url(cfg: Settings, qa_id: int | None, anchor_id: str = "", *, entry: d
         with closing(sqlite3.connect(path, timeout=5)) as db, db:
             db.executescript(_SCHEMA)
             db.execute("DELETE FROM guest_evidence WHERE expires<=?", (now,))
+            if replace_token:
+                previous = db.execute("SELECT payload FROM guest_evidence WHERE token=?", (replace_token,)).fetchone()
+                if not previous:
+                    return ""
+                old_entry = _entry(json.loads(previous[0]).get("entry"), None)
+                new_entry = _entry(value["entry"], None)
+                if old_entry is None or old_entry != new_entry:
+                    return ""
+                # Keep URLs already shared with readers. A previously minted twin may
+                # also remain accessible until its own expiry.
+                collision = db.execute("SELECT token FROM guest_evidence WHERE dedupe=? AND token<>?",
+                                       (dedupe, replace_token)).fetchone()
+                if collision:
+                    dedupe = _digest([dedupe, replace_token])
+                db.execute("UPDATE guest_evidence SET dedupe=?,expires=?,payload=? WHERE token=?",
+                           (dedupe, expires, payload, replace_token))
+                return PUBLIC_ORIGIN + PUBLIC_PATH + replace_token
             db.execute("INSERT INTO guest_evidence VALUES (?,?,?,?) ON CONFLICT(dedupe) DO NOTHING",
                        (secrets.token_urlsafe(32), dedupe, expires, payload))
             found = db.execute("SELECT token FROM guest_evidence WHERE dedupe=?", (dedupe,)).fetchone()
             if found and _TOKEN.fullmatch(found[0]):
                 return PUBLIC_ORIGIN + PUBLIC_PATH + found[0]
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, ValueError, RecursionError):
         return ""
     return ""
 
 
-def _html(entry: dict, context: list[dict], scope: str) -> bytes:
-    title = escape(entry["title"])
-    kind = escape(_KIND[entry["kind"]])
-    period = escape(entry["start"] if entry["start"] == entry["end"] else f'{entry["start"]} 至 {entry["end"]}')
-    summary = f'<p class="summary">{escape(entry["summary"])}</p>' if entry["summary"] else ""
-    if not context:
-        evidence = '<p class="note">当前条目暂无可公开查看的会话上下文。</p>'
-    else:
-        prefix = '<p class="note">以下为该条目关联的脱敏问答。</p>' if scope == "pair" else '<p class="note">以下为该条目关联的脱敏会话片段，时间为北京时间。</p>'
-        messages = []
-        for message in context:
-            stamp = f'<time>{escape(message["time"])}</time>' if message["time"] else ""
-            messages.append(
-                f'<li class="{message["role"]}"><span class="speaker">{_ROLE[message["role"]]}</span>{stamp}'
-                f'<p class="text">{escape(message["text"])}</p></li>'
-            )
-        evidence = prefix + '<ol aria-label="脱敏会话上下文">' + "".join(messages) + "</ol>"
-    return (f'<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">'
-            f'<title>{title} · 语海 VOC</title><style>{_STYLE}</style></head><body><main><article>'
-            f'<header><div class="eyebrow">语海 VOC · {kind}</div><h1>{title}</h1><p class="note">{period}</p></header>'
-            f'{summary}<div class="detail">{escape(entry["detail"])}</div>'
-            f'<section aria-labelledby="evidence"><h2 id="evidence">会话上下文</h2>{evidence}</section>'
-            '</article></main></body></html>').encode("utf-8")
+def issue_url(cfg: Settings, qa_id: int | None, anchor_id: str = "", *, entry: dict, view: dict | None = None) -> str:
+    """Persist redacted result text and exact evidence bindings for an opaque guest link."""
+    payload = _make_payload(cfg, qa_id, anchor_id, entry, view)
+    return _save(cfg, payload) if payload else ""
+
+
+def upgrade_url(cfg: Settings, token: str, *, entry: dict, view: dict) -> str:
+    """Upgrade a previously published result only if its original content matches."""
+    if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+        return ""
+    payload = _make_payload(cfg, None, "", entry, view)
+    return _save(cfg, payload, replace_token=token) if payload else ""
+
+
+def _render_case(cfg: Settings, binding: dict, *, full: bool) -> dict | None:
+    if not isinstance(binding, dict) or not isinstance(binding.get("anchor"), str):
+        return None
+    case = _case(cfg, binding.get("qa"), binding["anchor"], full=full)
+    if case is None or not secrets.compare_digest(case[0], str(binding.get("fingerprint", ""))):
+        return None
+    return {"title": _clean(binding.get("title"), case[3]),
+            "category": _clean(binding.get("category"), case[3]),
+            "time": _clean(binding.get("time"), case[3]),
+            "sections": _sections(binding.get("sections"), case[3]),
+            "messages": case[1], "scope": case[2]}
 
 
 def resolve(cfg: Settings, token: str) -> bytes | None:
@@ -325,16 +433,25 @@ def resolve(cfg: Settings, token: str) -> bytes | None:
         if not row:
             return None
         value = json.loads(row["payload"])
-        if not isinstance(value, dict) or value.get("v") != 1:
+        if not isinstance(value, dict) or value.get("v") not in (1, 2):
             return None
-        entry = _entry(value.get("entry"), None)
+        raw_entry = value.get("entry")
+        entry = _entry(raw_entry, None)
         if entry is None:
             return None
-        binding = value.get("case")
-        if isinstance(binding, dict) and isinstance(binding.get("anchor"), str):
-            case = _case(cfg, binding.get("qa"), binding["anchor"])
-            if case is not None and secrets.compare_digest(case[0], str(binding.get("fingerprint", ""))):
-                return _html(entry, case[1], case[2])
-        return _html(entry, [], "")
+        if value["v"] == 1:
+            bindings = [value["case"]] if isinstance(value.get("case"), dict) else []
+            total = len(bindings)
+        else:
+            entry.update(_view(raw_entry, None))
+            bindings = value.get("cases")
+            if not isinstance(bindings, list):
+                return None
+            total = value.get("total_cases", len(bindings))
+            if type(total) is not int or total < len(bindings):
+                return None
+        cases = [case for binding in bindings[:_MAX_CASES]
+                 if (case := _render_case(cfg, binding, full=value["v"] == 2)) is not None]
+        return guest_evidence_view.render_page(entry, cases, total_cases=total)
     except (sqlite3.Error, OSError, ValueError, RecursionError):
         return None

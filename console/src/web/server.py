@@ -32,6 +32,7 @@ LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
 DB_LOCK = threading.RLock()
 IMAGE_SLOTS = threading.BoundedSemaphore(3)
 GUEST_PREFIX = "/guest/evidence/"
+GUEST_SLOTS = threading.BoundedSemaphore(6)
 GUEST_POLICY = ("default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; "
                 "base-uri 'none'; form-action 'none'")
 GUEST_UNAVAILABLE = (
@@ -312,12 +313,25 @@ class Handler(BaseHTTPRequestHandler):
     def _guest_page(self, path: str, query: str, fragment: str) -> None:
         token = path[len(GUEST_PREFIX):] if path.startswith(GUEST_PREFIX) else ""
         content = None
+        status = 404
         if not (query or fragment) and re.fullmatch(guest_evidence.TOKEN_PATTERN, token):
-            content = guest_evidence.resolve(self.server.cfg, token)
-        self._send(content or GUEST_UNAVAILABLE, "text/html; charset=utf-8",
-                   200 if content else 404, policy=GUEST_POLICY,
-                   extra={"X-Robots-Tag": "noindex, nofollow, noarchive",
-                          "Cross-Origin-Resource-Policy": "same-origin"})
+            if GUEST_SLOTS.acquire(blocking=False):
+                try:
+                    content = guest_evidence.resolve(self.server.cfg, token)
+                finally:
+                    GUEST_SLOTS.release()
+                if content is not None:
+                    status = 200
+            else:
+                status = 503
+        extra = {"X-Robots-Tag": "noindex, nofollow, noarchive",
+                 "Cross-Origin-Resource-Policy": "same-origin", "Vary": "Accept-Encoding"}
+        body = content or GUEST_UNAVAILABLE
+        if len(body) > 1400 and re.search(r"(?:^|,)\s*gzip\s*(?:,|$)",
+                                         self.headers.get("Accept-Encoding", ""), re.I):
+            body = gzip.compress(body, 4)
+            extra["Content-Encoding"] = "gzip"
+        self._send(body, "text/html; charset=utf-8", status, policy=GUEST_POLICY, extra=extra)
 
     def _case_image(self, qs: dict[str, list[str]]) -> None:
         urls = qs.get("url", [])

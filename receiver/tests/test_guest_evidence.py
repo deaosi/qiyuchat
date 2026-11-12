@@ -1,5 +1,6 @@
 """Focused tests for persisted, source-bound guest evidence capabilities."""
 
+from contextlib import closing
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -26,7 +27,7 @@ class TestGuestEvidence(LocalFixture):
         super().setUp()
         self.cfg = replace(self.cfg, runtime=replace(self.cfg.runtime, state_dir=self.temp.name))
 
-    def _seed_case(self, *, controlled):
+    def _seed_case(self, *, controlled, extended=False):
         qa_text = "这一条如何处理？"
         answer_text = "按设置说明处理。"
         rows = [
@@ -47,6 +48,9 @@ class TestGuestEvidence(LocalFixture):
                 ("source_identity", encode_identity(self.source, self.visitor, "另一位访客"), None),
                 ("staff", "另一位访客的私人回复", "outside-answer"),
             ]
+        if controlled and extended:
+            rows[6:6] = [("staff", f"完整会话第 {i} 条后续回复", f"later-{i}") for i in range(1, 14)]
+            rows[6:6] = [("bot", "机器人发送了操作提醒。", "bot-reminder")]
         with app.get_db(self.cfg).tx() as db:
             db.execute("INSERT INTO raw_session(session_id,staff_name,user_id,user_name,from_group) VALUES(?,?,?,?,?)",
                        (self.source, "唐测试客服", self.customer, "朱测试店主", "内部测试群"))
@@ -112,6 +116,35 @@ class TestGuestEvidence(LocalFixture):
         self.assertIn("暂无可公开查看的会话上下文", changed)
         self.assertNotIn("另一个案例不能覆盖旧链接", changed)
         self.assertNotIn("本次咨询的上一条", changed)
+
+    def test_existing_guest_token_upgrades_to_rich_scoped_detail(self):
+        qa = self._seed_case(controlled=True, extended=True)
+        token = self._token(guest.issue_url(self.cfg, qa, entry=self.entry))
+        source = guest._case(self.cfg, qa, "")
+        previous = {"v": 1, "entry": guest._entry(self.entry, None),
+                    "case": {"qa": qa, "anchor": "", "fingerprint": source[0]}}
+        with closing(guest.sqlite3.connect(guest._registry(self.cfg))) as db, db:
+            db.execute("UPDATE guest_evidence SET payload=? WHERE token=?", (json.dumps(previous), token))
+        self.assertNotIn("第 13 条后续回复", guest.resolve(self.cfg, token).decode())
+        view = {
+            "taxonomy": [{"primary": "配置与使用", "secondary": "图片回复", "count": 1},
+                         {"primary": "配置与使用", "secondary": "场景命中", "count": 1}],
+            "metrics": [{"label": "涉及商家", "value": 0}],
+            "sections": [{"title": "统计口径", "lines": ["统计范围沿用原发布。"]}],
+            "cases": [{"qa_id": qa, "anchor_id": "own-question", "title": "一个范围内的案例",
+                       "category": "已核验", "sections": [{"title": "诊断依据", "lines": ["原句经核对。"]}]}],
+            "total_cases": 1,
+        }
+        self.assertEqual(guest.upgrade_url(self.cfg, token, entry={**self.entry, "title": "另一个成果"}, view=view), "")
+        self.assertEqual(self._token(guest.upgrade_url(self.cfg, token, entry=self.entry, view=view)), token)
+        page = guest.resolve(self.cfg, token).decode()
+        for text in ("一级分类", "二级分类", "图片回复", "场景命中", "诊断依据", "涉及商家",
+                     "第 13 条后续回复", "机器人发送了操作提醒"):
+            self.assertIn(text, page)
+        self.assertNotIn("同一客户下一次无关咨询", page)
+        self.assertNotIn("另一位访客的私人回复", page)
+        self.assertNotIn("href=", page)
+        self.assertNotIn(token, page)
 
     def test_legacy_only_shows_exact_pair_and_archived_source_is_unavailable(self):
         qa = self._seed_case(controlled=False)

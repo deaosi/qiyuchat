@@ -431,12 +431,17 @@ def topics(cfg: Settings, filters: dict, *, workbench: bool = False, trend: str 
 
 
 def feishu_topics(cfg: Settings, filters: dict, *, topic_ids: set[str] | None = None) -> dict:
-    """Rank the scoped export and keep bounded, internal source anchors for guest publication."""
-    rows, _, _, comparison = _workbench_data(cfg, filters)
+    """Rank the scoped export and retain its exact case rows for guest publication."""
+    rows, previous, earlier, comparison = _workbench_data(cfg, filters)
     if topic_ids is not None:
         rows = [row for row in rows if row["topic_id"] in topic_ids]
+    groups, prior = defaultdict(list), defaultdict(list)
+    for row in previous:
+        if topic_ids is None or row["topic_id"] in topic_ids:
+            prior[row["topic_id"]].append(row)
     candidates: dict[str, dict[tuple[int, str], tuple]] = defaultdict(dict)
     for row in rows:
+        groups[row["topic_id"]].append(row)
         source = row["source"]
         qa_id = source["qa_id"]
         if type(qa_id) is not int or qa_id <= 0:
@@ -452,7 +457,12 @@ def feishu_topics(cfg: Settings, filters: dict, *, topic_ids: set[str] | None = 
         by_source[key] = min(rank, by_source.get(key, rank))
     anchors = {topic_id: sorted(ranked, key=ranked.__getitem__)[:8]
                for topic_id, ranked in candidates.items()}
-    return {"items": _topic_items(cfg, rows), "comparison": comparison, "guest_anchors": anchors}
+    items = _topic_items(cfg, rows)
+    details = {item["id"]: _topic_insight(item, groups[item["id"]], prior[item["id"]],
+                                         item["id"] in earlier, comparison)
+               for item in items if item["id"] in groups}
+    return {"items": items, "comparison": comparison, "guest_anchors": anchors,
+            "guest_rows": groups, "guest_topics": details}
 
 
 def topic_detail(cfg: Settings, filters: dict, topic_id: str, *, workbench: bool = False) -> dict:

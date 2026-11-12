@@ -83,6 +83,12 @@ class TestFeishuContent(LocalFixture):
         self.assertEqual(selected["count"], 1)
         self.assertEqual(selected["records"][0]["_guest_anchors"], [(1234, "sop-source-anchor")])
         self.assertEqual(selected["records"][0]["url"], "")
+        view = result["records"][0]["_guest_view"]
+        sections = {section["title"]: section["lines"] for section in view["sections"]}
+        self.assertEqual(sections["问题现象"], ["客户的详细对话"])
+        self.assertIn("尝试未奏效", sections["处理流程"][0])
+        self.assertEqual(sections["复测结果"], ["客户复测原话"])
+        self.assertEqual(view["cases"][0]["anchor_id"], "sop-source-anchor")
         self.assertIn("客户反馈按该流程处理后复测成功", result["records"][0]["detail"])
         self.assertIn("效果待验证", result["records"][1]["summary"])
         self.assertIn("商品ID [已脱敏]", result["records"][0]["detail"])
@@ -110,9 +116,53 @@ class TestFeishuContent(LocalFixture):
         read.assert_called_once_with(self.cfg, {**self.scope, "days": 0})
         self.assertEqual(anchors, {topic_id(1): [(1, "exact-reply"), (3, "later-unanswered"), (2, "")]})
 
+    def test_guest_view_includes_all_recorded_levels_and_only_same_topic_cases(self):
+        target, outside = topic_id(1), topic_id(2)
+
+        def row(qa_id, topic, theme, question, *, verified=False, session=None):
+            anchor = f"msg-{qa_id}"
+            answer = "已核对配置" if verified else ""
+            return {"id": f"event-{qa_id}", "topic_id": topic,
+                    "data": {"theme": theme, "question_span": {"quote": question, "start": 0, "end": len(question)},
+                             "claims": [{"quote": answer, "start": 0, "end": len(answer)}] if answer else [],
+                             "domain": {"primary_intent": "configuration_guidance",
+                                        "diagnosis": {"status": "not_applicable"}}},
+                    "source": {"qa_id": qa_id, "session_id": session or f"session-{qa_id}", "customer_id": "fixture-shop",
+                               "question": question, "answer": answer, "asked_at": qa_id * 1000, "_staff_verified": verified,
+                               "_question_parts": [{"message_id": anchor, "start": 0, "end": len(question)}]}}
+
+        evidence = [
+            row(2, target, "知识管理／跨店同步", "怎么同步表格"),
+            row(3, target, "知识管理 → 导入知识", "怎么导入", verified=True, session="shared"),
+            row(4, target, "知识管理 → 导入知识", "追问同一咨询", session="shared"),
+            row(5, outside, "另一大类 / 另一子类", "无关内容", verified=True),
+        ]
+        topic = {"id": target, "theme": "知识管理 / 跨店同步", "question": "知识管理标准问题",
+                 "consultation_count": 2, "session_count": 2, "primary_intent": "configuration_guidance",
+                 "boundary": "仅包含当前发布主题"}
+        comparison = {"current": {"source_pairs": 10, "processed_pairs": 8}, "previous": None, "comparable": False}
+        with (patch.object(export.voc_engine, "_workbench_data", return_value=(evidence, [], set(), comparison)) as read,
+              patch.object(export.voc_engine, "_topic_items", return_value=[topic])):
+            views = export.topic_guest_views(self.cfg, {**self.scope, "staff": "发布时客服限定"}, {target})
+        read.assert_called_once_with(self.cfg, {**self.scope, "days": 0, "staff": "发布时客服限定"})
+        self.assertEqual(set(views), {target})
+        view = views[target]
+        self.assertEqual(view["taxonomy"], [
+            {"primary": "知识管理", "secondary": "跨店同步", "count": 1},
+            {"primary": "知识管理", "secondary": "导入知识", "count": 1},
+        ])
+        self.assertEqual(view["total_cases"], 2)
+        self.assertEqual([case["qa_id"] for case in view["cases"]], [3, 2])
+        self.assertEqual(view["cases"][0]["anchor_id"], "msg-3")
+        self.assertIn("已核对配置", str(view["cases"][0]["sections"]))
+        self.assertIn("诊断状态", str(view["sections"]))
+        for unexpected in ("无关内容", "另一子类", "发布时客服限定", "fixture-shop"):
+            self.assertNotIn(unexpected, str(view))
+
     def test_publish_issues_scoped_links_and_falls_back_to_content_only(self):
         record = {"key": topic_id(1), "title": "可分享问题", "summary": "5 次咨询", "detail": "发布正文",
-                  "_guest_anchors": [(101, "unavailable-anchor"), (102, "other-anchor")], "url": ""}
+                  "_guest_anchors": [(101, "unavailable-anchor"), (102, "other-anchor")],
+                  "_guest_view": {"taxonomy": [{"primary": "一级", "secondary": "二级"}]}, "url": ""}
         other = {**record, "key": topic_id(2), "title": "无会话的问题", "_guest_anchors": []}
         doc = {**self.scope, "records": [record, other]}
         first = "https://qiyu.fanwulink.cn/guest/example-one"
@@ -122,12 +172,12 @@ class TestFeishuContent(LocalFixture):
         with patch.object(export.guest_evidence, "issue_url", side_effect=["", first, second]) as issue:
             result = export.attach_guest_links(self.cfg, doc, "topics")
         self.assertEqual(issue.call_args_list, [
-            call(self.cfg, 101, "unavailable-anchor", entry=entry),
-            call(self.cfg, 102, "other-anchor", entry=entry),
-            call(self.cfg, None, "", entry={**entry, "title": other["title"]}),
+            call(self.cfg, 101, "unavailable-anchor", entry=entry, view=record["_guest_view"]),
+            call(self.cfg, 102, "other-anchor", entry=entry, view=record["_guest_view"]),
+            call(self.cfg, None, "", entry={**entry, "title": other["title"]}, view=other["_guest_view"]),
         ])
         self.assertEqual([record["url"] for record in result["records"]], [first, second])
-        self.assertTrue(all("_guest_anchors" not in record for record in result["records"]))
+        self.assertTrue(all(not {"_guest_anchors", "_guest_view"} & record.keys() for record in result["records"]))
         self.assertEqual(doc["records"][0]["url"], "")
         with patch.object(export.guest_evidence, "issue_url", return_value=""), self.assertRaises(voc.VocError):
             export.attach_guest_links(self.cfg, doc, "topics")

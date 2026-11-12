@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 
-from . import voc, voc_assets, voc_engine, voc_topic_insights
+from . import voc, voc_assets, voc_engine, voc_topic_insights, voc_variants
 from .clean.rules import mask_pii
 from .config import Settings
 from .extract.text import clean_visible_text
@@ -75,6 +76,195 @@ def _public_text(value: object, names: re.Pattern[str] | None) -> str:
     return " ".join(mask_pii(text).split())
 
 
+
+_DIAGNOSES = {
+    "reported": "商家报告", "pending": "待定位", "config_cause_confirmed": "配置原因已确认",
+    "platform_limit_confirmed": "平台约束已确认", "defect_confirmed": "缺陷已确认", "not_applicable": "不适用",
+}
+_TRENDS = {"new": "新出现", "rising": "明显上升", "persistent": "持续高频", "stable": "平稳"}
+_GAPS = {
+    "no_staff_reply": "缺少人工客服回复", "unverified_staff_reply": "客服身份未核验",
+    "insufficient_diagnosis": "缺少诊断依据", "applicability": "适用条件", "diagnosis": "排查步骤",
+    "action": "处理步骤", "retest": "复测步骤", "customer_result": "客户复测结果", "result": "复测结果",
+    "unsafe_step": "操作安全依据", "later_counterevidence": "后续异议或失败的处理结果",
+    "unbound_condition": "步骤对应的前置条件",
+}
+_OUTCOMES = {"verified": "效果已验证", "failed": "尝试未奏效", "unconfirmed": "结果待确认"}
+_CASE_LIMIT = 20
+_THEME_SEPARATOR = re.compile(r"\s*[/／>＞→]\s*")
+
+
+def _theme_path(value: object, fallback: str, names: re.Pattern[str] | None) -> tuple[str, str]:
+    theme = _public_text(value, names)
+    if not theme:
+        return fallback, ""
+    parts = _THEME_SEPARATOR.split(theme, maxsplit=1)
+    if len(parts) == 2 and all(parts):
+        return parts[0], parts[1]
+    return fallback or theme, theme if fallback and fallback != theme else ""
+
+
+def _topic_taxonomy(topic: dict, rows: list[dict], names: re.Pattern[str] | None) -> list[dict]:
+    fallback = _TOPIC_LABELS.get(topic.get("primary_intent"), "")
+    canonical = _theme_path(topic.get("theme"), fallback, names)
+    observations = {canonical: set()} if canonical[0] else {}
+    for row in rows:
+        observed = row["data"].get("theme")
+        path = _theme_path(observed, fallback, names) if isinstance(observed, str) and observed.strip() else canonical
+        if path[0]:
+            observations.setdefault(path, set()).add(voc_variants.consultation_key(row))
+    return [{"primary": primary, "secondary": secondary,
+             **({"count": len(keys)} if keys else {})}
+            for (primary, secondary), keys in observations.items()]
+
+
+def _section(title: str, values: list[object], names: re.Pattern[str] | None) -> dict:
+    lines = list(dict.fromkeys(text for value in values if (text := _public_text(value, names))))
+    return {"title": title, "lines": lines}
+
+
+def _quotes(refs: list) -> list[object]:
+    return [ref.get("quote") for ref in refs if isinstance(ref, dict)]
+
+
+def _case_projection(row: dict, names: re.Pattern[str] | None) -> dict:
+    source, data = row["source"], row["data"]
+    domain = data.get("domain", {})
+    diagnosis = domain.get("diagnosis", {})
+    facts = voc_topic_insights.case_details(row)
+    confirmed = diagnosis.get("status") in ("config_cause_confirmed", "platform_limit_confirmed", "defect_confirmed")
+    if confirmed:
+        label = _DIAGNOSES[diagnosis["status"]]
+    elif facts.get("suspected_report_ready") and source.get("_staff_verified"):
+        label = "疑似异常 · 待技术确认"
+    elif domain.get("primary_intent") == "configuration_guidance":
+        label = "场景配置与使用指导"
+    else:
+        label = _DIAGNOSES.get(diagnosis.get("status"), "待补查或定位")
+    sections = []
+    for title, field, missing in (
+        ("电商后台设置", "commerce_settings", "待补查平台侧商品设置。"),
+        ("知汇鸽场景条件", "scenario_conditions", "待补查场景启用及命中条件。"),
+        ("实际触发结果", "actual", "待补查同一条件下的实际回复。"),
+    ):
+        sections.append(_section(title, _quotes(facts[field]) or [missing], names))
+    causes = [voc_topic_insights._exact_ref(row, ref)
+              for ref in [diagnosis.get("cause"), *diagnosis.get("evidence", [])]]
+    if any(causes):
+        sections.append(_section("诊断依据", _quotes(causes), names))
+    verified = bool(source.get("_staff_verified"))
+    steps = []
+    if verified:
+        for action in domain.get("actions", []):
+            ref = voc_topic_insights._exact_ref(row, action.get("instruction"))
+            if ref and ref["role"] == "staff":
+                steps.append(ref["quote"])
+    if steps:
+        sections.append(_section("客服给出的处理步骤", steps, names))
+    else:
+        reply = source.get("answer", "")
+        claims = [claim.get("quote") for claim in data.get("claims", [])
+                  if type(claim.get("start")) is int and type(claim.get("end")) is int
+                  and 0 <= claim["start"] < claim["end"] <= len(reply)
+                  and reply[claim["start"]:claim["end"]] == claim.get("quote")]
+        if claims:
+            sections.append(_section("客服原话" if verified else "回复原话 · 来源未核验", claims, names))
+    return {"qa_id": source["qa_id"], "anchor_id": facts.get("question_message_id", ""),
+            "title": _public_text(data["question_span"].get("quote"), names) or "会话依据",
+            "category": label, "time": _public_text(source.get("asked_at_text"), names),
+            "sections": [section for section in sections if section["lines"]]}
+
+
+def _topic_guest_view(topic: dict, rows: list[dict], comparison: dict, names: re.Pattern[str] | None) -> dict:
+    metric_fields = (("咨询次数", "consultation_count"), ("独立会话", "session_count"), ("可识别商家", "merchant_count"))
+    metrics = [{"label": label, "value": topic[field]} for label, field in metric_fields if type(topic.get(field)) is int]
+    platform_text = "、".join(topic.get("platforms", []))
+    classification = _TOPIC_LABELS.get(topic.get("primary_intent"), "")
+    overview = [
+        f"支持类型：{classification}" if classification else "",
+        f"涉及平台：{platform_text}" if platform_text else "",
+        f"最近发生：{topic['last_seen']}" if topic.get("last_seen") else "",
+        topic.get("boundary", ""),
+    ]
+    trend = topic.get("trend") or {}
+    trend_label = _TRENDS.get(trend.get("status"), "")
+    if trend_label:
+        overview.append(f"咨询趋势：{trend_label}")
+    current = comparison.get("current") or {}
+    if type(current.get("processed_pairs")) is int and type(current.get("source_pairs")) is int:
+        overview.append(f"当前范围已整理 {current['processed_pairs']} / {current['source_pairs']} 条问答")
+    sections = [_section("问题概况", overview, names)]
+    diagnostics = defaultdict(set)
+    for row in rows:
+        status = row["data"].get("domain", {}).get("diagnosis", {}).get("status")
+        if status in _DIAGNOSES:
+            diagnostics[status].add(voc_variants.consultation_key(row))
+    if diagnostics:
+        sections.append(_section("诊断状态", [f"{label} · {len(diagnostics[status])} 次咨询"
+                                             for status, label in _DIAGNOSES.items() if status in diagnostics], names))
+    gaps = voc_topic_insights.gaps(rows, [], []) if rows else []
+    if gaps:
+        sections.append(_section("待补证据", [f"{_GAPS[item['code']]} · {item['count']} 次咨询"
+                                             for item in gaps if item["code"] in _GAPS], names))
+    candidates = sorted(
+        (row for row in rows if type(row["source"].get("qa_id")) is int and row["source"]["qa_id"] > 0),
+        key=lambda row: (not row["source"].get("_staff_verified"), not row["source"].get("answer"),
+                         -int(row["source"].get("asked_at") or 0), row["source"]["qa_id"]),
+    )
+    by_consultation = {}
+    for row in candidates:
+        by_consultation.setdefault(voc_variants.consultation_key(row), row)
+    cases = [_case_projection(row, names) for row in list(by_consultation.values())[:_CASE_LIMIT]]
+    return {"taxonomy": _topic_taxonomy(topic, rows, names), "metrics": metrics,
+            "sections": [section for section in sections if section["lines"]],
+            "cases": cases, "total_cases": len(by_consultation)}
+
+
+def topic_guest_views(cfg: Settings, pinned_scope: dict, topic_ids: set[str]) -> dict[str, dict]:
+    """Rebuild only the already-published topics in their originally published scope."""
+    selected = {topic_id for topic_id in topic_ids if isinstance(topic_id, str) and _TOPIC_ID.fullmatch(topic_id)}
+    if not selected:
+        return {}
+    scope = _pinned_scope(pinned_scope)
+    names = _private_names(cfg, scope)
+    ranked = voc_engine.feishu_topics(cfg, scope, topic_ids=selected)
+    return {topic["id"]: _topic_guest_view(ranked["guest_topics"].get(topic["id"], topic),
+                                          ranked["guest_rows"].get(topic["id"], []), ranked["comparison"], names)
+            for topic in ranked["items"] if topic["id"] in selected}
+
+
+def _sop_guest_view(item: dict, topic: dict, category: str, names: re.Pattern[str] | None,
+                    anchors: list[tuple[int, str]]) -> dict:
+    sections = [
+        _section("问题现象", [item["problem"].get("quote")], names),
+        _section("适用条件", _quotes(item["conditions"]), names),
+    ]
+    steps = []
+    index = 0
+    for step in item["steps"]:
+        phase, outcome = _PHASES.get(step["phase"]), _OUTCOMES.get(step["outcome"])
+        if phase and outcome and (quote := _public_text(step["evidence"].get("quote"), names)):
+            index += 1
+            steps.append(f"{index}. {phase} · {outcome}\n{quote}")
+            feedback = step.get("feedback") or {}
+            if feedback.get("message_id") != (item.get("result") or {}).get("message_id"):
+                text = _public_text(feedback.get("quote"), names)
+                if text:
+                    steps.append(f"客户反馈：{text}")
+    sections.append({"title": "处理流程", "lines": steps})
+    sections.append(_section("人工回复记录", _quotes(item.get("replies") or []), names))
+    sections.append(_section("复测结果", [(item.get("result") or {}).get("quote") or "操作效果待验证。"], names))
+    sections.append(_section("待补证据", [_GAPS.get(code, "其他待核验信息") for code in item.get("missing", [])], names))
+    primary, secondary = _theme_path(topic.get("theme"), category, names)
+    cases = [{"qa_id": qa_id, "anchor_id": anchor_id,
+              "title": _public_text(item["problem"].get("quote"), names) or "会话依据",
+              "category": category, "time": "", "sections": []}
+             for qa_id, anchor_id in anchors]
+    return {"taxonomy": [{"primary": primary, "secondary": secondary}], "metrics": [],
+            "sections": [section for section in sections if section["lines"]],
+            "cases": cases, "total_cases": len(cases)}
+
+
 def select_topic_anchors(cfg: Settings, pinned_scope: dict, topic_ids: set[str]) -> dict[str, list[tuple[int, str]]]:
     """Resolve exact, previously exported topics without selecting a new top list."""
     selected = {topic_id for topic_id in topic_ids if _TOPIC_ID.fullmatch(topic_id)}
@@ -100,9 +290,13 @@ def _topic_records(cfg: Settings, scope: dict, names: re.Pattern[str] | None) ->
         category = _TOPIC_LABELS.get(topic.get("primary_intent"), "")
         summary = " · ".join(value for value in (f"{count} 次咨询", category) if value)
         detail = f"{summary}。\n统计区间 {scope['start']} 至 {scope['end']}（上海时间）。\n{coverage_text}"
-        records.append({"key": key, "title": title, "summary": summary, "detail": detail,
-                        "url": "", "consultations": count,
-                        "_guest_anchors": ranked["guest_anchors"].get(key, [])})
+        record = {"key": key, "title": title, "summary": summary, "detail": detail,
+                  "url": "", "consultations": count, "_guest_anchors": ranked["guest_anchors"].get(key, [])}
+        if len(records) < _LIMIT:
+            record["_guest_view"] = _topic_guest_view(ranked.get("guest_topics", {}).get(key, topic),
+                                                      ranked.get("guest_rows", {}).get(key, []),
+                                                      ranked["comparison"], names)
+        records.append(record)
     return records, coverage_text
 
 
@@ -148,7 +342,8 @@ def _sop_records(cfg: Settings, scope: dict, identity: str, names: re.Pattern[st
         qa_id, anchor_id = item.get("qa_id"), item["problem"].get("message_id")
         anchors = [(qa_id, anchor_id)] if type(qa_id) is int and qa_id > 0 and isinstance(anchor_id, str) and anchor_id else []
         records.append({"key": key, "title": title, "summary": f"{category} · {label}", "detail": detail,
-                        "url": "", "_guest_anchors": anchors})
+                        "url": "", "_guest_anchors": anchors,
+                        "_guest_view": _sop_guest_view(item, topic, category, names, anchors)})
     return records, f"当前范围有 {len(cases)} 份处理流程，其中 {len(records)} 份可用于本次整理。"
 
 
@@ -204,12 +399,12 @@ def attach_guest_links(cfg: Settings, document: dict, kind: str) -> dict:
                  "start": document["start"], "end": document["end"]}
         url = ""
         for qa_id, anchor_id in record.get("_guest_anchors", []):
-            url = guest_evidence.issue_url(cfg, qa_id, anchor_id, entry=entry)
+            url = guest_evidence.issue_url(cfg, qa_id, anchor_id, entry=entry, view=record.get("_guest_view"))
             if url:
                 break
         if not url:
-            url = guest_evidence.issue_url(cfg, None, "", entry=entry)
+            url = guest_evidence.issue_url(cfg, None, "", entry=entry, view=record.get("_guest_view"))
         if not url:
             raise voc.VocError("访客链接暂不可生成，成果尚未发布。", 503)
-        records.append({**{key: value for key, value in record.items() if key != "_guest_anchors"}, "url": url})
+        records.append({**{key: value for key, value in record.items() if key not in ("_guest_anchors", "_guest_view")}, "url": url})
     return {**document, "records": records}
