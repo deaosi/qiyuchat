@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactNode } from 'react'
 import { ArrowUpRight, ChevronLeft, ChevronRight, Copy } from 'lucide-react'
 import { toast } from 'sonner'
-import { normalizePair, type VocCasePath, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
+import { normalizePair, type VocCasePath, type VocCaseSolution, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -49,16 +49,19 @@ function MissingEvidence({ values }: { values: string[] }) {
   return <p className="text-sm leading-6 text-muted-foreground"><span className="mr-2 font-medium text-foreground">待补证据</span>{labels.join('、')}</p>
 }
 
+function openSource(source: VocPilotEvidence, onOpenPair: OpenEvidencePair, anchored = true) {
+  onOpenPair(normalizePair({ qa_id: source.qa_id, question: source.quote, asked_at: source.ts }), anchored ? source.message_id : undefined)
+}
+
 function SourceLine({ source, onOpenPair, anchored = true, label, children }: { source: VocPilotEvidence; onOpenPair: OpenEvidencePair; anchored?: boolean; label?: string; children?: ReactNode }) {
   const hasAnchor = anchored && Boolean(source.message_id.trim())
-  const open = () => onOpenPair(normalizePair({ qa_id: source.qa_id, question: source.quote, asked_at: source.ts }), hasAnchor ? source.message_id : undefined)
   return <div className="min-w-0 space-y-1 py-2">
     {label && <p className="text-xs text-muted-foreground">{label}</p>}
     <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{source.quote}</p>
     {children}
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       {source.ts > 0 && <span className="tabular-nums">{displayTime(source.ts)}</span>}
-      <Button type="button" variant="ghost" size="xs" onClick={open}>{hasAnchor ? '定位原话' : '查看会话'}<ArrowUpRight /></Button>
+      <Button type="button" variant="ghost" size="xs" onClick={() => openSource(source, onOpenPair, hasAnchor)}>{hasAnchor ? '定位原话' : '查看会话'}<ArrowUpRight /></Button>
     </div>
   </div>
 }
@@ -238,37 +241,63 @@ const caseStepLabels: Record<VocCasePath['steps'][number]['state'], string> = {
   proposed: '提出建议', reported: '说明处理情况', instructed: '给出操作步骤',
 }
 
+const solutionSectionLabels: Record<VocCaseSolution['sections'][number]['kind'], string> = {
+  problem: '客户问题', diagnosis: '排查判断', action: '处理操作', decision: '处理决定', verification: '验证情况',
+}
+
+function CaseSolution({ solution, onOpenPair }: { solution: VocCaseSolution; onOpenPair: OpenEvidencePair }) {
+  return <div className="divide-y">{solution.sections.map((section, index) =>
+    <section className="space-y-1 py-3 first:pt-0" key={`${section.kind}-${index}`}>
+      <h3 className="text-sm font-medium">{solutionSectionLabels[section.kind]}</h3>
+      <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{section.text}</p>
+      <div className="flex flex-wrap gap-x-2">{section.evidence.map((source, sourceIndex) =>
+        <Button key={`${source.qa_id}-${source.message_id}-${sourceIndex}`} type="button" variant="ghost" size="xs" onClick={() => openSource(source, onOpenPair)}>
+          {section.evidence.length === 1 ? '定位原话' : `定位原话 ${sourceIndex + 1}`}<ArrowUpRight />
+        </Button>)}</div>
+    </section>)}</div>
+}
+
+function CasePathSource({ item, onOpenPair }: { item: VocCasePath; onOpenPair: OpenEvidencePair }) {
+  return <>
+    <section>
+      <h3 className="text-sm font-medium">客户咨询</h3>
+      <SourceLine source={item.problem} onOpenPair={onOpenPair} />
+    </section>
+    {item.steps.length > 0 && <section className="border-t pt-4">
+      <h3 className="text-sm font-medium">处理经过</h3>
+      <ol className="divide-y">{item.steps.map((step, index) => {
+        const actor = step.actor === 'staff' ? '客服' : '客户'
+        const label = `${actor} · ${caseStepLabels[step.state]}`
+        return <li key={`${step.evidence.message_id}-${index}`}>
+          {step.action === step.evidence.quote ? <SourceLine source={step.evidence} onOpenPair={onOpenPair} label={label} />
+            : <div className="space-y-1 py-2">
+              <p className="text-xs text-muted-foreground">{label}</p>
+              <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{step.action}</p>
+              <EvidenceDetails title={`查看${actor}原话`} sources={[step.evidence]} onOpenPair={onOpenPair} />
+            </div>}
+        </li>
+      })}</ol>
+    </section>}
+    {item.criterion && <section className="border-t pt-4">
+      <h3 className="text-sm font-medium">客户期望</h3>
+      <SourceLine source={item.criterion} onOpenPair={onOpenPair} />
+    </section>}
+  </>
+}
+
 function CasePathDetail({ item, onOpenPair }: { item: VocCasePath; onOpenPair: OpenEvidencePair }) {
   return <>
     <SheetHeader className="shrink-0 gap-2 border-b px-5 py-5 pr-10">
-      <SheetTitle className="text-lg">案例处理记录</SheetTitle>
+      <SheetTitle className="text-lg [overflow-wrap:anywhere]">{item.solution?.title ?? '案例处理记录'}</SheetTitle>
       <SheetDescription className={item.platform ? undefined : 'sr-only'}>{item.platform || '查看客户咨询和会话中的处理经过。'}</SheetDescription>
     </SheetHeader>
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
-      <section>
-        <h3 className="text-sm font-medium">客户咨询</h3>
-        <SourceLine source={item.problem} onOpenPair={onOpenPair} />
-      </section>
-      <section className="border-t pt-4">
-        <h3 className="text-sm font-medium">处理经过</h3>
-        <ol className="divide-y">{item.steps.map((step, index) => {
-          const actor = step.actor === 'staff' ? '客服' : '客户'
-          const label = `${actor} · ${caseStepLabels[step.state]}`
-          return <li key={`${step.evidence.message_id}-${index}`}>
-            {step.action === step.evidence.quote ? <SourceLine source={step.evidence} onOpenPair={onOpenPair} label={label} />
-              : <div className="space-y-1 py-2">
-                <p className="text-xs text-muted-foreground">{label}</p>
-                <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{step.action}</p>
-                <EvidenceDetails title={`查看${actor}原话`} sources={[step.evidence]} onOpenPair={onOpenPair} />
-              </div>}
-          </li>
-        })}</ol>
-      </section>
-      {item.criterion && <section className="border-t pt-4">
-        <h3 className="text-sm font-medium">客户期望</h3>
-        <SourceLine source={item.criterion} onOpenPair={onOpenPair} />
-      </section>}
-      <p className="border-t pt-3 text-sm text-muted-foreground">未记录复测结果</p>
+      {item.solution ? <CaseSolution solution={item.solution} onOpenPair={onOpenPair} /> : <CasePathSource item={item} onOpenPair={onOpenPair} />}
+      {!item.solution && <p className="border-t pt-3 text-sm text-muted-foreground">未记录复测结果</p>}
+      {item.solution && <details className="border-t pt-3 text-sm">
+        <summary className="w-fit cursor-pointer font-medium">{item.steps.length > 0 ? '原始处理记录' : '原始咨询'}</summary>
+        <div className="mt-3 space-y-4"><CasePathSource item={item} onOpenPair={onOpenPair} /></div>
+      </details>}
     </div>
   </>
 }
@@ -285,7 +314,7 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { item
     ...branches.flatMap(branch => [branch.retest, ...branch.steps.map(step => step.text),
       branch.condition_evidence?.length ? branch.condition : '', branch.escalation_evidence?.length ? branch.escalation : ''])]))
   const matchingPaths = casePaths.filter(item => matchSearch(search, [item.platform, item.problem.quote, item.criterion?.quote ?? '',
-    ...item.steps.map(step => step.evidence.quote)]))
+    ...item.steps.map(step => step.evidence.quote), item.solution?.title ?? '', ...(item.solution?.sections.map(section => section.text) ?? [])]))
   const last = Math.max(0, Math.ceil((matchingPaths.length + matches.length) / playbookPageSize) - 1)
   const current = Math.min(page, last)
   const offset = current * playbookPageSize
@@ -304,8 +333,8 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { item
         <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
           onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'case', id: item.id }) }}>
           <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
-            <span className="line-clamp-2 font-medium">{item.problem.quote}</span>
-            <span className="line-clamp-1 text-sm text-muted-foreground">{item.steps[0].action}</span>
+            <span className="line-clamp-2 font-medium">{item.solution?.title ?? item.problem.quote}</span>
+            <span className="line-clamp-1 text-sm text-muted-foreground">{item.solution?.sections.find(section => section.kind === 'action')?.text ?? item.steps[0]?.action}</span>
             <span className="block text-xs text-muted-foreground">{[item.platform, item.problem.ts > 0 ? displayTime(item.problem.ts) : ''].filter(Boolean).join(' · ')}</span>
           </span>
           <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />

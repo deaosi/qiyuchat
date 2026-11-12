@@ -1,0 +1,66 @@
+from contextlib import closing
+from dataclasses import replace
+import sqlite3
+import unittest
+from unittest.mock import patch
+
+from src import voc_engine, voc_solution_store as store
+from src.model_protocol import ModelProtocolError
+from tests import test_voc_episode_replay as official
+
+
+class TestSolutionStore(unittest.TestCase):
+    seed = official.TestEpisodeReplay.seed
+
+    def setUp(self):
+        official.TestEpisodeReplay.setUp(self)
+        self.cfg = replace(self.cfg, llm=replace(self.cfg.llm, dry_run=False, base_url="https://synthetic.invalid",
+                                                api_key="synthetic", model_main="synthetic"))
+        self.seed([
+            (1, "拼多多店铺机器人回复稍等后为什么没有待办？", "merchant-a", {}),
+            (0, "它参考的是聊天记录，这个情况我这边配置为知识加入待办。", "merchant-a", {}),
+            (1, "顾客昵称：临时昵称。我需要让 AI 继续回复，同时生成待办。", "merchant-a", {}),
+            (0, "我已经配置为通用知识了，手机号13800138000。", "merchant-a", {}),
+        ])
+        self.sources = voc_engine._sources(self.cfg, {})
+        self.qa_id = next(qa_id for qa_id, row in self.sources.items() if "为什么没有待办" in row["question"])
+
+    def synthesize(self, _cfg, messages, anchors):
+        self.assertEqual(len(messages), 4)
+        self.assertIn(messages[0]["id"], anchors)
+        self.assertNotIn("merchant-a", repr(messages))
+        self.assertNotIn("13800138000", repr(messages))
+        self.assertNotIn("临时昵称", repr(messages))
+        self.assertNotIn("source:15429", repr(messages))
+
+        def evidence(turn):
+            return {"message_id": turn["id"], "quote": turn["text"], "ts": turn["ts"]}
+
+        return {"solution": {"title": "保留稍等回复并生成待办", "sections": [
+            {"kind": "problem", "text": "回复稍等后没有待办", "evidence": [evidence(messages[0])]},
+            {"kind": "action", "text": "客服称已将这个情况配置为通用知识", "evidence": [evidence(messages[1]), evidence(messages[3])]},
+        ]}, "usage_tokens": 124}
+
+    def test_processing_uses_later_followup_and_current_cache_without_gateway_on_read(self):
+        self.assertTrue(store.pending(self.cfg))
+        with patch("src.voc_solution.run", side_effect=self.synthesize) as model:
+            result = store.run(self.cfg, {}, max_calls=2, max_tokens=100_000, qa_ids={self.qa_id})
+            self.assertEqual((result["generated"], result["calls"], result["usage_tokens"]), (1, 2, 124))
+            self.assertEqual(store.run(self.cfg, {}, max_calls=2, max_tokens=100_000,
+                                       qa_ids={self.qa_id})["calls"], 0)
+            [case] = voc_engine.playbooks(self.cfg, {})["case_paths"]
+            self.assertEqual(case["solution"]["sections"][1]["evidence"][-1]["message_id"], "source:15429:4")
+            self.assertEqual(case["outcome"], "not_recorded")
+            model.assert_called_once()
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("UPDATE push_sync_state SET source_json=source_json || ' '")
+        self.assertEqual(store.enrich(self.cfg, self.sources, []), [])
+
+    def test_gateway_timeout_keeps_literal_path_and_waits_before_retry(self):
+        with patch("src.voc_solution.run", side_effect=ModelProtocolError("safe", 504)):
+            result = store.run(self.cfg, {}, max_calls=2, max_tokens=100_000, qa_ids={self.qa_id})
+        self.assertEqual((result["generated"], result["errors"]), (0, {"gateway_504": 1}))
+        fallback = [{"qa_id": self.qa_id, "steps": ["literal"]}]
+        self.assertEqual(store.enrich(self.cfg, self.sources, fallback), fallback)
+        self.assertEqual(store.run(self.cfg, {}, max_calls=2, max_tokens=100_000,
+                                   qa_ids={self.qa_id})["calls"], 0)

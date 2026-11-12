@@ -97,6 +97,25 @@ describe('VOC product evidence responses', () => {
     for (const _invalid of invalidPaths) await expect(apiGet('voc2/playbooks', filters)).rejects.toMatchObject({ status: 502 })
   })
 
+  it('accepts model-discovered cases with sourced sections and no literal steps', async () => {
+    const action = { kind: 'action', text: '客服协助将当前知识加入待办。',
+      evidence: [{ ...anchor, message_id: 'msg-8', quote: '我这边配置为知识加入待办。' }] }
+    const solution = { title: '拼多多待办触发排查', sections: [action] }
+    const path = { id: 'path-1', qa_id: anchor.qa_id, problem: anchor, steps: [], platform: '拼多多', outcome: 'not_recorded', solution }
+    const data = { items: [], total: 0, case_paths: [path] }
+    const invalidPaths = [
+      { ...path, solution: undefined },
+      { ...path, solution: { ...solution, sections: [{ ...action, kind: 'result' }] } },
+      { ...path, solution: { ...solution, sections: [{ ...action, evidence: [] }] } },
+      { ...path, solution: { ...solution, sections: [{ ...action, evidence: [{ ...anchor, message_id: '' }] }] } },
+    ]
+    const fetch = vi.fn().mockResolvedValueOnce(json(data))
+    for (const invalid of invalidPaths) fetch.mockResolvedValueOnce(json({ ...data, case_paths: [invalid] }))
+    vi.stubGlobal('fetch', fetch)
+    await expect(apiGet('voc2/playbooks', filters)).resolves.toEqual(data)
+    for (const _invalid of invalidPaths) await expect(apiGet('voc2/playbooks', filters)).rejects.toMatchObject({ status: 502 })
+  })
+
   it('rejects a playbook when a branch points to invalid escalation evidence', async () => {
     const data = { items: [{ ...shared, issue_id: 'issue-1', status: 'guidance', checked_cases: 1,
       triage: [{ check: '核对权限', when_yes: '继续', when_no: '补齐' }],

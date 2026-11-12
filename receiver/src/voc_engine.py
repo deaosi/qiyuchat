@@ -757,7 +757,7 @@ def _recheck_playbook_branches(scoped: dict, global_result: dict) -> dict:
 
 
 def playbooks(cfg: Settings, filters: dict) -> dict:
-    from . import voc_case_paths, voc_issue_pilot, voc_playbooks
+    from . import voc_case_paths, voc_issue_pilot, voc_playbooks, voc_solution_sop, voc_solution_store
 
     if variants.mode(cfg) != "zhihuige" or cfg.runtime.mock:
         return {"items": [], "total": 0, "case_paths": []}
@@ -768,14 +768,19 @@ def playbooks(cfg: Settings, filters: dict) -> dict:
     if any(filters.get(key) not in (None, "", "all") for key in ("focus_topic", "support_intent", "diagnosis_status")):
         matching = {event["qa_id"] for event in events}
         path_sources = {qa: source for qa, source in current.items() if qa in matching}
-    case_paths = voc_case_paths.build(cfg, path_sources)
+    proof_by_qa = {}
+    case_paths = voc_solution_store.enrich(cfg, path_sources, voc_case_paths.build(cfg, path_sources),
+                                          proof_by_qa=proof_by_qa)
     if not issues:
         return {"items": [], "total": 0, "case_paths": case_paths}
-    result = voc_playbooks.build(issues, sops(cfg, filters, _current=current)["items"])
+    current_sops = sops(cfg, filters, _current=current)["items"]
+    extra_sops = voc_solution_sop.compile_supported(issues, case_paths, proof_by_qa, current_sops)
+    superseded = {voc_solution_sop.case_key(case) for case in extra_sops}
+    retained = [case for case in current_sops if voc_solution_sop.case_key(case) not in superseded]
+    result = voc_playbooks.build(issues, [*retained, *extra_sops])
     if any(item["branches"] for item in result["items"]) and any(
             value not in (None, "", 0, "all", "local") for value in filters.values()):
-        all_issues = _read_issue_pilot(cfg, {})["items"]
-        result = _recheck_playbook_branches(result, voc_playbooks.build(all_issues, sops(cfg, {})["items"]))
+        result = _recheck_playbook_branches(result, playbooks(cfg, {}))
     return {**result, "case_paths": case_paths}
 
 

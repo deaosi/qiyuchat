@@ -8,7 +8,7 @@ import http.client
 import threading
 import time
 from dataclasses import replace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from src import model_protocol as M, voc_service as S, voc_assistant as A
 from tests.test_local import LocalFixture
@@ -170,6 +170,32 @@ class TestVocService(LocalFixture):
              patch('sys.argv',['voc_service','--hourly']), patch('builtins.print'):
             self.assertEqual(S.main(),0)
         start.assert_called_once()
+
+    def test_hourly_runs_when_only_model_solutions_are_pending(self):
+        cfg=replace(self.cfg,runtime=replace(self.cfg.runtime,voc_domain='zhihuige'))
+        self.fake.check.return_value={'coverage':{'pending_pairs':0},'needs_compile':0}
+        with (patch('src.voc_service.load_settings',return_value=cfg),
+              patch('src.voc_episode_live.pending',return_value=False),
+              patch('src.voc_solution_store.pending',return_value=True),
+              patch('src.voc_service.start',return_value={'job':{'id':'synthetic'}}) as start,
+              patch('sys.argv',['voc_service','--hourly']), patch('builtins.print')):
+            self.assertEqual(S.main(),0)
+        start.assert_called_once()
+
+    def test_solution_pass_charges_shared_budget_without_stopping_legacy_work(self):
+        cfg=replace(self.cfg,runtime=replace(self.cfg.runtime,voc_domain='zhihuige'))
+        filters={'days':7}
+        job=S.start(cfg,filters,{'limit':32,'max_calls':32,'max_tokens':300000},launch=False)['job']
+        self.fake.run.return_value={'job':{'status':'completed','usage_tokens':90,'processed':1}}
+        with (patch('src.voc_solution_store.run',return_value={
+                  'calls':2,'usage_tokens':250,'reserved_tokens':18000,'generated':0,'errors':{'gateway_504':1}}) as solutions,
+              patch('src.voc_episode_live.run',return_value={
+                  'calls':1,'usage_tokens':300,'reserved_tokens':14000,'segments_processed':1,'errors':{}})):
+            result=S.execute(cfg,job['id'])
+        solutions.assert_called_once_with(ANY,filters,max_calls=4,max_tokens=50000)
+        self.assertEqual((result['status'],result['usage_tokens']),('partial',640))
+        self.assertEqual(self.fake.run.call_args.kwargs['max_calls'],29)
+        self.assertEqual(self.fake.run.call_args.kwargs['max_tokens'],268000)
 
     def test_release_maintenance_blocks_new_jobs_without_changing_existing_queue(self):
         marker=S._path(self.cfg).parent/'.voc-release-maintenance'
