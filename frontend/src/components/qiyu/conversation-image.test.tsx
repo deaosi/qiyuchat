@@ -1,12 +1,13 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ConversationImage } from './conversation-image'
+import { readAdminImageFile } from './conversation-image-files'
 
 const clipboardProperty = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 const url = 'https://ysf.nosdn.127.net/case-screen.jpg?variant=full'
 
 function openPreview() {
-  render(<ConversationImage url={url} />)
+  render(<ConversationImage url={url} readFile={readAdminImageFile} />)
   fireEvent.click(screen.getByRole('button', { name: '放大会话图片' }))
   return within(screen.getByRole('dialog', { name: '会话图片预览' }))
 }

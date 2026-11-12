@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { ConversationMessageBody } from './conversation-image'
 import { ConversationBubble, ConversationSection, ConversationSheet, ConversationTranscript } from './conversation-transcript'
 import { DecisionCaseCard, DecisionCaseSection, EvidenceCaseCard, SopDetailHeader, SopDetailSection, SopTimeline, SopTimelineStep } from './voc-detail-display'
 import type { TopicDetail } from './voc-next-workspace'
@@ -13,7 +14,7 @@ import { TopicDetailPanel, TopicWorkbench } from './voc-topic-detail'
 import type { OpenTopicEvidence } from './voc-topic-evidence'
 
 type GuestSection = { title: string; lines: string[] }
-type GuestMessage = { role: string; time: string; text: string; anchor?: boolean; id?: string }
+type GuestMessage = { role: string; time: string; text: string; anchor?: boolean; id?: string; images?: string[] }
 type GuestCase = {
   title: string
   category: string
@@ -173,6 +174,8 @@ const chatRoles = {
   bot: { side: 'center', label: '机器人' },
   system: { side: 'center', label: '系统' },
 } as const
+const guestEvidencePath = /^\/guest\/evidence\/[A-Za-z0-9_-]{43}$/
+const guestImageId = /^(?:[0-9]|1[0-9])-[a-f0-9]{64}$/
 
 function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boolean | string; title?: string }) {
   const transcript = useRef<HTMLOListElement>(null)
@@ -187,6 +190,8 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
   const note = item.scope === 'pair' ? '以下为该条目关联的脱敏问答。'
     : item.scope === 'limited' ? '会话较长，当前展示与本次咨询相关的片段。'
       : '已脱敏 · 北京时间'
+  const guestPath = window.location.pathname
+  const imageBase = guestEvidencePath.test(guestPath) ? `${guestPath}/images/` : ''
   return <ConversationSection title={title} count={item.messages.length}>
     {item.messages.length ? <>
       <p className="mb-4 text-sm leading-6 text-muted-foreground">{note}</p>
@@ -195,8 +200,10 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
           const role = Object.hasOwn(chatRoles, message.role)
             ? chatRoles[message.role as keyof typeof chatRoles] : { side: 'center', label: '消息' } as const
           const anchored = typeof locate === 'string' ? message.id === locate : message.anchor
+          const imageUrls = imageBase && Array.isArray(message.images)
+            ? message.images.filter(id => typeof id === 'string' && guestImageId.test(id)).map(id => imageBase + id) : []
           return <ConversationBubble key={index} side={role.side} sender={role.label} time={message.time} question={message.anchor} anchored={anchored}>
-            <p>{message.text}</p>
+            <ConversationMessageBody text={message.text} imageUrls={imageUrls} />
           </ConversationBubble>
         })}
       </ConversationTranscript>

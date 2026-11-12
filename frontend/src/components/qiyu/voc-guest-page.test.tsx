@@ -88,3 +88,53 @@ it('opens the same chat drawer at the exact shared source when locating a quotat
   expect(target.getAttribute('data-side')).toBe('left')
   expect(reply.getAttribute('data-side')).toBe('right')
 })
+
+it('keeps message sides and previews only scoped images without fetching through the admin API', () => {
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  const previousPath = window.location.pathname
+  const guestPath = `/guest/evidence/${'a'.repeat(43)}`
+  const imageId = `0-${'b'.repeat(64)}`
+  window.history.replaceState(null, '', guestPath)
+  try {
+    const item = payload.cases[0]
+    render(<VocGuestPage {...payload} cases={[{
+      ...item,
+      messages: [
+        ...item.messages,
+        { role: 'staff', time, text: '[图片]', images: [imageId, '/api/detail/image', 'https://example.invalid/private.png'] },
+        { role: 'user', time, text: '[图片]' },
+        { role: 'bot', time, text: '机器人提示' },
+      ],
+    }, payload.cases[1]]} />)
+    const representative = screen.getByText(first.question).closest('article')!
+    fireEvent.click(within(representative).getByRole('button', { name: '查看会话上下文' }))
+    const conversation = within(screen.getByRole('dialog', { name: '问答与相关会话上下文' }))
+    const thumbnail = conversation.getByRole('img', { name: '会话图片' })
+    const url = `${guestPath}/images/${imageId}`
+    expect(thumbnail.getAttribute('src')).toBe(url)
+    expect(thumbnail.closest('li')?.getAttribute('data-side')).toBe('right')
+    expect(conversation.getByText('[图片]').closest('li')?.getAttribute('data-side')).toBe('left')
+    expect(conversation.getByText('机器人提示').closest('li')?.getAttribute('data-side')).toBe('center')
+    expect(conversation.getAllByRole('img')).toHaveLength(1)
+    fireEvent.error(thumbnail)
+    expect(conversation.getByText('图片暂不可查看')).toBeTruthy()
+    fireEvent.click(conversation.getByRole('button', { name: '重试加载图片' }))
+    const retriedThumbnail = conversation.getByRole('img', { name: '会话图片' })
+    expect(retriedThumbnail).not.toBe(thumbnail)
+    expect(retriedThumbnail.getAttribute('src')).toBe(url)
+    fireEvent.click(conversation.getByRole('button', { name: '放大会话图片' }))
+    const preview = within(screen.getByRole('dialog', { name: '会话图片预览' }))
+    fireEvent.error(preview.getByRole('img', { name: '会话原图' }))
+    fireEvent.click(preview.getByRole('button', { name: '重试加载图片' }))
+    const original = preview.getByRole('img', { name: '会话原图' })
+    expect(original.getAttribute('src')).toBe(url)
+    expect(fireEvent.contextMenu(original)).toBe(true)
+    Object.defineProperties(original, { naturalWidth: { value: 200 }, naturalHeight: { value: 100 } })
+    fireEvent.load(original)
+    expect(preview.getByRole('link', { name: '下载原图' }).getAttribute('href')).toBe(url)
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    window.history.replaceState(null, '', previousPath)
+  }
+})

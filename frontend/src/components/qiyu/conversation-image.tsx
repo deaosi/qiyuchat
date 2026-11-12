@@ -1,22 +1,12 @@
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import type { DetailMessageImage } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 type ImageFile = { blob: Blob; filename: string }
 type ImageSize = { width: number; height: number }
-
-async function readImageFile(url: string): Promise<ImageFile> {
-  const response = await fetch(`/api/detail/image?${new URLSearchParams({ url })}`, { credentials: 'same-origin', cache: 'no-store' })
-  if (!response.ok) throw new Error('图片文件暂不可读取')
-  const blob = await response.blob()
-  if (!blob.size || !blob.type.startsWith('image/')) throw new Error('图片文件暂不可读取')
-  const disposition = response.headers.get('Content-Disposition') || ''
-  const filename = /(?:^|;)\s*filename\s*=\s*"?([a-z0-9_-][a-z0-9._-]*\.[a-z0-9]+)"?\s*(?:;|$)/i.exec(disposition)?.[1]
-  const extension = new URL(url).pathname.match(/\.([a-z0-9]+)$/i)?.[1]
-  return { blob, filename: filename || `会话图片${extension ? `.${extension}` : ''}` }
-}
+type ImageFileReader = (url: string) => Promise<ImageFile>
+type ImageProps = { url: string; readFile?: ImageFileReader }
 
 async function clipboardPng(blob: Blob): Promise<Blob> {
   if (blob.type === 'image/png') return blob
@@ -36,7 +26,7 @@ async function clipboardPng(blob: Blob): Promise<Blob> {
   }
 }
 
-function ImagePreview({ url }: DetailMessageImage) {
+function ImagePreview({ url, readFile }: ImageProps) {
   const [size, setSize] = useState<ImageSize | null>(null)
   const [originalSize, setOriginalSize] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -45,7 +35,8 @@ function ImagePreview({ url }: DetailMessageImage) {
   const file = useRef<Promise<ImageFile> | null>(null)
 
   function loadFile() {
-    file.current ??= readImageFile(url).catch(error => {
+    if (!readFile) throw new Error('图片文件暂不可读取')
+    file.current ??= readFile(url).catch(error => {
       file.current = null
       throw error
     })
@@ -95,6 +86,12 @@ function ImagePreview({ url }: DetailMessageImage) {
     }
   }
 
+  const unavailable = readFile ? <p role="status" className="m-auto text-sm text-muted-foreground">图片暂不可查看</p>
+    : <div className="m-auto space-y-2 text-center text-sm text-muted-foreground">
+      <p role="status">图片暂不可查看</p>
+      <Button variant="outline" size="sm" onClick={() => { setSize(null); setFailed(false) }}>重试加载图片</Button>
+    </div>
+
   return <>
     <div className="border-b px-3 py-2.5 sm:px-4">
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
@@ -105,8 +102,12 @@ function ImagePreview({ url }: DetailMessageImage) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" disabled={!size || failed} onClick={() => setOriginalSize(value => !value)}>{originalSize ? '适应窗口' : '原尺寸'}</Button>
-          <Button variant="outline" size="sm" disabled={pending !== null} onClick={() => void copy()}>复制图片</Button>
-          <Button variant="outline" size="sm" disabled={pending !== null} onClick={() => void download()}>下载原图</Button>
+          {readFile ? <>
+            <Button variant="outline" size="sm" disabled={pending !== null} onClick={() => void copy()}>复制图片</Button>
+            <Button variant="outline" size="sm" disabled={pending !== null} onClick={() => void download()}>下载原图</Button>
+          </> : size && !failed && <Button asChild variant="outline" size="sm">
+            <a href={url} download referrerPolicy="no-referrer">下载原图</a>
+          </Button>}
           <DialogClose asChild><Button variant="ghost" size="sm" aria-label="关闭图片预览">关闭</Button></DialogClose>
         </div>
       </div>
@@ -114,7 +115,7 @@ function ImagePreview({ url }: DetailMessageImage) {
     </div>
     <div role="region" aria-label={originalSize ? '原尺寸图片，可滚动查看' : '完整图片'} tabIndex={originalSize ? 0 : undefined}
       className={cn('flex min-h-0 min-w-0 bg-muted/50', originalSize ? 'overflow-auto' : 'overflow-hidden p-3')}>
-      {failed ? <p role="status" className="m-auto text-sm text-muted-foreground">图片暂不可查看</p> :
+      {failed ? unavailable :
         <img src={url} alt="会话原图" decoding="async" referrerPolicy="no-referrer"
           onLoad={event => {
             const { naturalWidth: width, naturalHeight: height } = event.currentTarget
@@ -126,9 +127,15 @@ function ImagePreview({ url }: DetailMessageImage) {
   </>
 }
 
-export function ConversationImage({ url }: DetailMessageImage) {
+export function ConversationImage({ url, readFile }: ImageProps) {
   const [failed, setFailed] = useState(false)
-  if (failed) return <p className="text-xs opacity-75">图片暂不可查看</p>
+  if (failed) {
+    if (readFile) return <p className="text-xs opacity-75">图片暂不可查看</p>
+    return <div className="flex flex-wrap items-center gap-x-2">
+      <p className="text-xs opacity-75">图片暂不可查看</p>
+      <Button variant="ghost" size="xs" onClick={() => setFailed(false)}>重试加载图片</Button>
+    </div>
+  }
 
   return <Dialog>
     <DialogTrigger asChild>
@@ -138,7 +145,20 @@ export function ConversationImage({ url }: DetailMessageImage) {
       </button>
     </DialogTrigger>
     <DialogContent showCloseButton={false} className="h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-none grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:max-w-none">
-      <ImagePreview url={url} />
+      <ImagePreview url={url} readFile={readFile} />
     </DialogContent>
   </Dialog>
+}
+
+export function ConversationMessageBody({ text, imageUrls, readFile }: {
+  text: string
+  imageUrls: string[]
+  readFile?: ImageFileReader
+}) {
+  return <>
+    {(!imageUrls.length || text.trim() !== '[图片]') && <p>{text}</p>}
+    {imageUrls.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
+      {imageUrls.map((url, index) => <ConversationImage key={`${url}-${index}`} url={url} readFile={readFile} />)}
+    </div>}
+  </>
 }

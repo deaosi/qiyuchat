@@ -7,7 +7,8 @@ import { customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { ConversationImage } from './conversation-image'
+import { ConversationMessageBody } from './conversation-image'
+import { readAdminImageFile } from './conversation-image-files'
 import { ConversationBubble, ConversationSection, ConversationSheet, ConversationTranscript } from './conversation-transcript'
 
 export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean; anchorMessageId?: string; onCloseAutoFocus?: (event: Event) => void }
@@ -125,10 +126,7 @@ function ConversationMessage({ message, pair, anchored }: { message: ContextMess
   return <ConversationBubble side={side} sender={messageSender(message, pair)} time={message.time} anchored={anchored}
     senderNote={isFukeStaff ? '福客 AI · 七鱼未识别为客服' : undefined}
     question={Boolean(isCustomer && message.sourceMessageId && message.isQuestion)}>
-    {(!message.images.length || message.content.trim() !== '[图片]') && <p>{message.content}</p>}
-    {message.images.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
-      {message.images.map((image, index) => <ConversationImage key={`${image.url}-${index}`} url={image.url} />)}
-    </div>}
+    <ConversationMessageBody text={message.content} imageUrls={message.images.map(image => image.url)} readFile={readAdminImageFile} />
   </ConversationBubble>
 }
 

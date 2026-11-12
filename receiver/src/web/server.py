@@ -32,16 +32,20 @@ LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
 DB_LOCK = threading.RLock()
 IMAGE_SLOTS = threading.BoundedSemaphore(3)
 GUEST_PREFIX = "/guest/evidence/"
+GUEST_IMAGE_ROUTE = re.compile(
+    rf"{GUEST_PREFIX}({guest_evidence.TOKEN_PATTERN})/images/({guest_evidence.IMAGE_PATTERN})"
+)
 GUEST_ASSET_PREFIX = "/guest/ui/assets/"
 GUEST_ASSET_NAME = re.compile(r"[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(?:js|css|woff2?)")
 GUEST_ASSET_TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
                      ".woff2": "font/woff2", ".woff": "font/woff"}
 GUEST_DATA_MARKER = b"<!--VOC_GUEST_DATA-->"
 GUEST_SLOTS = threading.BoundedSemaphore(6)
+GUEST_IMAGE_SLOTS = threading.BoundedSemaphore(3)
 GUEST_POLICY = ("default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; "
                 "base-uri 'none'; form-action 'none'")
 GUEST_APP_POLICY = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                    "font-src 'self'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+                    "font-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 GUEST_HEADERS = {"X-Robots-Tag": "noindex, nofollow, noarchive",
                  "Cross-Origin-Resource-Policy": "same-origin"}
 GUEST_UNAVAILABLE = (
@@ -281,10 +285,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             u = urlparse(self.path)
             if u.path.startswith("/guest/"):
+                suffix = u.params or u.query or u.fragment
                 if u.path.startswith(GUEST_ASSET_PREFIX):
-                    self._guest_asset(u.path, u.params or u.query or u.fragment)
+                    self._guest_asset(u.path, suffix)
+                elif image := GUEST_IMAGE_ROUTE.fullmatch(u.path):
+                    self._guest_image(image[1], image[2], suffix)
                 else:
-                    self._guest_page(u.path, u.params or u.query or u.fragment)
+                    self._guest_page(u.path, suffix)
                 return
             path, qs = unquote(u.path), parse_qs(u.query, max_num_fields=30)
             if path == "/login":
@@ -350,6 +357,30 @@ class Handler(BaseHTTPRequestHandler):
             body = gzip.compress(body, 4)
             extra["Content-Encoding"] = "gzip"
         self._send(body, "text/html; charset=utf-8", status, policy=policy, extra=extra)
+
+    def _guest_image(self, token: str, image_id: str, suffix: str) -> None:
+        if suffix:
+            self._send(b"", "text/plain; charset=utf-8", 404, policy=GUEST_POLICY, extra=GUEST_HEADERS)
+            return
+        if not GUEST_IMAGE_SLOTS.acquire(timeout=2):
+            self._send(b"", "text/plain; charset=utf-8", 503, policy=GUEST_POLICY, extra=GUEST_HEADERS)
+            return
+        try:
+            url = guest_evidence.resolve_image(self.server.cfg, token, image_id)
+            if url is None:
+                self._send(b"", "text/plain; charset=utf-8", 404, policy=GUEST_POLICY, extra=GUEST_HEADERS)
+                return
+            try:
+                data, mime, _ = case_media.fetch_image(url)
+            except case_media.ImageFetchError as exc:
+                self._send(b"", "text/plain; charset=utf-8", exc.status, policy=GUEST_POLICY, extra=GUEST_HEADERS)
+                return
+            extension = case_media._IMAGE_FORMATS[mime]
+            self._send(data, mime, policy=GUEST_POLICY, extra={
+                **GUEST_HEADERS, "Content-Disposition": f'inline; filename="conversation-image.{extension}"',
+            })
+        finally:
+            GUEST_IMAGE_SLOTS.release()
 
     @staticmethod
     def _render_guest(payload: dict) -> tuple[bytes, str]:

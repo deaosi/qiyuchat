@@ -138,7 +138,7 @@ class TestWeb(LocalFixture):
             self.assertEqual(headers["Referrer-Policy"], "no-referrer")
             self.assertIn("noindex", headers["X-Robots-Tag"])
             policy = headers["Content-Security-Policy"]
-            for rule in ("default-src 'none'", "script-src 'self'", "font-src 'self'", "form-action 'none'"):
+            for rule in ("default-src 'none'", "script-src 'self'", "font-src 'self'", "img-src 'self' data:", "form-action 'none'"):
                 self.assertIn(rule, policy)
             for suffix in ("?id=99", "/other", ";other"):
                 self.assertEqual(self.call(path + suffix)[0], 404)
@@ -155,6 +155,34 @@ class TestWeb(LocalFixture):
         for route in ("/", "/assets/index-Abc_1234.js", "/api/detail?id=1", "/api/meta",
                       "/api/voc2/feishu/preview?kind=topics&days=7"):
             self.assertEqual(self.call(route, headers={"Referer": self.origin + path})[0], 401)
+
+    def test_guest_image_route_uses_opaque_id_and_never_exposes_upstream(self):
+        self.server.admin_key = "fixture-admin"
+        token, image_id = "A" * 43, "0-" + "b" * 64
+        path = f"/guest/evidence/{token}/images/{image_id}"
+        upstream = "https://ysf.nosdn.127.net/private-original.png?token=private-signature"
+        png = b"\x89PNG\r\n\x1a\nsynthetic"
+        with (
+            patch("src.web.guest_evidence.resolve_image",
+                  side_effect=lambda cfg, key, media: upstream if (key, media) == (token, image_id) else None) as resolve,
+            patch("src.web.case_media.fetch_image", return_value=(png, "image/png", "private-original.png")) as fetch,
+        ):
+            status, data, headers = self.call(path)
+            self.assertEqual((status, data), (200, png))
+            self.assertEqual(headers["Content-Type"], "image/png")
+            self.assertEqual(headers["Content-Disposition"], 'inline; filename="conversation-image.png"')
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+            self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin")
+            self.assertNotIn("Set-Cookie", headers)
+            self.assertNotIn("private-original", str(headers))
+            self.assertNotIn("Location", headers)
+            for rejected in (path + "?url=" + upstream, path + "/more", path.replace(image_id, "%30-" + "b" * 64),
+                             path.replace(token, "B" * 43), path.replace(image_id, "1-" + "b" * 64)):
+                self.assertEqual(self.call(rejected)[0], 404)
+            self.assertEqual(resolve.call_count, 3)
+            fetch.assert_called_once_with(upstream)
+            self.assertEqual(self.call("/api/detail/image", headers={"Referer": self.origin + path})[0], 401)
 
     def test_host_and_origin_protection(self):
         self.assertEqual(self.call("/api/meta", headers={"Host": "evil.example"})[0], 403)

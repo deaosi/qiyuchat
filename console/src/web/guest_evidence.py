@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
+import hmac
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from ..voc_assets import connection
 from . import case_media, guest_evidence_view, guest_topic
 
 TOKEN_PATTERN = r"[A-Za-z0-9_-]{43}"
+IMAGE_PATTERN = r"(?:[0-9]|1[0-9])-[a-f0-9]{64}"
 PUBLIC_PATH = "/guest/evidence/"
 PUBLIC_ORIGIN = "https://qiyu.fanwulink.cn"
 _WEEK = 7 * 86400
@@ -30,8 +32,12 @@ _FULL_MESSAGE_LIMIT = 6000
 _FULL_CONTEXT_MESSAGES = 400
 _FULL_CONTEXT_CHARS = 90_000
 _MAX_CASES = 20
+_MAX_CASE_IMAGES = 80
+_MAX_MESSAGE_IMAGES = 8
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _TOKEN = re.compile(TOKEN_PATTERN)
+_IMAGE = re.compile(IMAGE_PATTERN)
+_MEDIA_DIGEST = re.compile(r"[a-f0-9]{64}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
 _URL = re.compile(r"""(?:[a-z][a-z0-9+.-]*://|www\.|(?<![\w@])(?:[a-z0-9-]+\.)+(?:cn|com|net|org|io|ai|top|cc)\b)[^\s，。；！？、<>'"]*""", re.I)
 _SOURCE_ID = re.compile(r"\bqiyu-(?:external(?:-sha256)?|user|session):[^\s，。；！？、]+", re.I)
@@ -126,10 +132,13 @@ def _private_names(pair: dict, session: dict, messages: list[dict]) -> re.Patter
 
 
 def _message(role: str, stamp: object, value: object, names: re.Pattern[str] | None,
-             limit: int = _MAX_CONTEXT_TEXT) -> dict | None:
-    text = _clean(case_media.project(value)[0], names)
+             limit: int = _MAX_CONTEXT_TEXT, *, attachments: list[str] | None = None) -> dict | None:
+    content, images = case_media.project(value)
+    text = _clean(content, names)
     if not text:
         return None
+    if attachments is not None and role in _ROLE:
+        attachments.extend(item["url"] for item in images[:_MAX_MESSAGE_IMAGES])
     try:
         time_text = datetime.fromtimestamp(int(stamp or 0) / 1000, _ZONE).strftime("%Y-%m-%d %H:%M:%S") if int(stamp or 0) > 0 else ""
     except (ValueError, TypeError, OverflowError, OSError):
@@ -148,12 +157,12 @@ def _related_ids(value: object) -> set[str]:
 
 
 def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
-                        names: re.Pattern[str] | None, *, full: bool) -> tuple[list[dict], bool, int | None]:
+                        names: re.Pattern[str] | None, *, full: bool) -> tuple[list[dict], bool, int | None, dict]:
     customer = pair.get("customer_id")
     questions = _related_ids(origin.get("question_message_ids"))
     answers = _related_ids(origin.get("answer_message_ids"))
     if not questions or not isinstance(customer, str) or not customer or customer.startswith("qiyu-session:"):
-        return [], False, None
+        return [], False, None, {}
     segments: list[list[dict]] = []
     current: list[dict] | None = None
     for row in rows:
@@ -172,7 +181,7 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
         if any(row["role"] == "user" and row["source_message_id"] in questions for row in segment)
     ]
     if len(matching) != 1:
-        return [], False, None
+        return [], False, None, {}
     segment = matching[0]
     q_index = next(index for index, row in enumerate(segment) if row["role"] == "user" and row["source_message_id"] in questions)
     a_index = q_index
@@ -189,28 +198,39 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
         # Always show the question, even when the SOP is anchored to a following answer.
         begin, stop = max(0, min(q_index, a_index) - 3), max(q_index, a_index) + 5
         text_limit = _MAX_CONTEXT_TEXT
-    projected = [(index, message) for index, row in enumerate(segment[begin:stop], begin)
-                 if (message := _message(row["role"], row["ts"], row["content"], names, text_limit)) is not None]
+    projected = []
+    for index, row in enumerate(segment[begin:stop], begin):
+        attachments = []
+        message = _message(row["role"], row["ts"], row["content"], names, text_limit, attachments=attachments)
+        if message is not None:
+            projected.append((index, message, attachments))
     limited = full and (len(segment) > _FULL_CONTEXT_MESSAGES or any(
-        len(message["text"]) > _FULL_MESSAGE_LIMIT for _, message in projected
+        len(message["text"]) > _FULL_MESSAGE_LIMIT for _, message, _ in projected
     ))
-    if full and sum(len(message["text"]) for _, message in projected) > _FULL_CONTEXT_CHARS:
+    if full and sum(len(message["text"]) for _, message, _ in projected) > _FULL_CONTEXT_CHARS:
         limited = True
         size = 0
         kept = []
-        for index, message in sorted(projected, key=lambda item: (abs(item[0] - q_index), item[0])):
+        for index, message, attachments in sorted(projected, key=lambda item: (abs(item[0] - q_index), item[0])):
             size += len(message["text"])
             if size > _FULL_CONTEXT_CHARS:
                 break
-            kept.append((index, message))
+            kept.append((index, message, attachments))
         projected = sorted(kept, key=lambda item: item[0])
     anchored_row = segment[a_index]
     anchor_index = a_index if anchored_row["role"] == "user" and anchored_row["source_message_id"] in questions else q_index
-    position = next((position for position, (index, _) in enumerate(projected) if index == anchor_index), None)
-    return [message for _, message in projected], limited, position
+    position = next((position for position, (index, _, _) in enumerate(projected) if index == anchor_index), None)
+    media = {}
+    for offset, (index, message, attachments) in enumerate(projected):
+        for url in attachments[:_MAX_CASE_IMAGES - len(media)]:
+            digest = _digest([offset, segment[index]["source_message_id"], message["role"], message["time"], url])
+            media[digest] = (offset, url)
+        if len(media) == _MAX_CASE_IMAGES:
+            break
+    return [message for _, message, _ in projected], limited, position, media
 
 
-def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tuple[str, list[dict], str, re.Pattern[str] | None] | None:
+def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tuple[str, list[dict], str, re.Pattern[str] | None, dict] | None:
     source = Path(cfg.runtime.db_path)
     if not source.is_file() or type(qa_id) is not int or qa_id <= 0:
         return None
@@ -245,8 +265,8 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tupl
     if not rows:
         return None
     names = _private_names(pair, dict(session_row), rows)
-    context, limited, position = (_controlled_context(pair, origin, rows, anchor, names, full=full)
-                                  if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False, None))
+    context, limited, position, media = (_controlled_context(pair, origin, rows, anchor, names, full=full)
+                                         if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False, None, {}))
     scope = ("limited" if limited else "context") if context else "pair"
     if not context:
         limit = _FULL_MESSAGE_LIMIT if full else _MAX_CONTEXT_TEXT
@@ -265,7 +285,7 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tupl
     # A presentation marker should never change the fingerprint of an existing link.
     if position is not None:
         context[position]["anchor"] = True
-    return fingerprint, context, scope, names
+    return fingerprint, context, scope, names, media
 
 
 def _registry(cfg: Settings) -> Path:
@@ -367,6 +387,7 @@ def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
         seen.add(source)
         case_names = evidence[3]
         binding = {"qa": source, "anchor": pinned, "fingerprint": evidence[0],
+                   "media": list(evidence[4]),
                    "title": _clean(candidate.get("title"), case_names)[:450],
                    "category": _clean(candidate.get("category"), case_names)[:200],
                    "time": _clean(candidate.get("time"), case_names)[:45],
@@ -479,12 +500,100 @@ def upgrade_url(cfg: Settings, token: str, *, entry: dict, view: dict) -> str:
     return _save(cfg, payload, replace_token=token) if payload else ""
 
 
-def _render_case(cfg: Settings, binding: dict, *, full: bool) -> dict | None:
+def _verified_case(cfg: Settings, binding: dict, *, full: bool):
     if not isinstance(binding, dict) or not isinstance(binding.get("anchor"), str):
         return None
     case = _case(cfg, binding.get("qa"), binding["anchor"], full=full)
-    if case is None or not secrets.compare_digest(case[0], str(binding.get("fingerprint", ""))):
+    fingerprint = binding.get("fingerprint")
+    if case is None or not isinstance(fingerprint, str) or not _MEDIA_DIGEST.fullmatch(fingerprint):
         return None
+    return case if secrets.compare_digest(case[0], fingerprint) else None
+
+
+def _bindings(value: dict) -> list | None:
+    if not isinstance(value, dict) or value.get("v") not in (1, 2):
+        return None
+    if value["v"] == 1:
+        binding = value.get("case")
+        return [binding] if isinstance(binding, dict) else []
+    bindings = value.get("cases")
+    return bindings if isinstance(bindings, list) else None
+
+
+def build_guest_media_upgrade(cfg: Settings, old_payload: dict) -> dict | None:
+    """Pin images in the original scope of an existing, unchanged guest link."""
+    bindings = _bindings(old_payload)
+    if bindings is None or _entry(old_payload.get("entry"), None) is None or len(bindings) > _MAX_CASES:
+        return None
+    if not bindings:
+        return old_payload
+    full = old_payload["v"] == 2
+    updated = []
+    for binding in bindings:
+        if isinstance(binding, dict) and "media" not in binding:
+            case = _verified_case(cfg, binding, full=full)
+            if case is not None:
+                binding = {**binding, "media": list(case[4])}
+        updated.append(binding)
+    return {**old_payload, "cases": updated} if full else {**old_payload, "case": updated[0]}
+
+
+def _read_registry(cfg: Settings, token: str) -> dict | None:
+    if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+        return None
+    try:
+        with connection(_registry(cfg)) as db:
+            row = db.execute("SELECT payload FROM guest_evidence WHERE token=? AND expires>?",
+                             (token, int(time.time()))).fetchone()
+        value = json.loads(row["payload"]) if row else None
+        return value if isinstance(value, dict) else None
+    except (sqlite3.Error, OSError, ValueError, RecursionError):
+        return None
+
+
+def _media_digests(binding: dict) -> list[str]:
+    pinned = binding.get("media")
+    if not isinstance(pinned, list):
+        return []
+    return list(dict.fromkeys(digest for digest in pinned[:_MAX_CASE_IMAGES]
+                              if isinstance(digest, str) and _MEDIA_DIGEST.fullmatch(digest)))
+
+
+def _image_id(token: str, ordinal: int, fingerprint: str, digest: str) -> str:
+    message = _canonical(["guest-image-v1", ordinal, fingerprint, digest]).encode("ascii")
+    return f"{ordinal}-{hmac.new(token.encode('ascii'), message, sha256).hexdigest()}"
+
+
+def resolve_image(cfg: Settings, token: str, image_id: str) -> str | None:
+    """Resolve one pinned image from its exact live bearer link and binding."""
+    if not isinstance(image_id, str) or not _IMAGE.fullmatch(image_id):
+        return None
+    value = _read_registry(cfg, token)
+    bindings = _bindings(value)
+    ordinal = int(image_id.split("-", 1)[0])
+    if bindings is None or ordinal >= len(bindings) or _entry(value.get("entry"), None) is None:
+        return None
+    binding = bindings[ordinal]
+    fingerprint = binding.get("fingerprint") if isinstance(binding, dict) else None
+    if not isinstance(fingerprint, str) or not _MEDIA_DIGEST.fullmatch(fingerprint):
+        return None
+    digest = next((digest for digest in _media_digests(binding)
+                   if secrets.compare_digest(_image_id(token, ordinal, fingerprint, digest), image_id)), None)
+    if digest is None:
+        return None
+    case = _verified_case(cfg, binding, full=value["v"] == 2)
+    found = case[4].get(digest) if case is not None else None
+    return found[1] if found else None
+
+
+def _render_case(cfg: Settings, binding: dict, *, token: str, ordinal: int, full: bool) -> dict | None:
+    case = _verified_case(cfg, binding, full=full)
+    if case is None:
+        return None
+    for digest in _media_digests(binding):
+        if found := case[4].get(digest):
+            position, _ = found
+            case[1][position].setdefault("images", []).append(_image_id(token, ordinal, case[0], digest))
     return {"title": _clean(binding.get("title"), case[3]),
             "category": _clean(binding.get("category"), case[3]),
             "time": _clean(binding.get("time"), case[3]),
@@ -494,35 +603,25 @@ def _render_case(cfg: Settings, binding: dict, *, full: bool) -> dict | None:
 
 def resolve_payload(cfg: Settings, token: str) -> dict | None:
     """Read the public projection for an exact bearer token."""
-    if not isinstance(token, str) or not _TOKEN.fullmatch(token):
-        return None
     try:
-        with connection(_registry(cfg)) as db:
-            row = db.execute("SELECT payload FROM guest_evidence WHERE token=? AND expires>?",
-                             (token, int(time.time()))).fetchone()
-        if not row:
-            return None
-        value = json.loads(row["payload"])
-        if not isinstance(value, dict) or value.get("v") not in (1, 2):
+        value = _read_registry(cfg, token)
+        bindings = _bindings(value)
+        if bindings is None:
             return None
         raw_entry = value.get("entry")
         entry = _entry(raw_entry, None)
         if entry is None:
             return None
         if value["v"] == 1:
-            bindings = [value["case"]] if isinstance(value.get("case"), dict) else []
             total = len(bindings)
         else:
             entry.update(_view(raw_entry, None))
-            bindings = value.get("cases")
-            if not isinstance(bindings, list):
-                return None
             total = value.get("total_cases", len(bindings))
             if type(total) is not int or total < len(bindings):
                 return None
         cases, case_details, case_keys = [], [], []
-        for binding in bindings[:_MAX_CASES]:
-            case = _render_case(cfg, binding, full=value["v"] == 2)
+        for ordinal, binding in enumerate(bindings[:_MAX_CASES]):
+            case = _render_case(cfg, binding, token=token, ordinal=ordinal, full=value["v"] == 2)
             if case is None:
                 continue
             cases.append(case)

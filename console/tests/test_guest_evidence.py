@@ -241,3 +241,71 @@ class TestGuestEvidence(LocalFixture):
         archived = guest.resolve(self.cfg, token).decode()
         self.assertIn("完整的已同步内容", archived)
         self.assertNotIn("这一条如何处理", archived)
+
+    def test_images_pin_exact_visible_human_attachments_on_existing_links(self):
+        qa = self._seed_case(controlled=True, extended=True)
+        user_url = "https://ysf.nosdn.127.net/guest-customer.png?token=private-upstream-token"
+        staff_url = "https://ysf.nosdn.127.net/guest-staff.jpg"
+        outside_url = "https://ysf.nosdn.127.net/guest-outside.png"
+        bot_url = "https://ysf.nosdn.127.net/guest-bot.png"
+
+        def attachment(url):
+            return json.dumps({"type": "image", "url": url})
+
+        with app.get_db(self.cfg).tx() as db:
+            db.executemany("UPDATE raw_message SET content=? WHERE source_message_id=?", [
+                (attachment(user_url), "preceding"), (attachment(staff_url), "later-1"),
+                (attachment(outside_url), "outside-question"), (attachment(bot_url), "bot-reminder"),
+            ])
+        token = self._token(guest.issue_url(self.cfg, qa, "own-question", entry=self.entry))
+        with closing(guest.sqlite3.connect(guest._registry(self.cfg))) as db, db:
+            payload, expiry, dedupe = db.execute(
+                "SELECT payload,expires,dedupe FROM guest_evidence WHERE token=?", (token,)).fetchone()
+            old = json.loads(payload)
+            old["cases"][0].pop("media")
+            db.execute("UPDATE guest_evidence SET payload=? WHERE token=?", (json.dumps(old), token))
+            db.commit()
+            before = guest.resolve_payload(self.cfg, token)
+            self.assertFalse(any(message.get("images") for message in before["cases"][0]["messages"]))
+            upgraded = guest.build_guest_media_upgrade(self.cfg, old)
+            original = old["cases"][0]
+            pinned = upgraded["cases"][0]
+            self.assertEqual({key: value for key, value in pinned.items() if key != "media"}, original)
+            self.assertEqual(len(pinned["media"]), 2)
+            db.execute("UPDATE guest_evidence SET payload=? WHERE token=?", (json.dumps(upgraded), token))
+            self.assertEqual(db.execute("SELECT expires,dedupe FROM guest_evidence WHERE token=?", (token,)).fetchone(),
+                             (expiry, dedupe))
+        visible = guest.resolve_payload(self.cfg, token)
+        images = [(message["role"], image) for message in visible["cases"][0]["messages"]
+                  for image in message.get("images", [])]
+        self.assertEqual([role for role, _ in images], ["user", "staff"])
+        self.assertEqual([guest.resolve_image(self.cfg, token, image) for _, image in images], [user_url, staff_url])
+        for url in (user_url, staff_url, outside_url, bot_url):
+            self.assertNotIn(url, json.dumps(visible))
+        image_id = images[0][1]
+        other = self._token(guest.issue_url(self.cfg, qa, "own-question",
+                                            entry={**self.entry, "title": "另一个访客条目"}))
+        self.assertNotEqual(token, other)
+        self.assertIsNone(guest.resolve_image(self.cfg, other, image_id))
+        self.assertIsNone(guest.resolve_image(self.cfg, token, "1-" + image_id.split("-", 1)[1]))
+        with patch.object(guest.time, "time", return_value=expiry):
+            self.assertIsNone(guest.resolve_image(self.cfg, token, image_id))
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("UPDATE raw_message SET content=? WHERE source_message_id='preceding'",
+                       (attachment("https://ysf.nosdn.127.net/replacement.png"),))
+        changed = guest.resolve_payload(self.cfg, token)
+        self.assertEqual(len(changed["cases"]), 1, "an attachment change alone preserves the legacy text fingerprint")
+        self.assertIsNone(guest.resolve_image(self.cfg, token, image_id))
+        self.assertEqual([image for message in changed["cases"][0]["messages"] for image in message.get("images", [])],
+                         [images[1][1]])
+
+    def test_pair_fallback_keeps_image_placeholders_without_proxy_authority(self):
+        qa = self._seed_case(controlled=False)
+        url = "https://ysf.nosdn.127.net/unscoped.png"
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("UPDATE qa_pair SET question=? WHERE qa_id=?", (json.dumps({"type": "image", "url": url}), qa))
+        token = self._token(guest.issue_url(self.cfg, qa, entry=self.entry))
+        case, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertEqual(case["scope"], "pair")
+        self.assertEqual(case["messages"][0]["text"], "[图片]")
+        self.assertFalse(any(message.get("images") for message in case["messages"]))
