@@ -45,21 +45,28 @@ it('uses verified staff claims when the source answer is empty, excluding non-st
   expect(screen.queryByText('客户后续反馈')).toBeNull()
 })
 
-it('prefers a case with a verified nonempty reply in the frequency view', () => {
+it('keeps the verified representative and jumps from other questions without replacing it', () => {
   const empty: Evidence = { id: 'empty', event_id: 'empty', qa_id: 1, question: '较早问题', question_quote: '较早问题', answer: '', staff_source_verified: true, claims: [] }
   const answered: Evidence = { ...empty, id: 'answered', event_id: 'answered', qa_id: 2, question: '有回复的问题', question_quote: '有回复的问题', source_kind: 'source-anchored', answer: '真实客服回复' }
-  const legacyAnswered: Evidence = { ...answered, id: 'legacy', event_id: 'legacy', qa_id: 3, source_kind: 'legacy-reference', question_quote: '未确认发言人的片段' }
+  const legacyAnswered: Evidence = { ...answered, id: 'legacy', event_id: 'legacy', qa_id: 3, source_kind: 'legacy-reference', question_quote: '未确认发言人的片段', question_message_ids: ['question-3'] }
   const detail: TopicDetail = {
     topic: { id: 'topic', theme: '主题', question: '问题', event_count: 2, customer_count: 1, session_count: 2, mention_count: 2, last_seen: '', samples: [] },
     events: [empty, legacyAnswered, answered], workbench: { comparison: { current: { start: '', end: '' }, previous: null, comparable: false, note: '', last_synced_at: '' }, knowledge: [], gaps: [] },
   }
-  render(<TopicWorkbench detail={detail} onOpenEvidence={vi.fn()} exchangeOnly />)
+  const open = vi.fn()
+  render(<TopicWorkbench detail={detail} onOpenEvidence={open} exchangeOnly />)
   const representative = screen.getByText('有回复的问题').closest('article')!
   expect(within(representative).getByText('真实客服回复')).toBeTruthy()
   expect(screen.getByText('代表问答')).toBeTruthy()
   expect(screen.queryByText(/处理判断|待补证据/)).toBeNull()
-  fireEvent.click(screen.getAllByRole('button', { name: '查看问答' })[0])
-  expect(screen.getByText('当前问答')).toBeTruthy()
+  const otherQuestions = screen.getByRole('region', { name: '会话依据' })
+  const jumps = within(otherQuestions).getAllByRole('button', { name: '跳转到会话上下文' })
+  expect(within(otherQuestions).queryByRole('button', { name: '查看问答' })).toBeNull()
+  fireEvent.click(jumps[1])
+  expect(open).toHaveBeenCalledWith(legacyAnswered, 'question-3')
+  expect(screen.getByText('有回复的问题').closest('article')).toBe(representative)
+  expect(within(otherQuestions).getAllByRole('button', { name: '跳转到会话上下文' })).toEqual(jumps)
+  expect(screen.queryByText('当前问答')).toBeNull()
 })
 
 it('deduplicates valid QA identities, prefers verified replies and avoids mixed-role full question text', () => {

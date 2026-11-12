@@ -241,7 +241,8 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
     ?? events.find(item => item.staff_source_verified && confirmed.has(item.domain?.diagnosis.status ?? ''))
     ?? events.find(item => item.staff_source_verified)
     ?? events[0]
-  const activeCase = events.find(item => item.id === caseId) ?? representative
+  const selectedCase = exchangeOnly ? undefined : events.find(item => item.id === caseId)
+  const activeCase = selectedCase ?? representative
   const otherCases = events.filter(item => item.id !== activeCase?.id)
   const gaps = workbench?.gaps.filter(gap => gap.count > 0) ?? []
 
@@ -256,7 +257,7 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
       metadata={[topic.platforms?.join('、'), topic.last_seen && `最近发生 ${displayTime(topic.last_seen)}`, topic.unknown_merchant_sessions ? `${number(topic.unknown_merchant_sessions)} 个会话的商家身份待确认` : ''].filter(Boolean).join(' · ')} />
     {workbench && <TrendComparison comparison={workbench.comparison} currentConsultations={topic.consultation_count} trend={topic.trend} />}
     {workbench && activeCase && <section className="space-y-3">
-      <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">{exchangeOnly ? (caseId ? '当前问答' : '代表问答') : `处理判断 · ${caseId ? '当前案例' : '代表案例'}`}</h4>
+      <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">{exchangeOnly ? '代表问答' : `处理判断 · ${selectedCase ? '当前案例' : '代表案例'}`}</h4>
       {exchangeOnly ? <DecisionCaseCard metadata={[activeCase.customer_name || '匿名商家', displayTime(activeCase.asked_at)].filter(Boolean).join(' · ')}
         intro={<OriginalExchange item={activeCase} exactQuestion />} facts={[]}
         action={activeCase.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(activeCase, questionAnchor(activeCase))}>跳转</Button>} />
@@ -270,7 +271,7 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
     {(!workbench || otherCases.length > 0) && <section className="space-y-3" aria-label="会话依据">
       <h4 className="font-medium">{exchangeOnly ? (workbench ? '其他问答' : '问答记录') : workbench ? '其他会话依据' : '原句依据'}</h4>
       <EvidenceList evidence={(workbench ? otherCases : events).slice(0, evidenceLimit)} onOpenEvidence={onOpenEvidence} readOnly={readOnly} exchangeOnly={exchangeOnly}
-        onSelectCase={workbench ? id => { setCaseId(id); caseHeading.current?.focus(); caseHeading.current?.scrollIntoView?.({ block: 'start' }) } : undefined} />
+        onSelectCase={workbench && !exchangeOnly ? id => { setCaseId(id); caseHeading.current?.focus(); caseHeading.current?.scrollIntoView?.({ block: 'start' }) } : undefined} />
       {(workbench ? otherCases : events).length > evidenceLimit && <Button variant="outline" size="sm" onClick={() => setEvidenceLimit(value => value + 8)}>显示更多会话依据</Button>}
     </section>}
   </div>

@@ -105,7 +105,7 @@ export function EvidenceList({ evidence, onOpenEvidence, onSelectCase, readOnly 
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>{!readOnly && item.qa_id ? `问答 ${item.qa_id} · ` : ''}{item.customer_name || '匿名商家'}{displayTime(item.asked_at) ? ` · ${displayTime(item.asked_at)}` : ''}</span>
         <div className="flex flex-wrap gap-1">
-          {onSelectCase && <Button variant="outline" size="xs" onClick={() => onSelectCase(item.id)}>{exchangeOnly ? '查看问答' : '查看处理判断'}</Button>}
+          {onSelectCase && <Button variant="outline" size="xs" onClick={() => onSelectCase(item.id)}>查看处理判断</Button>}
           {item.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>跳转</Button>}
         </div>
       </div>
