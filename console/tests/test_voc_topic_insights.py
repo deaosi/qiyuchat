@@ -44,6 +44,47 @@ class TestTrendScope(unittest.TestCase):
 
 
 class TestWorkbenchProjection(unittest.TestCase):
+    def test_category_ranking_deduplicates_current_and_prior_without_collapsing_member_topics(self):
+        definitions = {
+            identity: {"id": identity, "theme": label, "question": question, "primary_intent": intent,
+                       "boundary": "", "revision": 1}
+            for identity, label, question, intent in (
+                ("wrong", "回复异常", "回复不正确的原因？", "functional_anomaly"),
+                ("missing", " 回复异常 ", "机器人有时不回复的原因？", "functional_anomaly"),
+                ("earlier", "回复异常", "为什么延迟回复？", "functional_anomaly"),
+                ("config", "回复异常", "回复内容怎么配置？", "configuration_guidance"),
+                ("order", "待办规则", "待办如何进入？", "configuration_guidance"),
+                ("historic", "待办规则", "如何生成待办？", "configuration_guidance"),
+            )
+        }
+
+        def event(topic, session, customer):
+            return {"topic_id": topic, "source": {"session_id": session, "customer_id": customer,
+                    "asked_at": 1, "asked_at_text": "2026-11-12", "answer": ""},
+                    "data": {"question_span": {"quote": definitions[topic]["question"]},
+                             "domain": {"primary_intent": definitions[topic]["primary_intent"]}}}
+
+        rows = [event("wrong", "session-1", "a"), event("wrong", "session-2", "a"),
+                event("missing", "session-1", "a"), event("missing", "session-1", "b"),
+                event("config", "session-1", "a"), event("order", "session-3", "a")]
+        prior = [event("wrong", "old-session", "a"), event("earlier", "old-session", "a")]
+        period = {"source_pairs": 10, "processed_pairs": 10}
+        workbench = (rows, prior, {"historic"}, insights.comparison(period, period, ""))
+        with patch.object(engine, "_workbench_data", return_value=workbench), patch.object(engine, "_topic_definitions", return_value=definitions):
+            result = engine.topics(Settings(), {}, workbench=True)
+            trend_only = engine.topics(Settings(), {}, workbench=True, trend="rising")
+        self.assertEqual((result["total"], result["category_total"]), (3, 3))
+        self.assertEqual(result["category_consultation_count"], 5)
+        top, *others = result["items"]
+        self.assertEqual(top["theme"], "回复异常")
+        self.assertEqual({item["id"] for item in top["members"]}, {"wrong", "missing"})
+        self.assertEqual(top["members"][0]["id"], top["id"])
+        self.assertEqual((top["consultation_count"], top["session_count"], top["customer_count"], top["event_count"]), (3, 2, 2, 4))
+        self.assertEqual(top["trend"], {"status": "rising", "previous_consultation_count": 1, "delta": 2})
+        self.assertEqual({item["id"]: item["trend"]["status"] for item in others}, {"config": "new", "order": "stable"})
+        self.assertEqual((trend_only["total"], trend_only["category_total"]), (1, 3))
+        self.assertEqual(trend_only["category_consultation_count"], 5)
+
     def test_only_canonical_validation_can_allow_direct_use(self):
         certificate = {"auto_reusable": True, "status": "accepted", "reason_codes": []}
         for acceptance, effect, level, expected in (

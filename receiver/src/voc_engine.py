@@ -15,6 +15,7 @@ import json
 import logging
 import sqlite3
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -346,12 +347,12 @@ def _public_topic(topic: dict, events: list[dict]) -> dict:
             "samples": list(dict.fromkeys(row["data"]["question_span"]["quote"] for row in events))[:5]}
 
 
-def _topic_items(cfg: Settings, events: list[dict]) -> list[dict]:
+def _topic_items(cfg: Settings, events: list[dict], definitions: dict | None = None) -> list[dict]:
     by_topic = defaultdict(list)
     for row in events:
         by_topic[row["topic_id"]].append(row)
-    items = [_public_topic(topic, by_topic[topic_id])
-             for topic_id, topic in _topic_definitions(cfg).items() if topic_id in by_topic]
+    definitions = _topic_definitions(cfg) if definitions is None else definitions
+    items = [_public_topic(topic, by_topic[topic_id]) for topic_id, topic in definitions.items() if topic_id in by_topic]
     return sorted(items, key=lambda item: (-item["consultation_count"], -item["event_count"], item["id"]))
 
 
@@ -419,9 +420,9 @@ def _workbench_data(cfg: Settings, filters: dict) -> tuple[list[dict], list[dict
     return current_events, previous_events, observed_before, comparison
 
 
-def _topic_insight(topic: dict, rows: list[dict], prior: list[dict], earlier: bool, scope: dict) -> dict:
+def _topic_insight(topic: dict, rows: list[dict], prior: list[dict], earlier: bool, scope: dict, *, category: bool = False) -> dict:
     known, unknown = insights.participants(rows)
-    previous_count = len({variants.consultation_key(row) for row in prior})
+    previous_count = _consultations(prior, category=category)
     trend = insights.trend(topic["consultation_count"], previous_count, earlier, scope)
     if trend["status"] == "new" and any(row.get("episode_id") for row in rows):
         # Earlier episodes may have been published outside the compared periods.
@@ -431,19 +432,67 @@ def _topic_insight(topic: dict, rows: list[dict], prior: list[dict], earlier: bo
             "trend": trend}
 
 
+def _consultations(rows: list[dict], *, category: bool) -> int:
+    parts = 2 if category else 3
+    return len({variants.consultation_key(row)[:parts] for row in rows})
+
+
+def _rank_category(topic: dict) -> tuple[str, ...]:
+    label = " ".join(unicodedata.normalize("NFKC", topic["theme"]).casefold().split())
+    intent = topic.get("primary_intent", "")
+    if label and intent in ("functional_anomaly", "configuration_guidance"):
+        return ("theme", intent, label)
+    return ("topic", topic["id"])
+
+
+def _rank_categories(definitions: dict, items: list[dict], rows: list[dict], prior: list[dict],
+                     earlier: set[str], comparison: dict) -> list[dict]:
+    categories_by_topic = {identity: _rank_category(topic) for identity, topic in definitions.items()}
+    categories_by_topic.update({item["id"]: _rank_category(item) for item in items})
+    members, current_rows, prior_rows = defaultdict(list), defaultdict(list), defaultdict(list)
+    for item in items:
+        members[categories_by_topic[item["id"]]].append(item)
+    for row in rows:
+        if (key := categories_by_topic.get(row["topic_id"])) in members:
+            current_rows[key].append(row)
+    for row in prior:
+        if (key := categories_by_topic.get(row["topic_id"])) in members:
+            prior_rows[key].append(row)
+    seen = {categories_by_topic[identity] for identity in earlier if identity in categories_by_topic}
+
+    ranked = []
+    for key, children in members.items():
+        top = children[0]
+        current = current_rows[key]
+        topic = {**_public_topic(top, current), "consultation_count": _consultations(current, category=True)}
+        if len(children) > 1:
+            topic["theme"] = top["theme"].strip()
+            topic["members"] = [{field: item[field] for field in ("id", "question", "consultation_count")} for item in children]
+        ranked.append(_topic_insight(topic, current, prior_rows[key], key in seen, comparison, category=True))
+    return sorted(ranked, key=lambda item: (-item["consultation_count"], -item["event_count"], item["id"]))
+
+
 def topics(cfg: Settings, filters: dict, *, workbench: bool = False, trend: str = "all") -> dict:
     if workbench:
         rows, previous, earlier, comparison = _workbench_data(cfg, filters)
-        grouped, prior = defaultdict(list), defaultdict(list)
-        for row in rows:
-            grouped[row["topic_id"]].append(row)
-        for row in previous:
-            prior[row["topic_id"]].append(row)
-        items = [_topic_insight(item, grouped[item["id"]], prior[item["id"]], item["id"] in earlier, comparison)
-                 for item in _topic_items(cfg, rows)]
+        definitions = _topic_definitions(cfg)
+        items = _topic_items(cfg, rows, definitions)
+        if filters.get("focus_topic"):
+            grouped, prior = defaultdict(list), defaultdict(list)
+            for row in rows:
+                grouped[row["topic_id"]].append(row)
+            for row in previous:
+                prior[row["topic_id"]].append(row)
+            items = [_topic_insight(item, grouped[item["id"]], prior[item["id"]], item["id"] in earlier, comparison)
+                     for item in items]
+        else:
+            items = _rank_categories(definitions, items, rows, previous, earlier, comparison)
+        category_total = len(items)
+        category_consultation_count = sum(item["consultation_count"] for item in items)
         if trend != "all":
             items = [item for item in items if item["trend"]["status"] == trend]
-        return {"items": items, "total": len(items), "comparison": comparison}
+        return {"items": items, "total": len(items), "category_total": category_total,
+                "category_consultation_count": category_consultation_count, "comparison": comparison}
     items = _topic_items(cfg, _topic_view(cfg, filters))
     return {"items": items, "total": len(items)}
 

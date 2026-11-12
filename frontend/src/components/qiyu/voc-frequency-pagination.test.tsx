@@ -38,6 +38,58 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.resetAllMocks() })
 
 describe('VOC frequency ranking pagination', () => {
+  it('opens a grouped row at its first question and switches detail and chat to the selected member', async () => {
+    const members = [
+      { id: 'child-1', question: '为什么没有触发？', consultation_count: 4 },
+      { id: 'child-2', question: '为什么回复错误？', consultation_count: 3 },
+    ]
+    const grouped = { ...topics[0], id: 'child-1', theme: '回复异常', question: members[0].question, consultation_count: 6, members }
+    vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+      if (name === 'voc2/topics') return { items: [grouped], total: 1, category_total: 1, category_consultation_count: 6 }
+      if (name === 'voc2/topic') {
+        const member = members.find(value => value.id === filters.id)!
+        const event: Evidence = { id: `event-${member.id}`, event_id: `event-${member.id}`, qa_id: member.id === 'child-1' ? 41 : 42,
+          question: member.question, question_quote: member.question, source_kind: 'source-anchored', answer: `客服回复 ${member.id}`,
+          staff_source_verified: true, claims: [] }
+        return { topic: { ...topics[0], id: member.id, question: member.question }, events: [event],
+          workbench: { comparison, knowledge: [], gaps: [] } }
+      }
+      return summary
+    })
+    render(<VocFrequencyWorkspace filters={{ ...initialScope, group: '分组测试' }} {...handlers} />)
+    const row = await screen.findByRole('button', { name: /排名\s*1.*回复异常.*6 次咨询.*查看 2 个问法/ })
+    expect(screen.getByText('高频分类')).toBeTruthy()
+    expect(within(screen.getByText('咨询次数').parentElement!).getByText('6')).toBeTruthy()
+    expect(screen.getByText('共 1 个分类')).toBeTruthy()
+    fireEvent.click(row)
+    const drawer = within(await screen.findByRole('dialog', { name: '问题与原句依据' }))
+    expect(await drawer.findByText('客服回复 child-1')).toBeTruthy()
+    const first = drawer.getByRole('button', { name: /为什么没有触发.*4 次咨询/ })
+    const second = drawer.getByRole('button', { name: /为什么回复错误.*3 次咨询/ })
+    expect(first.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(second)
+    expect(second.getAttribute('aria-pressed')).toBe('true')
+    expect(await drawer.findByText('客服回复 child-2')).toBeTruthy()
+    expect(drawer.queryByText('客服回复 child-1')).toBeNull()
+    fireEvent.click(drawer.getByRole('button', { name: '追问这个问题' }))
+    expect(handlers.onOpenChat).toHaveBeenCalledWith(expect.objectContaining({ focus_topic: 'child-2' }))
+    expect(vi.mocked(apiGet).mock.calls.filter(([name]) => name === 'voc2/topic').map(([, filters]) => filters.id)).toEqual(['child-1', 'child-2'])
+  })
+
+  it('opens an existing child-topic link at that child even when its group is visible', async () => {
+    const members = [{ id: 'legacy-first', question: '第一个问法', consultation_count: 2 }, { id: 'legacy-second', question: '第二个问法', consultation_count: 1 }]
+    vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+      if (name === 'voc2/topics') return { items: [{ ...topics[0], id: 'legacy-first', members }], total: 1, category_total: 1 }
+      if (name === 'voc2/topic') return { topic: { ...topics[0], id: filters.id }, events: [] }
+      return summary
+    })
+    render(<VocFrequencyWorkspace filters={{ ...initialScope, group: '旧链接测试' }} initialTopic="legacy-second" {...handlers} />)
+    const drawer = within(await screen.findByRole('dialog', { name: '问题与原句依据' }))
+    const linked = await drawer.findByRole('button', { name: /第二个问法/ })
+    expect(linked.getAttribute('aria-pressed')).toBe('true')
+    expect(vi.mocked(apiGet).mock.calls.find(([name]) => name === 'voc2/topic')?.[1].id).toBe('legacy-second')
+  })
+
   it('requests 20 topics per page, hides old rows while loading, and keeps global ranks and detail IDs', async () => {
     let resolveSecond!: (data: ReturnType<typeof pageResult>) => void
     secondPage = new Promise(resolve => { resolveSecond = resolve })
