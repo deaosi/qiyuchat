@@ -1,7 +1,7 @@
 """Feishu previews and records use current projections and omit raw evidence."""
 
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import call, patch
 from xml.etree.ElementTree import fromstring
 
 from src import app, voc, voc_feishu_content as export, voc_topic_insights
@@ -30,21 +30,25 @@ class TestFeishuContent(LocalFixture):
             for index in range(21)
         ]
         filters = {**self.scope, "group": "当前客户群限定", "staff": "当前客服限定", "days": 7}
-        ranking = {"items": topics, "comparison": {"current": {"source_pairs": 50, "processed_pairs": 40}}}
-        with patch.object(export.voc_engine, "topics", return_value=ranking) as read:
+        ranking = {"items": topics, "comparison": {"current": {"source_pairs": 50, "processed_pairs": 40}},
+                   "guest_anchors": {topic_id(0): [(1001, "private-source-anchor")]}}
+        with patch.object(export.voc_engine, "feishu_topics", return_value=ranking) as read, \
+                patch.object(export.guest_evidence, "issue_url") as issue:
             result = export.build_document(self.cfg, filters, "topics")
-        read.assert_called_once_with(self.cfg, {**filters, "days": 0}, workbench=True)
+        read.assert_called_once_with(self.cfg, {**filters, "days": 0})
+        issue.assert_not_called()
         self.assertEqual((result["count"], result["total"]), (20, 21))
         first = result["records"][0]
         self.assertEqual(first["key"], topic_id(0))
         self.assertEqual(first["summary"], "40 次咨询 · 配置与使用")
         self.assertIn("已整理 40 / 50 条问答", first["detail"])
-        self.assertEqual(first["url"],
-                         f"https://qiyu.fanwulink.cn/#questions?topic={topic_id(0)}&start=2026-11-01&end=2026-11-07")
+        self.assertEqual(first["url"], "")
+        self.assertEqual(first["_guest_anchors"], [(1001, "private-source-anchor")])
         root = fromstring(f"<doc>{result['content']}</doc>")
         self.assertEqual(root[0].tag, "title")
         self.assertEqual(root.findtext("h2"), "[名称]和[名称]查看 <规则> & 配置")
-        self.assertEqual(root.find(".//a").attrib["href"], first["url"])
+        self.assertIsNone(root.find(".//a"))
+        self.assertNotIn("private-source-anchor", result["content"])
         self.assertEqual(result["items"][0], {"title": first["title"], "summary": first["summary"]})
         for private in ("现场客服阿兰", "小周店主", "示例内部群", "当前客户群限定", "当前客服限定", "无关会话原话"):
             self.assertNotIn(private, str(result))
@@ -52,7 +56,7 @@ class TestFeishuContent(LocalFixture):
     def test_sops_publish_validated_steps_without_failed_attempts_or_chat(self):
         def sop(number, status, result=None):
             return {"id": sop_id(number), "topic_id": topic_id(1), "qa_id": 1234,
-                    "title": "客户原话不要外发", "problem": {"quote": "客户的详细对话"},
+                    "title": "客户原话不要外发", "problem": {"quote": "客户的详细对话", "message_id": "sop-source-anchor"},
                     "kind": "anomaly", "status": status, "result": result,
                     "conditions": [{"quote": "当前客服限定操作管理员账号，参考 https://example.invalid/help"}],
                     "steps": [{"phase": "action", "outcome": "failed", "evidence": {"quote": "此前失败操作"}},
@@ -77,13 +81,56 @@ class TestFeishuContent(LocalFixture):
             read.assert_called_once_with(self.cfg, {**filters, "days": 0}, guidance["id"])
         self.assertEqual([row["key"] for row in result["records"]], [verified["id"], guidance["id"]])
         self.assertEqual(selected["count"], 1)
+        self.assertEqual(selected["records"][0]["_guest_anchors"], [(1234, "sop-source-anchor")])
+        self.assertEqual(selected["records"][0]["url"], "")
         self.assertIn("客户反馈按该流程处理后复测成功", result["records"][0]["detail"])
         self.assertIn("效果待验证", result["records"][1]["summary"])
         self.assertIn("商品ID [已脱敏]", result["records"][0]["detail"])
         self.assertIn("核对场景开关", result["records"][0]["detail"])
-        for private in ("ABCD1234", "当前客服限定", "example.invalid", "1234", "raw-response-id", "客户复测原话",
-                        "客户原话不要外发", "客户的详细对话", "此前失败操作", "被拦截的操作"):
-            self.assertNotIn(private, str(result))
+        public_preview = {key: value for key, value in result.items() if key != "records"}
+        for private in ("ABCD1234", "当前客服限定", "example.invalid", "1234", "raw-response-id", "sop-source-anchor",
+                        "客户复测原话", "客户原话不要外发", "客户的详细对话", "此前失败操作", "被拦截的操作"):
+            self.assertNotIn(private, str(public_preview))
+
+    def test_exact_topic_candidates_prioritize_anchored_verified_replies(self):
+        def row(number, topic, anchor, verified, asked_at, start=1):
+            return {"topic_id": topic_id(topic), "data": {"question_span": {"start": 1, "end": 2}},
+                    "source": {"qa_id": number, "asked_at": asked_at, "answer": "回复" if verified else "",
+                               "_staff_verified": verified,
+                               "_question_parts": [{"message_id": anchor, "start": start, "end": start + 1}]}}
+
+        evidence = [
+            row(3, 1, "later-unanswered", False, 500), row(1, 1, "exact-reply", True, 100),
+            row(2, 1, "different-span", True, 1000, 4), row(4, 2, "other-topic", True, 200),
+            row(1, 1, "exact-reply", True, 100),
+        ]
+        with patch.object(export.voc_engine, "_workbench_data", return_value=(evidence, [], set(), {})) as read, \
+                patch.object(export.voc_engine, "_topic_items", return_value=[]):
+            anchors = export.select_topic_anchors(self.cfg, self.scope, {topic_id(1)})
+        read.assert_called_once_with(self.cfg, {**self.scope, "days": 0})
+        self.assertEqual(anchors, {topic_id(1): [(1, "exact-reply"), (3, "later-unanswered"), (2, "")]})
+
+    def test_publish_issues_scoped_links_and_falls_back_to_content_only(self):
+        record = {"key": topic_id(1), "title": "可分享问题", "summary": "5 次咨询", "detail": "发布正文",
+                  "_guest_anchors": [(101, "unavailable-anchor"), (102, "other-anchor")], "url": ""}
+        other = {**record, "key": topic_id(2), "title": "无会话的问题", "_guest_anchors": []}
+        doc = {**self.scope, "records": [record, other]}
+        first = "https://qiyu.fanwulink.cn/guest/example-one"
+        second = "https://qiyu.fanwulink.cn/guest/example-two"
+        entry = {**self.scope, "kind": "topics", "title": record["title"], "summary": record["summary"],
+                 "detail": record["detail"]}
+        with patch.object(export.guest_evidence, "issue_url", side_effect=["", first, second]) as issue:
+            result = export.attach_guest_links(self.cfg, doc, "topics")
+        self.assertEqual(issue.call_args_list, [
+            call(self.cfg, 101, "unavailable-anchor", entry=entry),
+            call(self.cfg, 102, "other-anchor", entry=entry),
+            call(self.cfg, None, "", entry={**entry, "title": other["title"]}),
+        ])
+        self.assertEqual([record["url"] for record in result["records"]], [first, second])
+        self.assertTrue(all("_guest_anchors" not in record for record in result["records"]))
+        self.assertEqual(doc["records"][0]["url"], "")
+        with patch.object(export.guest_evidence, "issue_url", return_value=""), self.assertRaises(voc.VocError):
+            export.attach_guest_links(self.cfg, doc, "topics")
 
     def test_rejects_open_or_malformed_ranges_and_returns_empty_preview(self):
         for filters in ({}, {"start": "2026-11-01"}, {"start": "20261101", "end": "2026-11-07"},

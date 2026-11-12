@@ -83,6 +83,7 @@ class TestWeb(LocalFixture):
         with (
             patch("src.voc_feishu_content.build_document", return_value=document),
             patch("src.voc_feishu_sync.configured_target", return_value=target),
+            patch("src.voc_feishu_content.attach_guest_links", return_value=document) as attach,
             patch("src.voc_feishu_sync.publish", return_value=receipt) as publish,
         ):
             self.assertEqual(self.call(preview_path)[0], 401)
@@ -95,10 +96,31 @@ class TestWeb(LocalFixture):
             document["records"][0]["title"] = "更新的问题"
             self.assertEqual(self.call(publish_path, "POST", body, write_headers)[0], 409)
             publish.assert_not_called()
+            attach.assert_not_called()
             current = self.call(preview_path, headers=auth)[1]
             body = json.dumps({"fingerprint": current["fingerprint"]}).encode()
             self.assertEqual(self.call(publish_path, "POST", body, write_headers)[:2], (200, receipt))
             publish.assert_called_once()
+            attach.assert_called_once()
+
+    def test_guest_evidence_only_opens_the_exact_public_page(self):
+        self.server.admin_key = "fixture-admin"
+        token = "A" * 43
+        path = "/guest/evidence/" + token
+        with patch("src.web.guest_evidence.resolve", side_effect=lambda cfg, key: b"<main>Published entry</main>" if key == token else None) as resolve:
+            status, body, headers = self.call(path)
+            self.assertEqual((status, body), (200, b"<main>Published entry</main>"))
+            self.assertNotIn("Set-Cookie", headers)
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+            self.assertIn("noindex", headers["X-Robots-Tag"])
+            self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+            self.assertEqual(self.call(path + "?id=99")[0], 404)
+            self.assertEqual(self.call(path + "/other")[0], 404)
+            self.assertEqual(self.call("/guest/evidence/" + "B" * 43)[0], 404)
+            self.assertEqual(resolve.call_count, 2)
+        for route in ("/api/detail?id=1", "/api/meta", "/api/voc2/feishu/preview?kind=topics&days=7"):
+            self.assertEqual(self.call(route, headers={"Referer": self.origin + path})[0], 401)
 
     def test_host_and_origin_protection(self):
         self.assertEqual(self.call("/api/meta", headers={"Host": "evil.example"})[0], 403)

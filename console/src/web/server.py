@@ -22,7 +22,7 @@ from .. import voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
-from . import api, case_media
+from . import api, case_media, guest_evidence
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
@@ -31,6 +31,15 @@ LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
 # app.get_db() 切库时会关闭旧连接；查询和写入必须持有同一把锁。
 DB_LOCK = threading.RLock()
 IMAGE_SLOTS = threading.BoundedSemaphore(3)
+GUEST_PREFIX = "/guest/evidence/"
+GUEST_POLICY = ("default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; "
+                "base-uri 'none'; form-action 'none'")
+GUEST_UNAVAILABLE = (
+    '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    '<title>链接不可用 · 语海Voc</title><main><h1>此访客链接已失效或不存在</h1>'
+    '<p>请联系分享者获取新的链接。</p></main></html>'
+).encode("utf-8")
 
 
 def _int(qs: dict[str, list[str]], key: str, default: int) -> int:
@@ -74,14 +83,15 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(30)
 
     def _send(self, body: bytes, ctype: str, status: int = 200,
-              filename: str = "", extra: dict[str, str] | None = None) -> None:
+              filename: str = "", extra: dict[str, str] | None = None,
+              *, policy: str | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://ysf.nosdn.127.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        self.send_header("Content-Security-Policy", policy or "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://ysf.nosdn.127.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         if filename:
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         for key, value in (extra or {}).items():
@@ -265,6 +275,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             u = urlparse(self.path)
+            if u.path.startswith("/guest/"):
+                self._guest_page(u.path, u.query, u.fragment)
+                return
             path, qs = unquote(u.path), parse_qs(u.query, max_num_fields=30)
             if path == "/login":
                 self._send_login(status=200)
@@ -295,6 +308,16 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             log.exception("查询失败")
             self._json({"error": "本地查询失败，请重试并查看服务日志"}, 500)
+
+    def _guest_page(self, path: str, query: str, fragment: str) -> None:
+        token = path[len(GUEST_PREFIX):] if path.startswith(GUEST_PREFIX) else ""
+        content = None
+        if not (query or fragment) and re.fullmatch(guest_evidence.TOKEN_PATTERN, token):
+            content = guest_evidence.resolve(self.server.cfg, token)
+        self._send(content or GUEST_UNAVAILABLE, "text/html; charset=utf-8",
+                   200 if content else 404, policy=GUEST_POLICY,
+                   extra={"X-Robots-Tag": "noindex, nofollow, noarchive",
+                          "Cross-Origin-Resource-Policy": "same-origin"})
 
     def _case_image(self, qs: dict[str, list[str]]) -> None:
         urls = qs.get("url", [])
@@ -350,7 +373,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise voc_feishu_sync.SyncError("成果或发布目标已变化，请刷新预览后再发布。", 409)
             if not document["count"]:
                 raise ValueError("当前范围没有可发布的成果。")
-            self._json(voc_feishu_sync.publish(document, kind, filters, target=target))
+            if target is None:
+                raise voc_feishu_sync.SyncError("飞书同步尚未配置。", 503)
+            shared = voc_feishu_content.attach_guest_links(cfg, document, kind)
+            self._json(voc_feishu_sync.publish(shared, kind, filters, target=target))
         except (voc.VocError, voc_feishu_sync.SyncError) as exc:
             self._json({"error": str(exc)}, exc.status)
         except (ValueError, RecursionError):
@@ -613,7 +639,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_request(self, code="-", size="-") -> None:
         target = getattr(self, "path", "")
-        if unquote(target.partition("?")[0]).endswith("/api/detail/image"):
+        path = unquote(target.partition("?")[0])
+        if path.startswith("/guest/"):
+            self.log_message('"%s /guest/evidence/[redacted] %s" %s %s',
+                             self.command, self.request_version, str(code), str(size))
+            return
+        if path.endswith("/api/detail/image"):
             self.log_message('"%s /api/detail/image %s" %s %s',
                              self.command, self.request_version, str(code), str(size))
             return

@@ -17,12 +17,15 @@ from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
+from .web.guest_evidence import PUBLIC_ORIGIN, PUBLIC_PATH, TOKEN_PATTERN
+
 
 _CONFIG_ENV = "YUHAI_FEISHU_SYNC_CONFIG"
-_REQUIRED = {"key", "title", "detail"}
-_OPTIONAL = {"summary", "source", "kind", "period", "consultations"}
+_REQUIRED = {"key", "title", "detail", "source"}
+_OPTIONAL = {"summary", "kind", "period", "consultations"}
 _FIELD_TYPES = {"source": (1, 15), "consultations": (2,)}
 _TOKEN = re.compile(r"[A-Za-z0-9]{8,80}")
+_GUEST_URL = re.compile(re.escape(PUBLIC_ORIGIN + PUBLIC_PATH) + TOKEN_PATTERN)
 _RECORD_ID = re.compile(r"rec[A-Za-z0-9]{4,77}")
 _SOURCE_ID = {"topics": re.compile(r"t_[0-9a-f]{24}"), "sops": re.compile(r"sop_[0-9a-f]{24}")}
 _LABEL = {"topics": "高频问题", "sops": "知识 SOP"}
@@ -215,6 +218,8 @@ def _rows(document: dict, kind: str, filters: dict, target: Target, types: dict)
                 or any(not isinstance(item.get(field), str) for field in ("key", "title", "detail", "summary", "url"))
                 or not _SOURCE_ID[kind].fullmatch(item["key"]) or not item["title"] or not item["detail"]):
             raise SyncError("成果数据不完整，请重新预览。", 409)
+        if not _GUEST_URL.fullmatch(item["url"]):
+            raise SyncError("成果缺少有效的访客链接，请重新发布。", 409)
         key = "yuhai-voc:" + item["key"] + (":" + scope if scope else "")
         if key in mapped:
             raise SyncError("成果中存在重复编号，请重新预览。", 409)
@@ -225,7 +230,7 @@ def _rows(document: dict, kind: str, filters: dict, target: Target, types: dict)
                 raise SyncError("高频问题缺少有效咨询次数，请重新预览。", 409)
             values["consultations"] = count
         if "source" in target.fields and types[target.fields["source"]] == 15:
-            values["source"] = {"text": "查看来源", "link": item["url"]} if item["url"] else None
+            values["source"] = {"text": "查看访客页", "link": item["url"]}
         mapped[key] = {name: values[role] for role, name in target.fields.items()}
     return mapped
 
@@ -315,7 +320,7 @@ def publish(document: dict, kind: str, filters: dict, *, target: Target | None =
 def main(argv: list[str] | None = None) -> int:
     from .config import settings
     from .voc import VocError
-    from .voc_feishu_content import build_document
+    from .voc_feishu_content import attach_guest_links, build_document
 
     parser = argparse.ArgumentParser(description="Publish a VOC snapshot to the configured Feishu Base table.")
     parser.add_argument("--kind", choices=_LABEL, required=True)
@@ -329,10 +334,16 @@ def main(argv: list[str] | None = None) -> int:
     filters = {"days": 0 if args.start else (7 if args.days is None else args.days),
                "start": args.start or "", "end": args.end or ""}
     try:
-        document = build_document(settings(), filters, args.kind)
-        result = (publish(document, args.kind, filters) if args.apply and document["count"] else
-                  {"title": document["title"], "start": document["start"], "end": document["end"],
-                   "count": document["count"], "total": document["total"], "published": False})
+        cfg = settings()
+        document = build_document(cfg, filters, args.kind)
+        if args.apply and document["count"]:
+            target = configured_target()
+            if target is None:
+                raise SyncError("飞书同步尚未配置。", 503)
+            result = publish(attach_guest_links(cfg, document, args.kind), args.kind, filters, target=target)
+        else:
+            result = {"title": document["title"], "start": document["start"], "end": document["end"],
+                      "count": document["count"], "total": document["total"], "published": False}
     except (SyncError, VocError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

@@ -16,7 +16,7 @@ from src import voc_feishu_sync as sync
 def document(start="2026-11-01", end="2026-11-07", detail="按步骤排查"):
     return {"title": "高频问题报告", "count": 1, "start": start, "end": end, "records": [
         {"key": "t_" + "1" * 24, "title": "主题", "summary": "咨询 3 次",
-         "detail": detail, "url": "https://qiyu.fanwulink.cn/#questions"},
+         "detail": detail, "url": "https://qiyu.fanwulink.cn/guest/evidence/" + "x" * 43},
     ]}
 
 
@@ -76,7 +76,7 @@ class TestFeishuSync(unittest.TestCase):
         first = self.publish(document(), scope)
         self.assertEqual((first["created"], first["updated"], first["count"]), (1, 0, 1))
         self.assertEqual(next(iter(self.rows.values()))["fields"]["来源链接"],
-                         {"text": "查看来源", "link": "https://qiyu.fanwulink.cn/#questions"})
+                         {"text": "查看访客页", "link": "https://qiyu.fanwulink.cn/guest/evidence/" + "x" * 43})
         second = self.publish(document("2026-11-02", "2026-11-08", "排查步骤更新"), scope)
         self.assertEqual((second["created"], second["updated"]), (0, 1))
         self.assertEqual(len(self.rows), 1)

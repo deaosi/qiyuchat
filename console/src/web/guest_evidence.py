@@ -1,0 +1,340 @@
+"""A private registry for opaque, read-only Feishu evidence links."""
+
+from __future__ import annotations
+
+from contextlib import closing
+from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
+from html import escape
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import sqlite3
+import time
+
+from ..clean.rules import mask_pii
+from ..config import Settings
+from ..extract.identity import SOURCE_IDENTITY_ROLE, decode_identity
+from ..voc_assets import connection
+from . import case_media
+
+TOKEN_PATTERN = r"[A-Za-z0-9_-]{43}"
+PUBLIC_PATH = "/guest/evidence/"
+PUBLIC_ORIGIN = "https://qiyu.fanwulink.cn"
+_WEEK = 7 * 86400
+_TTL_WEEKS = 12
+_MAX_SOURCE_MESSAGES = 4000
+_MAX_CONTEXT_TEXT = 1200
+_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_TOKEN = re.compile(TOKEN_PATTERN)
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
+_URL = re.compile(r"""(?:[a-z][a-z0-9+.-]*://|www\.|(?<![\w@])(?:[a-z0-9-]+\.)+(?:cn|com|net|org|io|ai|top|cc)\b)[^\s，。；！？、<>'"]*""", re.I)
+_SOURCE_ID = re.compile(r"\bqiyu-(?:external(?:-sha256)?|user|session):[^\s，。；！？、]+", re.I)
+_PRIVATE_VALUE = re.compile(
+    r"((?:会话|客户|客服|店铺|商家|商品|账号|订单|消息|工单|运单)\s*(?:ID|编号|号)|"
+    r"密码|口令|密钥|验证码|微信号|token|api[_ -]?key)\s*[:：=]?\s*([a-z0-9_.-]{4,})", re.I
+)
+_KIND = {"topics": "高频问题", "sops": "知识 SOP"}
+_ROLE = {"user": "客户", "staff": "客服"}
+_ZONE = timezone(timedelta(hours=8))
+_ENTRY_LIMITS = {"title": 800, "summary": 1600, "detail": 16000}
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS guest_evidence (
+    token TEXT PRIMARY KEY,
+    dedupe TEXT NOT NULL UNIQUE,
+    expires INTEGER NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS guest_evidence_expires ON guest_evidence(expires);
+"""
+
+_STYLE = """
+:root{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;color:#182334;background:#f4f6f9}
+body{margin:0;padding:32px 16px 48px}main{max-width:760px;margin:auto}
+article{background:#fff;border:1px solid #e2e7ed;border-radius:14px;padding:24px}
+.eyebrow,time,.note{color:#53637a;font-size:.875rem}h1{font-size:clamp(1.5rem,4vw,2rem);margin:.35em 0}
+h2{font-size:1.15rem;margin:24px 0 8px}.summary{font-weight:600}.detail,.text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}
+ol{padding:0;list-style:none}li{margin:12px 0;border:1px solid #e6ebf2;border-radius:8px;padding:12px 14px}
+li.staff{background:#f3f7fc}.speaker{font-weight:600;margin-right:10px}.text{margin:6px 0 0}
+@media(max-width:520px){article{padding:16px}}
+"""
+
+
+def _canonical(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _digest(value: object) -> str:
+    return sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _clean(value: object, names: re.Pattern[str] | None = None) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = _CONTROL.sub("", value)
+    text = _URL.sub("[链接已隐藏]", text)
+    text = _SOURCE_ID.sub("[标识已隐藏]", text)
+    text = _PRIVATE_VALUE.sub(r"\1 [已脱敏]", text)
+    if names is not None:
+        text = names.sub("[名称已隐藏]", text)
+    return mask_pii(text).strip()
+
+
+def _date(value: object) -> bool:
+    if not isinstance(value, str) or not _DAY.fullmatch(value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _entry(value: dict, names: re.Pattern[str] | None) -> dict | None:
+    if not isinstance(value, dict) or value.get("kind") not in ("topics", "sops"):
+        return None
+    start, end = value.get("start"), value.get("end")
+    if not _date(start) or not _date(end) or start > end:
+        return None
+    result = {"kind": value["kind"], "start": start, "end": end}
+    for field, limit in _ENTRY_LIMITS.items():
+        text = _clean(value.get(field), names)
+        if len(text) > limit or (field != "summary" and not text):
+            return None
+        result[field] = text
+    return result
+
+
+def _private_names(pair: dict, session: dict, messages: list[dict]) -> re.Pattern[str] | None:
+    values = [
+        pair.get("customer_name"), pair.get("customer_id"), pair.get("group_name"), pair.get("staff_name"),
+        pair.get("session_id"), session.get("user_name"), session.get("user_id"), session.get("from_group"),
+        session.get("staff_name"), session.get("staff_id"),
+    ]
+    for message in messages:
+        if message["role"] != SOURCE_IDENTITY_ROLE:
+            continue
+        identity = decode_identity(message["content"], pair["session_id"])
+        if identity:
+            values.extend((identity["customer_name"], identity["customer_id"]))
+    common = {"客户", "客服", "匿名客户", "未分组", "未记录客服"}
+    names = {name.strip() for name in values if isinstance(name, str) and 2 <= len(name.strip()) <= 1000} - common
+    if not names:
+        return None
+    alternatives = []
+    for name in sorted(names, key=lambda item: (-len(item), item)):
+        safe = re.escape(name)
+        if name.isascii():
+            safe = r"(?<![A-Za-z0-9])" + safe + r"(?![A-Za-z0-9])"
+        alternatives.append(safe)
+    return re.compile("|".join(alternatives), re.I)
+
+
+def _message(role: str, stamp: object, value: object, names: re.Pattern[str] | None) -> dict | None:
+    text = _clean(case_media.project(value)[0], names)
+    if not text:
+        return None
+    try:
+        time_text = datetime.fromtimestamp(int(stamp or 0) / 1000, _ZONE).strftime("%Y-%m-%d %H:%M:%S") if int(stamp or 0) > 0 else ""
+    except (ValueError, TypeError, OverflowError, OSError):
+        time_text = ""
+    return {"role": role, "time": time_text, "text": text[:_MAX_CONTEXT_TEXT] + ("…" if len(text) > _MAX_CONTEXT_TEXT else "")}
+
+
+def _related_ids(value: object) -> set[str]:
+    try:
+        result = json.loads(value) if isinstance(value, str) else []
+    except (ValueError, RecursionError):
+        return set()
+    if not isinstance(result, list):
+        return set()
+    return {item for item in result if isinstance(item, str) and item}
+
+
+def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
+                        names: re.Pattern[str] | None) -> list[dict]:
+    customer = pair.get("customer_id")
+    questions = _related_ids(origin.get("question_message_ids"))
+    answers = _related_ids(origin.get("answer_message_ids"))
+    if not questions or not isinstance(customer, str) or not customer or customer.startswith("qiyu-session:"):
+        return []
+    segments: list[list[dict]] = []
+    current: list[dict] | None = None
+    for row in rows:
+        role = row["role"]
+        if role == SOURCE_IDENTITY_ROLE:
+            owner = decode_identity(row["content"], pair["session_id"])
+            current = [] if owner and owner["customer_id"] == customer else None
+            if current is not None:
+                segments.append(current)
+        elif role == "boundary":
+            current = None
+        elif current is not None and role in _ROLE:
+            current.append(row)
+    matching = [
+        segment for segment in segments
+        if any(row["role"] == "user" and row["source_message_id"] in questions for row in segment)
+    ]
+    if len(matching) != 1:
+        return []
+    segment = matching[0]
+    q_index = next(index for index, row in enumerate(segment) if row["role"] == "user" and row["source_message_id"] in questions)
+    a_index = q_index
+    for index, row in enumerate(segment):
+        message_id = row["source_message_id"]
+        if message_id in questions | answers and anchor and _digest(message_id) == anchor and abs(index - q_index) <= 8:
+            a_index = index
+            break
+    # Always show the question, even when the SOP is anchored to a following answer.
+    start, end = max(0, min(q_index, a_index) - 3), max(q_index, a_index) + 5
+    return [
+        message for row in segment[start:end]
+        if (message := _message(row["role"], row["ts"], row["content"], names)) is not None
+    ]
+
+
+def _case(cfg: Settings, qa_id: int, anchor: str) -> tuple[str, list[dict], str, re.Pattern[str] | None] | None:
+    source = Path(cfg.runtime.db_path)
+    if not source.is_file() or type(qa_id) is not int or qa_id <= 0:
+        return None
+    try:
+        with connection(source) as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT * FROM qa_pair WHERE qa_id=?", (qa_id,)).fetchone()
+            if row is None:
+                return None
+            pair = dict(row)
+            sid = pair["session_id"]
+            session_row = db.execute(
+                "SELECT user_name,user_id,staff_name,staff_id,from_group FROM raw_session WHERE session_id=?", (sid,)
+            ).fetchone()
+            if session_row is None:
+                return None
+            tables = {item[0] for item in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "push_sync_state" in tables:
+                state = db.execute("SELECT status,archive_reason FROM push_sync_state WHERE session_id=?", (sid,)).fetchone()
+                if state and (state["status"] == "archived" or state["archive_reason"]):
+                    return None
+            origin_row = db.execute("SELECT * FROM qa_origin WHERE qa_id=?", (qa_id,)).fetchone() if "qa_origin" in tables else None
+            origin = dict(origin_row) if origin_row else {}
+            if origin and (origin.get("active") != 1 or origin.get("session_id") != sid):
+                return None
+            rows = [dict(item) for item in db.execute(
+                "SELECT role,content,ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq LIMIT ?",
+                (sid, _MAX_SOURCE_MESSAGES + 1),
+            )]
+    except (sqlite3.Error, OSError):
+        return None
+    if not rows:
+        return None
+    names = _private_names(pair, dict(session_row), rows)
+    context = _controlled_context(pair, origin, rows, anchor, names) if len(rows) <= _MAX_SOURCE_MESSAGES else []
+    scope = "context" if context else "pair"
+    if not context:
+        question = _message("user", pair.get("asked_at"), pair.get("question"), names)
+        answer = _message("staff", 0, pair.get("answer"), names)
+        if question is None:
+            return None
+        context = [question] + ([answer] if answer else [])
+    # Do not substitute a different customer, source revision, or transcript.
+    fingerprint = _digest([
+        sid, pair.get("customer_id"), pair.get("asked_at"), pair.get("question"), pair.get("answer"),
+        pair.get("created_at"), origin.get("evidence_key"), origin.get("fingerprint"),
+        origin.get("revision"), scope, context,
+    ])
+    return fingerprint, context, scope, names
+
+
+def _registry(cfg: Settings) -> Path:
+    return Path(cfg.runtime.state_dir).resolve() / "voc-guest-evidence.db"
+
+
+def issue_url(cfg: Settings, qa_id: int | None, anchor_id: str = "", *, entry: dict) -> str:
+    """Persist only redacted published text and an optional source-bound reference."""
+    anchor = _digest(anchor_id) if isinstance(anchor_id, str) and 0 < len(anchor_id) <= 1024 else ""
+    case = _case(cfg, qa_id, anchor) if qa_id is not None else None
+    if qa_id is not None and case is None:
+        return ""
+    safe = _entry(entry, case[3] if case else None)
+    if safe is None:
+        return ""
+    binding = {"qa": qa_id, "anchor": anchor, "fingerprint": case[0]} if case else None
+    payload = _canonical({"v": 1, "entry": safe, "case": binding})
+    now = int(time.time())
+    expires = (now // _WEEK + _TTL_WEEKS + 1) * _WEEK
+    dedupe = _digest([expires, payload])
+    path = _registry(cfg)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+        with closing(sqlite3.connect(path, timeout=5)) as db, db:
+            db.executescript(_SCHEMA)
+            db.execute("DELETE FROM guest_evidence WHERE expires<=?", (now,))
+            db.execute("INSERT INTO guest_evidence VALUES (?,?,?,?) ON CONFLICT(dedupe) DO NOTHING",
+                       (secrets.token_urlsafe(32), dedupe, expires, payload))
+            found = db.execute("SELECT token FROM guest_evidence WHERE dedupe=?", (dedupe,)).fetchone()
+            if found and _TOKEN.fullmatch(found[0]):
+                return PUBLIC_ORIGIN + PUBLIC_PATH + found[0]
+    except (sqlite3.Error, OSError):
+        return ""
+    return ""
+
+
+def _html(entry: dict, context: list[dict], scope: str) -> bytes:
+    title = escape(entry["title"])
+    kind = escape(_KIND[entry["kind"]])
+    period = escape(entry["start"] if entry["start"] == entry["end"] else f'{entry["start"]} 至 {entry["end"]}')
+    summary = f'<p class="summary">{escape(entry["summary"])}</p>' if entry["summary"] else ""
+    if not context:
+        evidence = '<p class="note">当前条目暂无可公开查看的会话上下文。</p>'
+    else:
+        prefix = '<p class="note">以下为该条目关联的脱敏问答。</p>' if scope == "pair" else '<p class="note">以下为该条目关联的脱敏会话片段，时间为北京时间。</p>'
+        messages = []
+        for message in context:
+            stamp = f'<time>{escape(message["time"])}</time>' if message["time"] else ""
+            messages.append(
+                f'<li class="{message["role"]}"><span class="speaker">{_ROLE[message["role"]]}</span>{stamp}'
+                f'<p class="text">{escape(message["text"])}</p></li>'
+            )
+        evidence = prefix + '<ol aria-label="脱敏会话上下文">' + "".join(messages) + "</ol>"
+    return (f'<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">'
+            f'<title>{title} · 语海 VOC</title><style>{_STYLE}</style></head><body><main><article>'
+            f'<header><div class="eyebrow">语海 VOC · {kind}</div><h1>{title}</h1><p class="note">{period}</p></header>'
+            f'{summary}<div class="detail">{escape(entry["detail"])}</div>'
+            f'<section aria-labelledby="evidence"><h2 id="evidence">会话上下文</h2>{evidence}</section>'
+            '</article></main></body></html>').encode("utf-8")
+
+
+def resolve(cfg: Settings, token: str) -> bytes | None:
+    """Resolve an exact bearer token without creating or modifying any data."""
+    if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+        return None
+    try:
+        with connection(_registry(cfg)) as db:
+            row = db.execute("SELECT payload FROM guest_evidence WHERE token=? AND expires>?",
+                             (token, int(time.time()))).fetchone()
+        if not row:
+            return None
+        value = json.loads(row["payload"])
+        if not isinstance(value, dict) or value.get("v") != 1:
+            return None
+        entry = _entry(value.get("entry"), None)
+        if entry is None:
+            return None
+        binding = value.get("case")
+        if isinstance(binding, dict) and isinstance(binding.get("anchor"), str):
+            case = _case(cfg, binding.get("qa"), binding["anchor"])
+            if case is not None and secrets.compare_digest(case[0], str(binding.get("fingerprint", ""))):
+                return _html(entry, case[1], case[2])
+        return _html(entry, [], "")
+    except (sqlite3.Error, OSError, ValueError, RecursionError):
+        return None

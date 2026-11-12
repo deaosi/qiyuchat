@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from urllib.parse import urlencode
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 from . import voc, voc_assets, voc_engine, voc_topic_insights
 from .clean.rules import mask_pii
 from .config import Settings
 from .extract.text import clean_visible_text
+from .web import guest_evidence
 
 
 _LIMIT = 20
@@ -75,15 +75,17 @@ def _public_text(value: object, names: re.Pattern[str] | None) -> str:
     return " ".join(mask_pii(text).split())
 
 
-def _topic_url(identity: object, scope: dict) -> str:
-    if not isinstance(identity, str) or not _TOPIC_ID.fullmatch(identity):
-        return ""
-    query = urlencode({"topic": identity, "start": scope["start"], "end": scope["end"]})
-    return "https://qiyu.fanwulink.cn/#questions?" + query
+def select_topic_anchors(cfg: Settings, pinned_scope: dict, topic_ids: set[str]) -> dict[str, list[tuple[int, str]]]:
+    """Resolve exact, previously exported topics without selecting a new top list."""
+    selected = {topic_id for topic_id in topic_ids if _TOPIC_ID.fullmatch(topic_id)}
+    if not selected:
+        return {}
+    ranked = voc_engine.feishu_topics(cfg, _pinned_scope(pinned_scope), topic_ids=selected)
+    return ranked["guest_anchors"]
 
 
 def _topic_records(cfg: Settings, scope: dict, names: re.Pattern[str] | None) -> tuple[list[dict], str]:
-    ranked = voc_engine.topics(cfg, scope, workbench=True)
+    ranked = voc_engine.feishu_topics(cfg, scope)
     coverage = ranked["comparison"]["current"]
     source, processed = coverage["source_pairs"], coverage["processed_pairs"]
     if type(source) is not int or type(processed) is not int or not 0 <= processed <= source:
@@ -92,15 +94,15 @@ def _topic_records(cfg: Settings, scope: dict, names: re.Pattern[str] | None) ->
     records = []
     for topic in ranked["items"]:
         key, count = topic["id"], topic["consultation_count"]
-        url = _topic_url(key, scope)
         title = _public_text(topic["question"], names) or _public_text(topic.get("theme"), names)
-        if not url or not title or type(count) is not int or count <= 0:
+        if not _TOPIC_ID.fullmatch(key) or not title or type(count) is not int or count <= 0:
             continue
         category = _TOPIC_LABELS.get(topic.get("primary_intent"), "")
         summary = " · ".join(value for value in (f"{count} 次咨询", category) if value)
         detail = f"{summary}。\n统计区间 {scope['start']} 至 {scope['end']}（上海时间）。\n{coverage_text}"
         records.append({"key": key, "title": title, "summary": summary, "detail": detail,
-                        "url": url, "consultations": count})
+                        "url": "", "consultations": count,
+                        "_guest_anchors": ranked["guest_anchors"].get(key, [])})
     return records, coverage_text
 
 
@@ -143,8 +145,10 @@ def _sop_records(cfg: Settings, scope: dict, identity: str, names: re.Pattern[st
             "复测结果",
             result,
         ])
+        qa_id, anchor_id = item.get("qa_id"), item["problem"].get("message_id")
+        anchors = [(qa_id, anchor_id)] if type(qa_id) is int and qa_id > 0 and isinstance(anchor_id, str) and anchor_id else []
         records.append({"key": key, "title": title, "summary": f"{category} · {label}", "detail": detail,
-                        "url": _topic_url(topic_id, scope)})
+                        "url": "", "_guest_anchors": anchors})
     return records, f"当前范围有 {len(cases)} 份处理流程，其中 {len(records)} 份可用于本次整理。"
 
 
@@ -183,10 +187,29 @@ def build_document(cfg: Settings, filters: dict, kind: str, identity: str = "") 
         SubElement(document, "h2").text = record["title"]
         for line in record["detail"].splitlines():
             SubElement(document, "p").text = line
-        if record["url"]:
-            link = SubElement(SubElement(document, "p"), "a", {"type": "url-preview", "href": record["url"]})
-            link.text = "查看语海Voc来源"
     content = "\n".join(tostring(block, encoding="unicode") for block in document)
     return {"title": title, "content": content, "count": count, "total": total,
             "items": [{"title": row["title"], "summary": row["summary"]} for row in records],
             "records": records, "start": start, "end": end}
+
+
+
+def attach_guest_links(cfg: Settings, document: dict, kind: str) -> dict:
+    """Issue a scoped page at publish time, including entries without shareable context."""
+    if kind not in ("topics", "sops"):
+        raise voc.VocError("未知的飞书成果类型。")
+    records = []
+    for record in document["records"]:
+        entry = {"kind": kind, "title": record["title"], "summary": record["summary"], "detail": record["detail"],
+                 "start": document["start"], "end": document["end"]}
+        url = ""
+        for qa_id, anchor_id in record.get("_guest_anchors", []):
+            url = guest_evidence.issue_url(cfg, qa_id, anchor_id, entry=entry)
+            if url:
+                break
+        if not url:
+            url = guest_evidence.issue_url(cfg, None, "", entry=entry)
+        if not url:
+            raise voc.VocError("访客链接暂不可生成，成果尚未发布。", 503)
+        records.append({**{key: value for key, value in record.items() if key != "_guest_anchors"}, "url": url})
+    return {**document, "records": records}
