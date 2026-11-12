@@ -140,6 +140,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   const [replyLookup, setReplyLookup] = React.useState<{ detail: DetailData; revision: number; result: DetailRepliesResponse } | null>(null)
   const sequence = React.useRef(0)
   const transcript = React.useRef<HTMLOListElement>(null)
+  const scrollViewport = React.useRef<HTMLDivElement>(null)
   const requestedId = requestedPair?.id
   const requestKey = requestedPair && source ? JSON.stringify([source, requestedPair.id]) : ''
   React.useEffect(() => {
@@ -212,11 +213,25 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   const internalOrigin = questionSender?.senderKind === 'fuke_staff' ? questionSender : null
   const anchoredKey = anchorMessageId ? messages.find(message => message.sourceMessageId === anchorMessageId)?.key : undefined
   React.useEffect(() => {
-    if (anchoredKey) transcript.current?.querySelector('[data-evidence-anchor]')?.scrollIntoView?.({ block: 'nearest' })
-  }, [anchoredKey, anchorMessageId, requestKey])
+    if (!anchoredKey) return
+    if (embedded) {
+      transcript.current?.querySelector('[data-evidence-anchor]')?.scrollIntoView?.({ block: 'nearest' })
+      return
+    }
+    const frame = requestAnimationFrame(() => {
+      const viewport = scrollViewport.current
+      const anchor = transcript.current?.querySelector('[data-evidence-anchor]')
+      if (!viewport || !anchor) return
+      const bounds = anchor.getBoundingClientRect()
+      const offset = bounds.top - viewport.getBoundingClientRect().top - viewport.clientTop
+      const inset = Math.max(0, (viewport.clientHeight - bounds.height) / 2)
+      viewport.scrollTop = Math.max(0, viewport.scrollTop + offset - inset)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [anchoredKey, anchorMessageId, embedded, requestKey])
   const availability = loaded?.availability || (archived ? 'archived' : undefined)
   const noStaffMessages = embedded && !lookupStatus && retainedMessages.length > 0 && (availability === 'available' || availability === 'partial') && !hasRetainedStaff
-  const content = pair && <div className={embedded ? 'min-w-0 [overflow-wrap:anywhere]' : 'min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-8 [overflow-wrap:anywhere]'}>
+  const content = pair && <div ref={embedded ? undefined : scrollViewport} className={embedded ? 'min-w-0 [overflow-wrap:anywhere]' : 'min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-8 [overflow-wrap:anywhere]'}>
           {!embedded && <div className="flex flex-wrap gap-2 py-5">
             <Badge variant="secondary" className="rounded-md">{pair.id}</Badge>
             <Badge variant="outline" className="gap-1.5 font-normal">

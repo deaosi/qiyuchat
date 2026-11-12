@@ -100,6 +100,31 @@ describe('embedded case conversation details', () => {
     expect(dialog.getByRole('heading', { name: '客服回复' })).toBeTruthy()
   })
 
+  it('centers a late source message inside the detail sheet after loading the transcript', async () => {
+    const detail = deferred<ReturnType<typeof response>>()
+    vi.mocked(apiGet).mockReturnValue(detail.promise)
+    render(<QADetail pair={pair()} onClose={vi.fn()} anchorMessageId="source-11" />)
+
+    const sheet = screen.getByRole('dialog', { name: '问答与相关会话上下文' })
+    const viewport = sheet.querySelector<HTMLDivElement>('.overflow-y-auto')!
+    Object.defineProperty(viewport, 'clientHeight', { value: 400 })
+    viewport.scrollTop = 25
+    viewport.getBoundingClientRect = () => new DOMRect(0, 120, 500, 400)
+
+    const originalBounds = Element.prototype.getBoundingClientRect
+    const bounds = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.hasAttribute('data-evidence-anchor')) return new DOMRect(0, 1120 - viewport.scrollTop, 400, 80)
+      return originalBounds.call(this)
+    })
+    try {
+      await act(async () => detail.resolve(response('21', Array.from({ length: 12 }, (_, index) => message(index)))))
+      await waitFor(() => expect(viewport.scrollTop).toBe(840))
+      expect(within(sheet).getByText('完整消息11').closest('li')?.hasAttribute('data-evidence-anchor')).toBe(true)
+    } finally {
+      bounds.mockRestore()
+    }
+  })
+
   it.each([true, false])('aligns customer, staff and other messages by sender (embedded=%s)', async embedded => {
     const detail = response('21', [
       message(0, '客户提问'),
