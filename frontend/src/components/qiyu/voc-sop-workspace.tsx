@@ -8,11 +8,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { QueryPanel, VocKnowledgeWorkspace, type OpenEvidencePair } from './voc-next-workspace'
 import { displayTime } from './voc-topic-evidence'
 import { VocPlaybookResults } from './voc-pilot-workspaces'
+import { SopDetailHeader, SopDetailSection, SopTimeline, SopTimelineStep } from './voc-detail-display'
 
 type Props = { filters: ApiFilters; refreshKey?: number; onOpenPair: OpenEvidencePair }
 const statuses: Record<VocSop['status'], string> = { verified: '效果已验证', guidance: '已核验指引', incomplete: '待补证据' }
@@ -74,40 +75,34 @@ function SopDetail({ item, onOpenPair }: { item: VocSop; onOpenPair: OpenEvidenc
   const missing = missingLabels(item)
   const canCopy = item.status !== 'incomplete' && reusableSteps(item).length > 0
   return <>
-    <SheetHeader className="shrink-0 gap-2 border-b bg-linear-to-b from-muted/40 to-background px-5 py-5 pr-10 sm:px-7 sm:pr-12">
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <Badge variant={item.status === 'verified' ? 'default' : 'secondary'} className="font-normal">{statuses[item.status]}</Badge>
-        <span>{kinds[item.kind]}</span>
-      </div>
-      <SheetTitle className="text-lg leading-7 [overflow-wrap:anywhere]">{item.title}</SheetTitle>
-      <SheetDescription className="sr-only">查看处理步骤、验证结果和原始会话。</SheetDescription>
-      <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+    <SopDetailHeader status={statuses[item.status]} verified={item.status === 'verified'} kind={kinds[item.kind]}
+      title={<><SheetTitle className="text-lg leading-7 [overflow-wrap:anywhere]">{item.title}</SheetTitle>
+        <SheetDescription className="sr-only">查看处理步骤、验证结果和原始会话。</SheetDescription></>}
+      metadata={<>
         <span className="tabular-nums">{displayTime(item.problem.ts)}</span>
         <Button type="button" variant="ghost" size="xs" onClick={() => open(item.problem)}>定位问题原话<ArrowUpRight /></Button>
-      </div>
-    </SheetHeader>
+      </>} />
     <div className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-5 py-6 sm:px-7">
-      {item.title !== item.problem.quote && <section className="space-y-2"><h3 className="text-sm font-semibold">问题现象</h3><EvidenceLine evidence={item.problem} onOpen={open} /></section>}
-      {item.conditions.length > 0 && <section className="space-y-2 border-b pb-5"><h3 className="text-sm font-semibold">适用条件</h3>
+      {item.title !== item.problem.quote && <SopDetailSection title="问题现象"><EvidenceLine evidence={item.problem} onOpen={open} /></SopDetailSection>}
+      {item.conditions.length > 0 && <SopDetailSection title="适用条件" layout="conditions">
         <div className="space-y-2">{item.conditions.map((ref, index) => <EvidenceLine key={`${ref.message_id}-${index}`} evidence={ref} onOpen={open} />)}</div>
-      </section>}
-      {item.steps.length > 0 && <section className="space-y-3"><h3 className="text-sm font-semibold">处理流程</h3>
-        <ol className="ml-2.5 space-y-4 border-l pl-4">
-          {item.steps.map((step, index) => <li key={`${step.evidence.message_id}-${index}`} className="relative min-w-0 space-y-1">
-            <span className="absolute -left-[1.7rem] top-0 grid size-5 place-items-center rounded-full border bg-background text-[10px] tabular-nums text-muted-foreground" aria-hidden="true">{index + 1}</span>
-            <div className="flex flex-wrap items-center gap-2 text-xs"><span className="font-medium">{phases[step.phase]}</span><span className="text-muted-foreground">{outcomes[step.outcome]}</span></div>
+      </SopDetailSection>}
+      {item.steps.length > 0 && <SopDetailSection title="处理流程" layout="flow">
+        <SopTimeline>
+          {item.steps.map((step, index) => <SopTimelineStep key={`${step.evidence.message_id}-${index}`} index={index}
+            phase={phases[step.phase]} outcome={outcomes[step.outcome]}
+            feedback={step.feedback && step.feedback.message_id !== item.result?.message_id ? <EvidenceLine evidence={step.feedback} onOpen={open} /> : undefined}>
             <EvidenceLine evidence={step.evidence} onOpen={open} />
-            {step.feedback && step.feedback.message_id !== item.result?.message_id && <div className="mt-2 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-muted-foreground"><p className="text-xs">客户反馈</p><EvidenceLine evidence={step.feedback} onOpen={open} /></div>}
-          </li>)}
-        </ol>
-      </section>}
-      {!!item.replies?.length && <section className="space-y-2"><h3 className="text-sm font-semibold">人工回复记录</h3>
+          </SopTimelineStep>)}
+        </SopTimeline>
+      </SopDetailSection>}
+      {!!item.replies?.length && <SopDetailSection title="人工回复记录">
         <div className="divide-y">{item.replies.map((ref, index) => <div key={`${ref.message_id}-${index}`} className="py-2"><EvidenceLine evidence={ref} onOpen={open} /></div>)}</div>
-      </section>}
-      {item.result && <section className="space-y-2 border-t pt-5"><h3 className="text-sm font-semibold">复测结果</h3><EvidenceLine evidence={item.result} onOpen={open} /></section>}
-      {missing.length > 0 && <section className="space-y-1 rounded-lg bg-muted/45 px-4 py-3"><h3 className="text-sm font-medium">待补证据</h3>
+      </SopDetailSection>}
+      {item.result && <SopDetailSection title="复测结果" layout="result"><EvidenceLine evidence={item.result} onOpen={open} /></SopDetailSection>}
+      {missing.length > 0 && <SopDetailSection title="待补证据" layout="gaps">
         <p className="text-sm leading-6 text-muted-foreground">{missing.join('、')}</p>
-      </section>}
+      </SopDetailSection>}
     </div>
     {canCopy && <div className="flex shrink-0 justify-end border-t px-5 py-3 sm:px-7"><Button type="button" size="sm" onClick={() => void copySop(item)}><Copy />复制 SOP</Button></div>}
   </>

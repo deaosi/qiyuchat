@@ -7,6 +7,7 @@ import { chatScopeLabel, type ChatCitation } from '@/lib/voc-chat'
 import { customerLabel } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { QADetail } from './qa-detail'
+import { EvidenceCaseCard } from './voc-detail-display'
 import { QueryPanel, type Evidence, type Knowledge, type TopicDetail } from './voc-next-workspace'
 
 function qaIdentity(item: Evidence): number | null {
@@ -78,22 +79,17 @@ export function VocSourceInspector({ citation, filters }: { citation: ChatCitati
         {cases.length > 0 && !cases[0].verified && <p className="text-xs leading-5 text-muted-foreground">{hasReply ? '当前案例中没有已核验的客服回复。' : '当前案例的问答片段均未提取到客服回复。'}</p>}
         {cases.length ? cases.map(({ item, id, reply, verified }, index) => {
           const question = item.question || item.question_quote || '未记录咨询原文'
-          return <article key={id ?? `${item.id}-${index}`} className="qiyu-page-enter space-y-3 rounded-lg border bg-muted/15 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs text-muted-foreground">
-              <span>{customerLabel(item.customer_name, item.customer_id)}</span>
-              <time>{consultationTime(item)}</time>
-            </div>
-            <p className="whitespace-pre-wrap break-words text-sm font-medium leading-6">{question}</p>
+          return <EvidenceCaseCard key={id ?? `${item.id}-${index}`} label={customerLabel(item.customer_name, item.customer_id)}
+            time={consultationTime(item)} question={question} footer={<>
+              <span className="text-xs text-muted-foreground">{item.group_name || '未分组'}{item.staff_name ? ` · ${item.staff_name}` : ''}</span>
+              {id !== null ? <Button variant="outline" size="sm" onClick={() => setOpened({ key: scopeKey, pair: normalizePair({ ...item, qa_id: id }) })}>查看详情</Button>
+                : <span className="text-xs text-muted-foreground">会话记录暂不可定位</span>}
+            </>}>
             {reply ? <div className="space-y-1 text-xs leading-6 text-muted-foreground">
               <span className={verified ? 'font-medium text-foreground' : undefined}>{verified ? '已核验客服回复' : '来源回复摘要（客服来源未核验）'}</span>
               <p className="line-clamp-3 whitespace-pre-wrap break-words">{reply}</p>
             </div> : hasReply && <p className="text-xs leading-6 text-muted-foreground">当前问答片段未提取到客服回复。</p>}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground">{item.group_name || '未分组'}{item.staff_name ? ` · ${item.staff_name}` : ''}</span>
-              {id !== null ? <Button variant="outline" size="sm" onClick={() => setOpened({ key: scopeKey, pair: normalizePair({ ...item, qa_id: id }) })}>查看详情</Button>
-                : <span className="text-xs text-muted-foreground">会话记录暂不可定位</span>}
-            </div>
-          </article>
+          </EvidenceCaseCard>
         }) : <p className="py-8 text-center text-sm text-muted-foreground">当前来源暂无可展示的会话案例。</p>}
       </div>
     </QueryPanel>

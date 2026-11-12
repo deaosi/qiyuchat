@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import http.client
 import json
+import re
 import threading
 import time
 from dataclasses import replace
@@ -102,19 +104,52 @@ class TestWeb(LocalFixture):
         self.server.admin_key = "fixture-admin"
         token = "A" * 43
         path = "/guest/evidence/" + token
-        with patch("src.web.guest_evidence.resolve", side_effect=lambda cfg, key: b"<main>Published entry</main>" if key == token else None) as resolve:
+        public_assets = {"index-Abc_1234.js": "text/javascript; charset=utf-8",
+                         "index-5678Abc_.css": "text/css; charset=utf-8", "geist-ABCD1234.woff2": "font/woff2"}
+        static = Path(self.temp.name) / "static"
+        guest_assets = static / "guest" / "assets"
+        guest_assets.mkdir(parents=True)
+        (static / "guest" / "index.html").write_bytes(b"<main>Guest</main><!--VOC_GUEST_DATA-->")
+        for name in public_assets:
+            (guest_assets / name).write_bytes(name.encode())
+        (guest_assets / "index-Abc_1234.js.map").write_bytes(b"source map")
+        title = '</script><img src="/api/meta">&'
+        payload = {"entry": {"title": title, "summary": "发布校验" * 140}, "cases": [], "total_cases": 0}
+        with (
+            patch("src.web.server.STATIC", static),
+            patch("src.web.guest_evidence.resolve_payload",
+                  side_effect=lambda cfg, key: payload if key == token else None) as resolve,
+        ):
             status, body, headers = self.call(path)
-            self.assertEqual((status, body), (200, b"<main>Published entry</main>"))
+            self.assertEqual(status, 200)
+            script = re.fullmatch(rb'<main>Guest</main><script id="voc-guest-data" type="application/json">([^<]+)</script>', body)
+            self.assertIsNotNone(script)
+            self.assertEqual(json.loads(script.group(1)), payload)
+            self.assertNotIn(token.encode(), body)
+            compressed_status, compressed, compressed_headers = self.call(path, headers={"Accept-Encoding": "gzip"})
+            self.assertEqual((compressed_status, compressed_headers.get("Content-Encoding")), (200, "gzip"))
+            self.assertEqual(gzip.decompress(compressed), body)
             self.assertNotIn("Set-Cookie", headers)
             self.assertEqual(headers["Cache-Control"], "no-store")
             self.assertEqual(headers["Referrer-Policy"], "no-referrer")
             self.assertIn("noindex", headers["X-Robots-Tag"])
-            self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
-            self.assertEqual(self.call(path + "?id=99")[0], 404)
-            self.assertEqual(self.call(path + "/other")[0], 404)
+            policy = headers["Content-Security-Policy"]
+            for rule in ("default-src 'none'", "script-src 'self'", "font-src 'self'", "form-action 'none'"):
+                self.assertIn(rule, policy)
+            for suffix in ("?id=99", "/other", ";other"):
+                self.assertEqual(self.call(path + suffix)[0], 404)
             self.assertEqual(self.call("/guest/evidence/" + "B" * 43)[0], 404)
-            self.assertEqual(resolve.call_count, 2)
-        for route in ("/api/detail?id=1", "/api/meta", "/api/voc2/feishu/preview?kind=topics&days=7"):
+            prefix = "/guest/ui/assets/"
+            for name, mime in public_assets.items():
+                code, data, asset_headers = self.call(prefix + name)
+                self.assertEqual((code, data, asset_headers["Content-Type"]), (200, name.encode(), mime))
+                self.assertEqual(asset_headers["Cache-Control"], "public, max-age=31536000, immutable")
+            for name in ("index-Abc_1234.js.map", "%2e%2e/index.html", "index-Abc_1234.js?v=1", "index.html"):
+                self.assertEqual(self.call(prefix + name)[0], 404)
+            self.assertEqual(self.call("/guest/ui/index.html")[0], 404)
+            self.assertEqual(resolve.call_count, 3)
+        for route in ("/", "/assets/index-Abc_1234.js", "/api/detail?id=1", "/api/meta",
+                      "/api/voc2/feishu/preview?kind=topics&days=7"):
             self.assertEqual(self.call(route, headers={"Referer": self.origin + path})[0], 401)
 
     def test_host_and_origin_protection(self):

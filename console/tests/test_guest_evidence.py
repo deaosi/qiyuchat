@@ -137,7 +137,20 @@ class TestGuestEvidence(LocalFixture):
         }
         self.assertEqual(guest.upgrade_url(self.cfg, token, entry={**self.entry, "title": "另一个成果"}, view=view), "")
         self.assertEqual(self._token(guest.upgrade_url(self.cfg, token, entry=self.entry, view=view)), token)
-        page = guest.resolve(self.cfg, token).decode()
+        payload = guest.resolve_payload(self.cfg, token)
+        self.assertEqual(set(payload), {"entry", "cases", "total_cases"})
+        self.assertEqual(payload["total_cases"], 1)
+        case, = payload["cases"]
+        self.assertEqual(set(case), {"title", "category", "time", "sections", "messages", "scope"})
+        self.assertEqual(case["scope"], "context")
+        question, = [message for message in case["messages"] if message.get("anchor")]
+        self.assertEqual(question, {"role": "user", "time": "2026-11-12 10:00:04",
+                                    "text": "这一条如何处理？", "anchor": True})
+        projection = json.dumps(payload, ensure_ascii=False)
+        for private in (token, self.customer, self.visitor, self.source, "own-question", "own-answer"):
+            self.assertNotIn(private, projection)
+        page = guest.render_payload(payload).decode()
+        self.assertEqual(page, guest.resolve(self.cfg, token).decode())
         for text in ("一级分类", "二级分类", "图片回复", "场景命中", "诊断依据", "涉及商家",
                      "第 13 条后续回复", "机器人发送了操作提醒"):
             self.assertIn(text, page)
@@ -149,6 +162,10 @@ class TestGuestEvidence(LocalFixture):
     def test_legacy_only_shows_exact_pair_and_archived_source_is_unavailable(self):
         qa = self._seed_case(controlled=False)
         token = self._token(guest.issue_url(self.cfg, qa, entry=self.entry))
+        case, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertEqual(case["scope"], "pair")
+        self.assertTrue(case["messages"][0]["anchor"])
+        self.assertNotIn("anchor", case["messages"][1])
         page = guest.resolve(self.cfg, token).decode()
         self.assertIn("这一条如何处理", page)
         self.assertIn("按设置说明处理", page)

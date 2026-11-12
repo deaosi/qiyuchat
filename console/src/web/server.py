@@ -32,9 +32,18 @@ LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
 DB_LOCK = threading.RLock()
 IMAGE_SLOTS = threading.BoundedSemaphore(3)
 GUEST_PREFIX = "/guest/evidence/"
+GUEST_ASSET_PREFIX = "/guest/ui/assets/"
+GUEST_ASSET_NAME = re.compile(r"[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(?:js|css|woff2?)")
+GUEST_ASSET_TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                     ".woff2": "font/woff2", ".woff": "font/woff"}
+GUEST_DATA_MARKER = b"<!--VOC_GUEST_DATA-->"
 GUEST_SLOTS = threading.BoundedSemaphore(6)
 GUEST_POLICY = ("default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; "
                 "base-uri 'none'; form-action 'none'")
+GUEST_APP_POLICY = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    "font-src 'self'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+GUEST_HEADERS = {"X-Robots-Tag": "noindex, nofollow, noarchive",
+                 "Cross-Origin-Resource-Policy": "same-origin"}
 GUEST_UNAVAILABLE = (
     '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -85,11 +94,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, body: bytes, ctype: str, status: int = 200,
               filename: str = "", extra: dict[str, str] | None = None,
-              *, policy: str | None = None) -> None:
+              *, policy: str | None = None, cache_control: str = "no-store") -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy", policy or "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://ysf.nosdn.127.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -277,7 +286,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             u = urlparse(self.path)
             if u.path.startswith("/guest/"):
-                self._guest_page(u.path, u.query, u.fragment)
+                if u.path.startswith(GUEST_ASSET_PREFIX):
+                    self._guest_asset(u.path, u.params or u.query or u.fragment)
+                else:
+                    self._guest_page(u.path, u.params or u.query or u.fragment)
                 return
             path, qs = unquote(u.path), parse_qs(u.query, max_num_fields=30)
             if path == "/login":
@@ -310,28 +322,53 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("查询失败")
             self._json({"error": "本地查询失败，请重试并查看服务日志"}, 500)
 
-    def _guest_page(self, path: str, query: str, fragment: str) -> None:
+    def _guest_asset(self, path: str, suffix: str) -> None:
+        name = path.removeprefix(GUEST_ASSET_PREFIX)
+        root = STATIC.resolve() / "guest" / "assets"
+        asset = root / name if GUEST_ASSET_NAME.fullmatch(name) else None
+        if suffix or asset is None or asset.resolve() != asset or not asset.is_file():
+            self._send(GUEST_UNAVAILABLE, "text/html; charset=utf-8", 404,
+                       policy=GUEST_POLICY, extra=GUEST_HEADERS)
+            return
+        self._send(asset.read_bytes(), GUEST_ASSET_TYPES[asset.suffix], policy=GUEST_APP_POLICY,
+                   extra=GUEST_HEADERS, cache_control="public, max-age=31536000, immutable")
+
+    def _guest_page(self, path: str, suffix: str) -> None:
         token = path[len(GUEST_PREFIX):] if path.startswith(GUEST_PREFIX) else ""
-        content = None
+        body = GUEST_UNAVAILABLE
+        policy = GUEST_POLICY
         status = 404
-        if not (query or fragment) and re.fullmatch(guest_evidence.TOKEN_PATTERN, token):
+        if not suffix and re.fullmatch(guest_evidence.TOKEN_PATTERN, token):
             if GUEST_SLOTS.acquire(blocking=False):
                 try:
-                    content = guest_evidence.resolve(self.server.cfg, token)
+                    payload = guest_evidence.resolve_payload(self.server.cfg, token)
+                    if payload is not None:
+                        body, policy = self._render_guest(payload)
+                        status = 200
                 finally:
                     GUEST_SLOTS.release()
-                if content is not None:
-                    status = 200
             else:
                 status = 503
-        extra = {"X-Robots-Tag": "noindex, nofollow, noarchive",
-                 "Cross-Origin-Resource-Policy": "same-origin", "Vary": "Accept-Encoding"}
-        body = content or GUEST_UNAVAILABLE
+        extra = {**GUEST_HEADERS, "Vary": "Accept-Encoding"}
         if len(body) > 1400 and re.search(r"(?:^|,)\s*gzip\s*(?:,|$)",
                                          self.headers.get("Accept-Encoding", ""), re.I):
             body = gzip.compress(body, 4)
             extra["Content-Encoding"] = "gzip"
-        self._send(body, "text/html; charset=utf-8", status, policy=GUEST_POLICY, extra=extra)
+        self._send(body, "text/html; charset=utf-8", status, policy=policy, extra=extra)
+
+    @staticmethod
+    def _render_guest(payload: dict) -> tuple[bytes, str]:
+        try:
+            template = (STATIC / "guest" / "index.html").read_bytes()
+        except FileNotFoundError:
+            return guest_evidence.render_payload(payload), GUEST_POLICY
+        if template.count(GUEST_DATA_MARKER) != 1:
+            return guest_evidence.render_payload(payload), GUEST_POLICY
+        # Escape the characters that can change HTML parsing inside a script element.
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        data = data.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+        element = b'<script id="voc-guest-data" type="application/json">' + data.encode("utf-8") + b"</script>"
+        return template.replace(GUEST_DATA_MARKER, element), GUEST_APP_POLICY
 
     def _case_image(self, qs: dict[str, list[str]]) -> None:
         urls = qs.get("url", [])

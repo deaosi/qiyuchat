@@ -148,12 +148,12 @@ def _related_ids(value: object) -> set[str]:
 
 
 def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
-                        names: re.Pattern[str] | None, *, full: bool) -> tuple[list[dict], bool]:
+                        names: re.Pattern[str] | None, *, full: bool) -> tuple[list[dict], bool, int | None]:
     customer = pair.get("customer_id")
     questions = _related_ids(origin.get("question_message_ids"))
     answers = _related_ids(origin.get("answer_message_ids"))
     if not questions or not isinstance(customer, str) or not customer or customer.startswith("qiyu-session:"):
-        return [], False
+        return [], False, None
     segments: list[list[dict]] = []
     current: list[dict] | None = None
     for row in rows:
@@ -172,7 +172,7 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
         if any(row["role"] == "user" and row["source_message_id"] in questions for row in segment)
     ]
     if len(matching) != 1:
-        return [], False
+        return [], False, None
     segment = matching[0]
     q_index = next(index for index, row in enumerate(segment) if row["role"] == "user" and row["source_message_id"] in questions)
     a_index = q_index
@@ -181,23 +181,20 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
         if message_id in questions | answers and anchor and _digest(message_id) == anchor and abs(index - q_index) <= 8:
             a_index = index
             break
-    # Always show the question, even when the SOP is anchored to a following answer.
-    start, end = max(0, min(q_index, a_index) - 3), max(q_index, a_index) + 5
-    if not full:
-        return [message for row in segment[start:end]
-                if (message := _message(row["role"], row["ts"], row["content"], names)) is not None], False
-
-    # A verified identity segment contains the conversation for this case.
-    # For unusually large cases, keep the messages nearest the anchored question.
-    begin = max(0, min(q_index - _FULL_CONTEXT_MESSAGES // 2, len(segment) - _FULL_CONTEXT_MESSAGES))
-    stop = begin + _FULL_CONTEXT_MESSAGES
+    if full:
+        # Keep the nearest messages if a verified identity segment is unusually large.
+        begin = max(0, min(q_index - _FULL_CONTEXT_MESSAGES // 2, len(segment) - _FULL_CONTEXT_MESSAGES))
+        stop, text_limit = begin + _FULL_CONTEXT_MESSAGES, _FULL_MESSAGE_LIMIT
+    else:
+        # Always show the question, even when the SOP is anchored to a following answer.
+        begin, stop = max(0, min(q_index, a_index) - 3), max(q_index, a_index) + 5
+        text_limit = _MAX_CONTEXT_TEXT
     projected = [(index, message) for index, row in enumerate(segment[begin:stop], begin)
-                 if (message := _message(row["role"], row["ts"], row["content"], names,
-                                         _FULL_MESSAGE_LIMIT)) is not None]
-    limited = len(segment) > _FULL_CONTEXT_MESSAGES or any(
+                 if (message := _message(row["role"], row["ts"], row["content"], names, text_limit)) is not None]
+    limited = full and (len(segment) > _FULL_CONTEXT_MESSAGES or any(
         len(message["text"]) > _FULL_MESSAGE_LIMIT for _, message in projected
-    )
-    if sum(len(message["text"]) for _, message in projected) > _FULL_CONTEXT_CHARS:
+    ))
+    if full and sum(len(message["text"]) for _, message in projected) > _FULL_CONTEXT_CHARS:
         limited = True
         size = 0
         kept = []
@@ -207,7 +204,10 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
                 break
             kept.append((index, message))
         projected = sorted(kept, key=lambda item: item[0])
-    return [message for _, message in projected], limited
+    anchored_row = segment[a_index]
+    anchor_index = a_index if anchored_row["role"] == "user" and anchored_row["source_message_id"] in questions else q_index
+    position = next((position for position, (index, _) in enumerate(projected) if index == anchor_index), None)
+    return [message for _, message in projected], limited, position
 
 
 def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tuple[str, list[dict], str, re.Pattern[str] | None] | None:
@@ -245,8 +245,8 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tupl
     if not rows:
         return None
     names = _private_names(pair, dict(session_row), rows)
-    context, limited = (_controlled_context(pair, origin, rows, anchor, names, full=full)
-                        if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False))
+    context, limited, position = (_controlled_context(pair, origin, rows, anchor, names, full=full)
+                                  if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False, None))
     scope = ("limited" if limited else "context") if context else "pair"
     if not context:
         limit = _FULL_MESSAGE_LIMIT if full else _MAX_CONTEXT_TEXT
@@ -255,12 +255,16 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tupl
         if question is None:
             return None
         context = [question] + ([answer] if answer else [])
+        position = 0
     # Do not substitute a different customer, source revision, or transcript.
     fingerprint = _digest([
         sid, pair.get("customer_id"), pair.get("asked_at"), pair.get("question"), pair.get("answer"),
         pair.get("created_at"), origin.get("evidence_key"), origin.get("fingerprint"),
         origin.get("revision"), scope, context,
     ])
+    # A presentation marker should never change the fingerprint of an existing link.
+    if position is not None:
+        context[position]["anchor"] = True
     return fingerprint, context, scope, names
 
 
@@ -422,8 +426,8 @@ def _render_case(cfg: Settings, binding: dict, *, full: bool) -> dict | None:
             "messages": case[1], "scope": case[2]}
 
 
-def resolve(cfg: Settings, token: str) -> bytes | None:
-    """Resolve an exact bearer token without creating or modifying any data."""
+def resolve_payload(cfg: Settings, token: str) -> dict | None:
+    """Read the public projection for an exact bearer token."""
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         return None
     try:
@@ -452,6 +456,17 @@ def resolve(cfg: Settings, token: str) -> bytes | None:
                 return None
         cases = [case for binding in bindings[:_MAX_CASES]
                  if (case := _render_case(cfg, binding, full=value["v"] == 2)) is not None]
-        return guest_evidence_view.render_page(entry, cases, total_cases=total)
+        return {"entry": entry, "cases": cases, "total_cases": total}
     except (sqlite3.Error, OSError, ValueError, RecursionError):
         return None
+
+
+def render_payload(payload: dict) -> bytes:
+    """Render the scoped projection without a second registry read."""
+    return guest_evidence_view.render_page(**payload)
+
+
+def resolve(cfg: Settings, token: str) -> bytes | None:
+    """Resolve an exact bearer token to the standalone HTML page."""
+    payload = resolve_payload(cfg, token)
+    return render_payload(payload) if payload is not None else None

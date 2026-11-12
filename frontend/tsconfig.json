@@ -8,5 +8,5 @@
     "resolveJsonModule": true, "isolatedModules": true, "noEmit": true,
     "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts", "vite.guest.config.ts"]
 }

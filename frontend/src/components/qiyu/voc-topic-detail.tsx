@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { ArrowUpRight, Copy, MessagesSquare } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
+import { DecisionCaseCard, DecisionCaseSection, TopicSummary } from './voc-detail-display'
 import { Button } from '@/components/ui/button'
 import { normalizePair } from '@/lib/api'
 import type { Evidence, Knowledge, KnowledgeReuse, OpenEvidencePair, Ref, TopicDetail } from './voc-next-workspace'
@@ -145,31 +146,23 @@ function DecisionCase({ item, title, onOpenPair }: { item: Evidence; title: stri
     ].filter(Boolean).join('\n'), '已复制疑似异常摘要。')
   }
 
-  return <article className="space-y-4 rounded-xl border p-4 sm:p-5">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0 space-y-1.5">
-        <Badge variant="secondary" className="font-normal">{diagnosis}</Badge>
-        <p className="text-xs text-muted-foreground">{[item.customer_name || '匿名商家', displayTime(item.asked_at)].filter(Boolean).join(' · ')}</p>
-      </div>
-      <div className="flex flex-wrap gap-2">
+  return <DecisionCaseCard diagnosis={diagnosis}
+    metadata={[item.customer_name || '匿名商家', displayTime(item.asked_at)].filter(Boolean).join(' · ')}
+    question={item.question_quote || item.question}
+    action={<>
         {item.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenPair(normalizePair(item), questionAnchor(item))}>查看会话上下文<ArrowUpRight /></Button>}
         {suspected && <Button variant="outline" size="sm" onClick={copyReport}><Copy />复制疑似异常摘要</Button>}
-      </div>
-    </div>
-    <p className="whitespace-pre-wrap text-sm font-medium leading-6 [overflow-wrap:anywhere]">{item.question_quote || item.question}</p>
-    <dl className="grid gap-2 md:grid-cols-3">
-      {facts.map(({ label, refs, missing }) => <div key={label} className="min-w-0 rounded-lg border bg-muted/25 p-3">
-        <dt className="mb-2 text-xs font-medium">{label}</dt>
-        <dd>{refs.length ? <FactQuotes item={item} refs={refs} onOpenPair={onOpenPair} /> : <p className="text-xs leading-5 text-muted-foreground">{missing}</p>}</dd>
-      </div>)}
-    </dl>
-    {cause.length > 0 && <section className="space-y-2 border-t pt-3"><h5 className="text-sm font-medium">诊断依据</h5><FactQuotes item={item} refs={cause} onOpenPair={onOpenPair} /></section>}
-    {verifiedSteps.length > 0 && <section className="space-y-2 border-t pt-3"><h5 className="text-sm font-medium">客服给出的处理步骤</h5><FactQuotes item={item} refs={verifiedSteps} onOpenPair={onOpenPair} /></section>}
-    {verifiedSteps.length === 0 && reply.length > 0 && <section className="space-y-2 border-t pt-3">
-      <h5 className="text-sm font-medium">{item.staff_source_verified ? '客服原话' : '回复原话 · 来源未核验'}</h5>
+    </>}
+    facts={facts.map(({ label, refs, missing }) => ({
+      label,
+      content: refs.length ? <FactQuotes item={item} refs={refs} onOpenPair={onOpenPair} /> : <p className="text-xs leading-5 text-muted-foreground">{missing}</p>,
+    }))}>
+    {cause.length > 0 && <DecisionCaseSection title="诊断依据"><FactQuotes item={item} refs={cause} onOpenPair={onOpenPair} /></DecisionCaseSection>}
+    {verifiedSteps.length > 0 && <DecisionCaseSection title="客服给出的处理步骤"><FactQuotes item={item} refs={verifiedSteps} onOpenPair={onOpenPair} /></DecisionCaseSection>}
+    {verifiedSteps.length === 0 && reply.length > 0 && <DecisionCaseSection title={item.staff_source_verified ? '客服原话' : '回复原话 · 来源未核验'}>
       {reply.map(quote => <p key={quote} className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{quote}</p>)}
-    </section>}
-  </article>
+    </DecisionCaseSection>}
+  </DecisionCaseCard>
 }
 
 function TopicKnowledge({ items, onOpenPair }: { items: Knowledge[]; onOpenPair: OpenEvidencePair }) {
@@ -209,21 +202,14 @@ export function TopicWorkbench({ detail, onOpenPair, onAskTopic }: { detail: Top
   const gaps = workbench?.gaps.filter(gap => gap.count > 0) ?? []
 
   return <div className="qiyu-page-enter space-y-6">
-    <div className="space-y-4 rounded-xl border bg-linear-to-br from-background to-muted/55 p-4 sm:p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 space-y-2">
-          <div className="flex flex-wrap items-center gap-2"><h3 className="text-lg font-semibold tracking-tight [overflow-wrap:anywhere]">{title}</h3>{trend && <Badge variant="outline">{trend}</Badge>}</div>
-          {topic.theme.trim() && topic.theme.trim() !== topic.question.trim() && <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{topic.question}</p>}
-        </div>
-        <Button variant="outline" size="sm" onClick={onAskTopic}><MessagesSquare />追问这个问题</Button>
-      </div>
-      <dl className="grid grid-cols-3 gap-3 border-t pt-3 text-sm tabular-nums">
-        <div><dt className="text-xs text-muted-foreground">咨询</dt><dd className="mt-1 font-semibold">{number(topic.consultation_count)} 次</dd></div>
-        <div><dt className="text-xs text-muted-foreground">独立会话</dt><dd className="mt-1 font-semibold">{number(topic.session_count)} 个</dd></div>
-        <div><dt className="text-xs text-muted-foreground">可识别商家</dt><dd className="mt-1 font-semibold">{number(topic.merchant_count)} 家</dd></div>
-      </dl>
-      <p className="text-xs leading-5 text-muted-foreground">{[topic.platforms?.join('、'), topic.last_seen && `最近发生 ${displayTime(topic.last_seen)}`, topic.unknown_merchant_sessions ? `${number(topic.unknown_merchant_sessions)} 个会话的商家身份待确认` : ''].filter(Boolean).join(' · ')}</p>
-    </div>
+    <TopicSummary title={title} badge={trend} description={topic.theme.trim() && topic.theme.trim() !== topic.question.trim() ? topic.question : undefined}
+      action={<Button variant="outline" size="sm" onClick={onAskTopic}><MessagesSquare />追问这个问题</Button>}
+      metrics={[
+        { label: '咨询', value: `${number(topic.consultation_count)} 次` },
+        { label: '独立会话', value: `${number(topic.session_count)} 个` },
+        { label: '可识别商家', value: `${number(topic.merchant_count)} 家` },
+      ]}
+      metadata={[topic.platforms?.join('、'), topic.last_seen && `最近发生 ${displayTime(topic.last_seen)}`, topic.unknown_merchant_sessions ? `${number(topic.unknown_merchant_sessions)} 个会话的商家身份待确认` : ''].filter(Boolean).join(' · ')} />
     {workbench && <TrendComparison comparison={workbench.comparison} currentConsultations={topic.consultation_count} trend={topic.trend} />}
     {workbench && activeCase && <section className="space-y-3">
       <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">处理判断 · {caseId ? '当前案例' : '代表案例'}</h4>

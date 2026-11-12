@@ -3,12 +3,13 @@ import { AlertCircle, Archive, ArrowUpRight, CircleCheck, CircleDashed, Layers2,
 import { LoadingState } from './loading-state'
 import type { QAPair } from '@/lib/demo-data'
 import { ApiError, apiGet, apiPost, normalizePair, type DetailMessageImage, type DetailRepliesResponse, type DetailSenderKind, type DetailSenderMetadata } from '@/lib/api'
-import { cn, customerLabel } from '@/lib/utils'
+import { customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { ConversationImage } from './conversation-image'
+import { ConversationBubble, ConversationSection, ConversationTranscript } from './conversation-transcript'
 
 export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean; anchorMessageId?: string; onCloseAutoFocus?: (event: Event) => void }
 
@@ -115,36 +116,19 @@ function messageSender(message: ContextMessage, pair: QAPair) {
   }
 }
 
-const messageLayout = {
-  left: { row: 'justify-start', group: 'items-start', bubble: 'rounded-tl-sm border-border/80 bg-background' },
-  right: { row: 'justify-end', group: 'items-end', bubble: 'rounded-tr-sm border-foreground/10 bg-linear-to-b from-foreground/10 to-foreground/[0.06]' },
-  center: { row: 'justify-center', group: 'items-center', bubble: 'border-transparent bg-foreground/5 text-muted-foreground' },
-} as const
-
 function ConversationMessage({ message, pair, anchored }: { message: ContextMessage; pair: QAPair; anchored: boolean }) {
   const isFukeStaff = message.senderKind === 'fuke_staff'
   const isCustomer = message.role === 'user' && !message.senderKind
   const side = message.role === 'staff' || isFukeStaff ? 'right' : isCustomer ? 'left' : 'center'
-  const layout = messageLayout[side]
 
-  return (
-    <li data-side={side} data-evidence-anchor={anchored ? '' : undefined} className={cn('flex min-w-0 scroll-my-6', layout.row)}>
-      <div className={cn('flex w-fit min-w-0 max-w-[88%] flex-col gap-1.5 sm:max-w-[80%]', layout.group)}>
-        <div className={cn('flex max-w-full flex-wrap items-baseline gap-x-2 gap-y-0.5 px-1 text-xs leading-5 text-muted-foreground', layout.row)}>
-          <span className={cn('min-w-0', isFukeStaff && 'font-medium text-foreground')}>{messageSender(message, pair)}</span>
-          {isFukeStaff && <span className="text-[11px]">福客 AI · 七鱼未识别为客服</span>}
-          <time className="tabular-nums">{message.time}</time>
-          {isCustomer && message.sourceMessageId && message.isQuestion && <span className="text-[11px] font-medium text-foreground">本次咨询</span>}
-        </div>
-        <div className={cn('w-fit min-w-0 max-w-full whitespace-pre-wrap rounded-xl border px-3.5 py-2.5 text-sm leading-6 [overflow-wrap:anywhere]', layout.bubble, anchored && 'ring-2 ring-foreground/35 ring-offset-2 ring-offset-surface')}>
-          {(!message.images.length || message.content.trim() !== '[图片]') && <p>{message.content}</p>}
-          {message.images.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
-            {message.images.map((image, index) => <ConversationImage key={`${image.url}-${index}`} url={image.url} />)}
-          </div>}
-        </div>
-      </div>
-    </li>
-  )
+  return <ConversationBubble side={side} sender={messageSender(message, pair)} time={message.time} anchored={anchored}
+    senderNote={isFukeStaff ? '福客 AI · 七鱼未识别为客服' : undefined}
+    question={Boolean(isCustomer && message.sourceMessageId && message.isQuestion)}>
+    {(!message.images.length || message.content.trim() !== '[图片]') && <p>{message.content}</p>}
+    {message.images.length > 0 && <div className="space-y-2 [&:not(:first-child)]:mt-2">
+      {message.images.map((image, index) => <ConversationImage key={`${image.url}-${index}`} url={image.url} />)}
+    </div>}
+  </ConversationBubble>
 }
 
 export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false, anchorMessageId, onCloseAutoFocus }: QADetailProps) {
@@ -257,8 +241,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
           </section>
           </>}
           <Separator />
-          <section className="pt-6" aria-label="聊天记录">
-            <h3 className="mb-5 flex items-center gap-2 text-sm font-medium"><MessagesSquare className="size-4" />{embedded ? '聊天记录' : '相关会话上下文'}{!loading && !error && loaded && <span className="ml-auto text-xs font-normal tabular-nums text-muted-foreground">{messages.length} 条</span>}</h3>
+          <ConversationSection title={embedded ? '聊天记录' : '相关会话上下文'} count={!loading && !error && loaded ? messages.length : undefined}>
             {loading ? <LoadingState label="正在读取相关会话上下文…" rows={4} />
               : error ? <div className="rounded-lg border p-4" role="alert"><div className="flex items-center gap-2 text-sm font-medium"><AlertCircle className="size-4" />暂时无法读取会话详情</div><p className="mt-2 text-sm leading-6 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-3" onClick={() => setRetry(value => value + 1)}><RefreshCw className="size-3.5" />重新加载</Button></div>
                 : <>
@@ -271,12 +254,12 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
                   </div>}
                   {availability === 'archived' && <div role="status" className="mb-4 flex items-start gap-3 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><Archive className="mt-1 size-4 shrink-0" /><p>原始聊天记录已归档。</p></div>}
                   {anchorMessageId && !anchoredKey && lookupStatus !== 'loading' && <p role="status" className="mb-4 text-sm text-muted-foreground">当前保留的会话记录中无法定位这条证据。</p>}
-                  {messages.length ? <ol ref={transcript} className="space-y-4 rounded-xl border border-border/70 bg-surface px-3 py-4 sm:space-y-5 sm:px-5 sm:py-5" aria-label="会话消息">
+                  {messages.length ? <ConversationTranscript ref={transcript}>
                     {messages.map(message => <ConversationMessage key={message.key} message={message} pair={pair} anchored={message.key === anchoredKey} />)}
-                  </ol>
+                  </ConversationTranscript>
                     : availability !== 'archived' && <p className="rounded-lg border bg-muted/20 p-4 text-sm leading-6 text-muted-foreground">当前会话没有可展示的聊天记录。</p>}
                 </>}
-          </section>
+          </ConversationSection>
           {!embedded && <p className="mt-7 text-xs leading-6 text-muted-foreground">问答与上下文由服务器返回，并按现有规则脱敏。</p>}
         </div>
 
