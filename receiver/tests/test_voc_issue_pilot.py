@@ -10,7 +10,7 @@ def row(qa_id, question, *, session=None, merchant="", anchored=True, span=None,
             "source": {"qa_id": qa_id, "session_id": session or f"s{qa_id}", "customer_id": merchant or "unknown",
                        "question": question, "answer": answer, "asked_at": qa_id * 1000, "_known_merchant": merchant,
                        "_staff_verified": bool(answer),
-                       "_question_parts": [{"message_id": f"q{qa_id}", "start": 0, "end": len(question)}] if anchored else [],
+                       "_question_parts": [{"message_id": f"q{qa_id}", "start": 0, "end": len(question), "ts": qa_id * 1000}] if anchored else [],
                        "_answer_parts": [{"message_id": f"a{qa_id}", "start": 0, "end": len(answer)}] if answer and anchored else []},
             "data": {"question_span": {"start": start, "end": end, "quote": question[start:end], "alignment": "exact"},
                      "domain": domain or {}}}
@@ -149,6 +149,18 @@ class IssueGroupingTests(unittest.TestCase):
         source["source"]["_answer_parts"] = []
         [unbound] = voc_issue_pilot.build([source])["items"]
         self.assertEqual(unbound["cases"][0]["details"], {"observed": actual})
+
+    def test_example_uses_the_time_of_the_cited_message_not_the_start_of_the_question(self):
+        first, later = "这里没显示。", "微信小店支持批量绑定店铺吗？"
+        question = f"{first}\n{later}"
+        item = row(1, question, span=(len(first) + 1, len(question)))
+        item["source"]["_question_parts"] = [
+            {"message_id": "q1", "start": 0, "end": len(first), "ts": 1000},
+            {"message_id": "q2", "start": len(first) + 1, "end": len(question), "ts": 2000},
+        ]
+        [card] = voc_issue_pilot.build([item])["items"]
+        [case] = card["cases"]
+        self.assertEqual((case["message_id"], case["quote"], case["ts"]), ("q2", later, 2000))
 
 
 if __name__ == "__main__":

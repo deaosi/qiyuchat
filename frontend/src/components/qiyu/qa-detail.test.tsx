@@ -88,6 +88,18 @@ describe('embedded case conversation details', () => {
     expect(reply.closest('li')?.hasAttribute('data-evidence-anchor')).toBe(false)
   })
 
+  it('shows the anchored original message without the normalized question block in the evidence Sheet', async () => {
+    vi.mocked(apiGet).mockResolvedValue(response('21', [message(0, '怎么授权啊'), message(1, '人工回复')]))
+    render(<QADetail pair={pair()} onClose={vi.fn()} anchorMessageId="source-0" />)
+
+    const dialog = within(screen.getByRole('dialog', { name: '问答与相关会话上下文' }))
+    const transcript = await dialog.findByRole('list', { name: '会话消息' })
+    expect(within(transcript).getByText('怎么授权啊').closest('li')?.hasAttribute('data-evidence-anchor')).toBe(true)
+    expect(dialog.queryByText('归一化问题')).toBeNull()
+    expect(dialog.queryByText('用于旧全局详情的归一化问法')).toBeNull()
+    expect(dialog.getByRole('heading', { name: '客服回复' })).toBeTruthy()
+  })
+
   it.each([true, false])('aligns customer, staff and other messages by sender (embedded=%s)', async embedded => {
     const detail = response('21', [
       message(0, '客户提问'),

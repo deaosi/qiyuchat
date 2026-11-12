@@ -171,8 +171,11 @@ def _question(row: dict) -> dict | None:
         return None
     refs = _message_refs(source, "question", start, end)
     message_id = refs[0]["message_id"] if len(refs) == 1 and refs[0]["end"] - refs[0]["start"] == end - start else ""
+    stamp = source.get("asked_at", 0)
+    if message_id:
+        stamp = next((part.get("ts") or 0 for part in source["_question_parts"] if part["message_id"] == message_id), 0)
     return {"qa_id": row["qa_id"], "message_id": message_id, "quote": quote,
-            "ts": source.get("asked_at", 0), "anchored": bool(message_id),
+            "ts": stamp, "anchored": bool(message_id),
             "has_reply": bool(source.get("_staff_verified") and source.get("answer")),
             "start": start, "end": end}
 

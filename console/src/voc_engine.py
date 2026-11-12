@@ -57,7 +57,7 @@ def _anchored_text(conn: sqlite3.Connection, session_id: str, ids: list[str], ro
         return "", []
     marks = ",".join("?" for _ in ids)
     rows = conn.execute(
-        f"SELECT source_message_id,role,content FROM raw_message WHERE session_id=? AND source_message_id IN ({marks}) ORDER BY seq",
+        f"SELECT source_message_id,role,content,ts FROM raw_message WHERE session_id=? AND source_message_id IN ({marks}) ORDER BY seq",
         (session_id, *ids),
     ).fetchall()
     if [row["source_message_id"] for row in rows] != ids or any(row["role"] != role for row in rows):
@@ -67,7 +67,7 @@ def _anchored_text(conn: sqlite3.Connection, session_id: str, ids: list[str], ro
         text = _staff_answer(row["content"]) if role == "staff" else mask_pii(clean_visible_text(row["content"] or ""))
         if text:
             chunks.append(text)
-            parts.append({"message_id": row["source_message_id"], "start": offset, "end": offset + len(text)})
+            parts.append({"message_id": row["source_message_id"], "start": offset, "end": offset + len(text), "ts": row["ts"]})
             offset += len(text) + 1
     return "\n".join(chunks), parts
 
