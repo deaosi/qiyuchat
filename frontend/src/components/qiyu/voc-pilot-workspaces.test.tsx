@@ -116,11 +116,14 @@ it('shows the sourced operation ahead of pending consultations and keeps the act
 it('makes the model summary searchable and opens the exact evidence for a model-discovered operation', () => {
   const problem = { ...source, quote: '拼多多发出「稍等」以后没有待办。' }
   const action = { ...source, message_id: 'source-4', quote: '我这边配置为知识加入待办。', ts: source.ts + 1000 }
-  const reported = { ...source, message_id: 'source-5', quote: '我也给通用知识打开了加入待办。', ts: source.ts + 2000 }
+  const additionalSource = { ...source, message_id: 'source-5', quote: '我这边配置为通用知识加入待办。', ts: source.ts + 2000 }
   const followup = { ...source, message_id: 'source-6', quote: '我再发了一遍稍等，这次待办出来了。', ts: source.ts + 3000 }
   const path: VocCasePath = {
     id: 'case-1', qa_id: source.qa_id, problem, platform: '拼多多', outcome: 'not_recorded',
-    steps: [action, reported].map(evidence => ({ actor: 'staff', state: 'reported', action: evidence.quote, evidence })),
+    steps: [
+      { actor: 'staff', state: 'reported', action: action.quote, evidence: action },
+      { actor: 'staff', state: 'proposed', action: '配置为通用知识加入待办', evidence: additionalSource },
+    ],
     solution: { title: '拼多多回复后未生成待办', sections: [
       { kind: 'problem', text: '客户反馈回复「稍等」后没有待办。', evidence: [problem] },
       { kind: 'diagnosis', text: '问题发生在机器人回复后的待办生成环节。', evidence: [problem] },
@@ -138,8 +141,10 @@ it('makes the model summary searchable and opens the exact evidence for a model-
   expect(within(operation).getByText('客服将当前知识配置为加入待办。')).toBeTruthy()
   fireEvent.click(within(operation).getByRole('button', { name: '定位原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: action.quote }), 'source-4')
-  const additional = within(detail.getByRole('heading', { name: '客服称已执行的操作' }).closest('section')!)
-  expect(additional.getByText(reported.quote)).toBeTruthy()
+  const additional = within(detail.getByRole('heading', { name: '客服原话中的其他操作' }).closest('section')!)
+  expect(additional.getByText(additionalSource.quote)).toBeTruthy()
+  expect(additional.getByText('客服提到的做法')).toBeTruthy()
+  expect(additional.queryByText('客服称已执行')).toBeNull()
   expect(additional.queryByText(action.quote)).toBeNull()
   fireEvent.click(additional.getByRole('button', { name: '定位原话' }))
   expect(open).toHaveBeenLastCalledWith(expect.objectContaining({ id: '42' }), 'source-5')

@@ -288,7 +288,7 @@ function CasePathSource({ item, onOpenPair }: { item: VocCasePath; onOpenPair: O
 function CasePathDetail({ item, onOpenPair }: { item: VocCasePath; onOpenPair: OpenEvidencePair }) {
   const summarizedActions = new Set(item.solution?.sections.filter(section => section.kind === 'action')
     .flatMap(section => section.evidence.map(source => `${source.qa_id}:${source.message_id}`)))
-  const recordedActions = item.solution ? item.steps.filter(step => step.actor === 'staff' && step.state === 'reported'
+  const recordedActions = item.solution ? item.steps.filter(step => step.actor === 'staff'
     && !summarizedActions.has(`${step.evidence.qa_id}:${step.evidence.message_id}`)) : []
   return <>
     <SheetHeader className="shrink-0 gap-2 border-b px-5 py-5 pr-10">
@@ -298,10 +298,9 @@ function CasePathDetail({ item, onOpenPair }: { item: VocCasePath; onOpenPair: O
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
       {item.solution ? <CaseSolution solution={item.solution} onOpenPair={onOpenPair} /> : <CasePathSource item={item} onOpenPair={onOpenPair} />}
       {recordedActions.length > 0 && <section className="space-y-2 border-t pt-3">
-        <h3 className="text-sm font-medium">客服称已执行的操作</h3>
-        <ul className="space-y-2">{recordedActions.map((step, index) => <li className="space-y-1" key={`${step.evidence.message_id}-${index}`}>
-          <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{step.action}</p>
-          <Button type="button" variant="ghost" size="xs" onClick={() => openSource(step.evidence, onOpenPair)}>定位原话<ArrowUpRight /></Button>
+        <h3 className="text-sm font-medium">客服原话中的其他操作</h3>
+        <ul className="divide-y">{recordedActions.map((step, index) => <li key={`${step.evidence.message_id}-${index}`}>
+          <SourceLine source={step.evidence} onOpenPair={onOpenPair} label={step.state === 'reported' ? '客服称已执行' : '客服提到的做法'} />
         </li>)}</ul>
       </section>}
       {!item.solution?.sections.some(section => section.kind === 'verification') && <p className="border-t pt-3 text-sm text-muted-foreground">未记录复测结果</p>}
