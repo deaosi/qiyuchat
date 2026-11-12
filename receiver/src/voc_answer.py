@@ -1,8 +1,11 @@
 """Evidence-bound answer writing, independent of model vendors and tool execution."""
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+import math
 import re
+import time
 
 from .model_protocol import complete_json
 
@@ -147,7 +150,7 @@ def _public(source):
     return {key: value for key, value in source.items() if not key.startswith('_')}
 
 
-def compose(cfg, question, history, scope, sources):
+def compose(cfg, question, history, scope, sources, *, time_budget: int | None = None):
     """Return verified prose or None. A failed model draft is never presented as facts."""
     admitted = []
     for source in sources:
@@ -158,8 +161,18 @@ def compose(cfg, question, history, scope, sources):
         return None, 0, '没有足够的完整来源用于组织回答。'
     payload = {'question': question, 'history': history[-4:], 'scope': scope['label'], 'sources': admitted}
     tokens = 0
+    deadline = time.monotonic() + time_budget if time_budget is not None else None
+
+    def llm_for_step():
+        if deadline is None:
+            return cfg.llm
+        remaining = math.ceil(deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError('Summary time budget exhausted')
+        return replace(cfg.llm, timeout=min(cfg.llm.timeout, remaining))
+
     try:
-        written = complete_json(cfg.llm, WRITE, payload, max_tokens=3200)
+        written = complete_json(llm_for_step(), WRITE, payload, max_tokens=1200 if deadline else 3200)
         tokens += written['usage_tokens']
         draft = written['data']
         if set(draft) != {'paragraphs', 'follow_up'} or not isinstance(draft['paragraphs'], list) or not 1 <= len(draft['paragraphs']) <= 6:
@@ -202,15 +215,17 @@ def compose(cfg, question, history, scope, sources):
             for condition in allowed[identity]['constraints']:
                 if _compact(condition) not in _compact(answer):
                     raise ValueError('Required condition omitted')
-        checked = complete_json(cfg.llm, VERIFY, {'question': question, 'scope': scope['label'],
-            'sources': [s for s in admitted if s['id'] in used], 'draft': draft}, max_tokens=1600)
+        checked = complete_json(llm_for_step(), VERIFY, {'question': question, 'scope': scope['label'],
+            'sources': [s for s in admitted if s['id'] in used], 'draft': draft}, max_tokens=650 if deadline else 1600)
         tokens += checked['usage_tokens']
         verdict = checked['data']
         if (set(verdict) != {'supported', 'unsupported'} or verdict['supported'] is not True
                 or not isinstance(verdict['unsupported'], list) or verdict['unsupported']):
             raise ValueError('Answer not supported')
         return {'answer': answer, 'used_ids': used}, tokens, ''
-    except Exception:
+    except Exception as error:
         # Provider/format/evidence failures fall back to original source excerpts,
         # never to the rejected draft. No upstream response or secret is returned.
+        if deadline is not None and (isinstance(error, TimeoutError) or getattr(error, 'status', None) == 504):
+            return None, tokens, '模型总结等待超时，以下为已查询的数据和依据。'
         return None, tokens, '本次模型成文未通过证据核对，以下保留来源原文或程序统计。'

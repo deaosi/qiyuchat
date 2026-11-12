@@ -577,7 +577,7 @@ def _normalize_metric_plan(plan, message):
     plan = dict(plan)
     count_only = bool(re.search(r'只(?:查|给|要|看)(?:数字|数量|条数)|仅(?:查|给|要|看)(?:数字|数量|条数)', message))
     if plan['intent'] == 'insights':
-        if count_only:
+        if count_only or re.search(r'只(?:给|看|要)数据', message):
             plan['explain'] = False
         return plan
     if count_only and plan['intent'] not in ('unsupported_action', 'out_of_scope'):
@@ -716,7 +716,7 @@ def _insights_answer(cfg, filters, body, plan, tokens, history):
                     result.update(answer='部分会话依据已更新，请重新查询。', citations=[], answer_mode='insufficient')
                     return result
                 checked_refs.append((ref, _signature(row)))
-        composed, used_tokens, warning = voc_answer.compose(cfg, body['message'], history, scope, sources)
+        composed, used_tokens, warning = voc_answer.compose(cfg, body['message'], history, scope, sources, time_budget=30)
         result['usage_tokens'] += used_tokens
         if any((row := _read_reference(engine, cfg, scoped, ref)) is None or _signature(row) != signature
                for ref, signature in checked_refs):

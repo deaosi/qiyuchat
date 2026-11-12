@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from src import voc_assistant as assistant
+from src.config import LLMConfig
 from src.voc_service import ServiceError
 
 
@@ -15,6 +16,22 @@ class TestAssistantInsights(unittest.TestCase):
         engine_patch.start()
         self.addCleanup(engine_patch.stop)
 
+    def test_model_summary_shares_one_time_budget_across_writing_and_verification(self):
+        writer = assistant.voc_answer
+        source = writer.material('computed', 'D1', '该范围有来源数据。', '该范围有来源数据。')
+        draft = {'paragraphs': [{'text': '该范围有来源数据。',
+                                 'references': [{'id': 'D1', 'quote': '该范围有来源数据。'}]}], 'follow_up': ''}
+        cfg = SimpleNamespace(llm=LLMConfig(timeout=180))
+        with (
+            patch.object(writer.time, 'monotonic', side_effect=[100, 103, 126]),
+            patch.object(writer, 'complete_json', side_effect=[{'data': draft, 'usage_tokens': 1},
+                         {'data': {'supported': True, 'unsupported': []}, 'usage_tokens': 1}]) as model,
+        ):
+            composed, _, warning = writer.compose(cfg, '做个复盘', [], {'label': '测试范围'}, [source], time_budget=30)
+        self.assertIsNotNone(composed)
+        self.assertFalse(warning)
+        self.assertEqual([call.args[0].timeout for call in model.call_args_list], [27, 4])
+
     def test_review_uses_five_reads_and_retains_stats_when_writer_is_unavailable(self):
         self.engine.topics.return_value = {'items': []}
         self.engine.summary.side_effect = [{'consultation_count': 8}, {'consultation_count': 4}]
@@ -23,7 +40,7 @@ class TestAssistantInsights(unittest.TestCase):
             patch.object(assistant.voc_assistant_metrics, 'read_metric',
                          side_effect=[('来源问答 12 条', [], '来源问答 12 条'), ('峰值 5 条', [], '峰值 5 条')]) as metric,
             patch.object(assistant.voc_assistant_solutions, 'read_solution', return_value=('暂无记录', [])),
-            patch.object(assistant.voc_answer, 'compose', return_value=(None, 0, '模型暂不可用')),
+            patch.object(assistant.voc_answer, 'compose', return_value=(None, 0, '模型暂不可用')) as writer,
         ):
             result = assistant.answer(self.cfg, {'days': 30, 'group': '测试群'}, {'message': '最近 7 天 VOC 复盘'})
         planner.assert_not_called()
@@ -32,6 +49,7 @@ class TestAssistantInsights(unittest.TestCase):
         self.assertIn('来源问答 12 条', result['answer'])
         self.assertIn('峰值 5 条', result['answer'])
         self.assertEqual(result['warnings'], ['模型暂不可用'])
+        self.assertEqual(writer.call_args.kwargs['time_budget'], 30)
         self.assertEqual(metric.call_args.args[1]['group'], '测试群')
         self.assertEqual(self.engine.summary.call_count, 2)
 
