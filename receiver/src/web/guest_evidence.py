@@ -33,6 +33,7 @@ _FULL_MESSAGE_LIMIT = 6000
 _FULL_CONTEXT_MESSAGES = 400
 _FULL_CONTEXT_CHARS = 90_000
 _MAX_CASES = 20
+MAX_TOPIC_VARIANTS = 48
 _MAX_CASE_IMAGES = 80
 _MAX_MESSAGE_IMAGES = 8
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -41,6 +42,10 @@ _IMAGE = re.compile(IMAGE_PATTERN)
 _MEDIA_DIGEST = re.compile(r"[a-f0-9]{64}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
 _URL = re.compile(r"""(?:[a-z][a-z0-9+.-]*://|www\.|(?<![\w@])(?:[a-z0-9-]+\.)+(?:cn|com|net|org|io|ai|top|cc)\b)[^\s，。；！？、<>'"]*""", re.I)
+_RELATIVE_ROUTE = re.compile(
+    r"""(?<![a-z0-9_/.:])(?:/{2}[a-z0-9.-]+|/(?:api|assets|guest|health|login(?:-landscape\.js)?|logout)(?=$|[/\s?#，。；！？、<>'"]))[^\s，。；！？、<>'"]*""",
+    re.I,
+)
 _SOURCE_ID = re.compile(r"\bqiyu-(?:external(?:-sha256)?|user|session):[^\s，。；！？、]+", re.I)
 _PROJECTION_ID = re.compile(r"\b(?:(?:t_|sop_|episode_)[a-f0-9]{24}|source:[a-z0-9_.-]+:[a-z0-9_.-]+)\b", re.I)
 _PRIVATE_VALUE = re.compile(
@@ -100,7 +105,7 @@ def _entry(value: dict, names: re.Pattern[str] | None) -> dict | None:
         return None
     result = {"kind": value["kind"], "start": start, "end": end}
     for field, limit in _ENTRY_LIMITS.items():
-        text = _clean(value.get(field), names)
+        text = _clean_projection(value.get(field), names)
         if len(text) > limit or (field != "summary" and not text):
             return None
         result[field] = text
@@ -341,11 +346,11 @@ def _sections(value, names) -> list[dict]:
     for item in value[:24]:
         if not isinstance(item, dict):
             continue
-        title = _clean(item.get("title"), names)[:180]
+        title = _clean_projection(item.get("title"), names)[:180]
         lines = item.get("lines")
         if not title or not isinstance(lines, list):
             continue
-        clean_lines = [line for value in lines[:80] if (line := _clean(value, names)[:3000])]
+        clean_lines = [line for value in lines[:80] if (line := _clean_projection(value, names)[:3000])]
         if clean_lines:
             result.append({"title": title, "lines": clean_lines})
     return result
@@ -358,7 +363,7 @@ def _view(value, names) -> dict:
     for item in (value["taxonomy"] if isinstance(value.get("taxonomy"), list) else [])[:100]:
         if not isinstance(item, dict):
             continue
-        primary, secondary = (_clean(item.get(key), names)[:250] for key in ("primary", "secondary"))
+        primary, secondary = (_clean_projection(item.get(key), names)[:250] for key in ("primary", "secondary"))
         if primary or secondary:
             row = {"primary": primary, "secondary": secondary}
             if type(item.get("count")) is int and item["count"] >= 0:
@@ -367,15 +372,16 @@ def _view(value, names) -> dict:
     for item in (value["metrics"] if isinstance(value.get("metrics"), list) else [])[:16]:
         if not isinstance(item, dict):
             continue
-        label = _clean(item.get("label"), names)[:200]
+        label = _clean_projection(item.get("label"), names)[:200]
         metric_value = item.get("value")
-        display = _clean(str(metric_value) if type(metric_value) is int else metric_value, names)[:200]
+        display = _clean_projection(str(metric_value) if type(metric_value) is int else metric_value, names)[:200]
         if label and display:
             metrics.append({"label": label, "value": display})
     return {"taxonomy": taxonomy, "metrics": metrics, "sections": _sections(value.get("sections"), names)}
 
 
 def _clean_projection(value, names=None) -> str:
+    value = _RELATIVE_ROUTE.sub("[链接已隐藏]", value) if isinstance(value, str) else value
     return _PROJECTION_ID.sub("[标识已隐藏]", _clean(value, names))
 
 
@@ -397,6 +403,25 @@ def _workspace_for_bindings(workspace: dict, bindings: list[dict]) -> dict:
                                        if all(tuple(key) in keys for key in item["keys"])]}
 
 
+def _topic_variants(value, entry: dict, names=None) -> list[dict]:
+    if entry["kind"] != "topics" or not isinstance(value, list):
+        return []
+    result, seen = [], set()
+    period = entry["start"], entry["end"]
+    for raw in value[:MAX_TOPIC_VARIANTS]:
+        workspace = sanitize_topic_workspace(raw, names)
+        current = workspace["comparison"]["current"] if workspace else None
+        if (current and (current["start"], current["end"]) == period
+                and workspace["topic_id"] not in seen and workspace["topic"]["question"]
+                and workspace["topic"].get("consultation_count", 0) > 0):
+            seen.add(workspace["topic_id"])
+            result.append(workspace)
+        else:
+            # Keep the original ordinal so a rejected member cannot reassign a case.
+            result.append({})
+    return result
+
+
 def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
     anchor = _pinned_anchor(anchor_id)
     primary = _case(cfg, qa_id, anchor) if qa_id is not None else None
@@ -409,8 +434,9 @@ def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
     safe.update(_view(view, names))
     raw_cases = view.get("cases", []) if isinstance(view, dict) else []
     raw_cases = raw_cases if isinstance(raw_cases, list) else []
+    variants = _topic_variants(view.get("topic_variants"), safe, names) if isinstance(view, dict) else []
     candidates = raw_cases[:_MAX_CASES]
-    if qa_id is not None and not any(isinstance(item, dict) and item.get("qa_id") == qa_id for item in candidates):
+    if not variants and qa_id is not None and not any(isinstance(item, dict) and item.get("qa_id") == qa_id for item in candidates):
         if len(candidates) < _MAX_CASES:
             candidates = [*candidates, {"qa_id": qa_id, "anchor_id": anchor_id}]
 
@@ -420,13 +446,19 @@ def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
         if not isinstance(candidate, dict):
             continue
         source = candidate.get("qa_id")
-        if type(source) is not int or source <= 0 or source in seen:
+        if type(source) is not int or source <= 0:
             continue
         pinned = _pinned_anchor(candidate.get("anchor_id"))
+        variant = candidate.get("variant")
+        if variants and (type(variant) is not int or not 0 <= variant < len(variants) or not variants[variant]):
+            continue
+        key = (source, pinned, variant) if variants else source
+        if key in seen:
+            continue
         evidence = _case(cfg, source, pinned, full=True)
         if evidence is None:
             continue
-        seen.add(source)
+        seen.add(key)
         case_names = evidence[3]
         binding = {"qa": source, "anchor": pinned, "fingerprint": evidence[0],
                    "media": list(evidence[4]),
@@ -436,6 +468,8 @@ def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
                    "sections": _sections(candidate.get("sections"), case_names)}
         if safe["kind"] == "topics" and (detail := sanitize_topic_evidence(candidate.get("topic_evidence"), case_names)):
             binding["topic_evidence"] = detail
+        if variants:
+            binding["variant"] = variant
         cases.append(binding)
     total = view.get("total_cases", len(cases)) if isinstance(view, dict) else len(cases)
     total = max(total, len(cases)) if type(total) is int and total >= 0 else len(cases)
@@ -444,12 +478,18 @@ def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
         workspace = sanitize_topic_workspace(view.get("topic_workspace"), names)
         if workspace:
             payload["topic_workspace"] = _workspace_for_bindings(workspace, cases)
+        if variants:
+            payload["topic_variants"] = [
+                _workspace_for_bindings(variant, [case for case in cases if case["variant"] == index]) if variant else {}
+                for index, variant in enumerate(variants)
+            ]
     return payload
 
 
 def build_topic_workspace_upgrade(cfg: Settings, old_payload: dict, *, entry: dict, view: dict) -> dict | None:
     """Prepare an upgrade of one published topic without changing its authorized bindings."""
-    if not isinstance(old_payload, dict) or old_payload.get("v") != 2 or not isinstance(view, dict):
+    if (not isinstance(old_payload, dict) or old_payload.get("v") != 2 or old_payload.get("topic_variants")
+            or not isinstance(view, dict)):
         return None
     old_entry, expected = _entry(old_payload.get("entry"), None), _entry(entry, None)
     if old_entry is None or old_entry != expected or old_entry["kind"] != "topics":
@@ -636,9 +676,9 @@ def _render_case(cfg: Settings, binding: dict, *, token: str, ordinal: int, full
         if found := case[4].get(digest):
             position, _ = found
             case[1][position].setdefault("images", []).append(_image_id(token, ordinal, case[0], digest))
-    return {"title": _clean(binding.get("title"), case[3]),
-            "category": _clean(binding.get("category"), case[3]),
-            "time": _clean(binding.get("time"), case[3]),
+    return {"title": _clean_projection(binding.get("title"), case[3]),
+            "category": _clean_projection(binding.get("category"), case[3]),
+            "time": _clean_projection(binding.get("time"), case[3]),
             "sections": _sections(binding.get("sections"), case[3]),
             "messages": case[1], "scope": case[2]}
 
@@ -661,22 +701,40 @@ def resolve_payload(cfg: Settings, token: str) -> dict | None:
             total = value.get("total_cases", len(bindings))
             if type(total) is not int or total < len(bindings):
                 return None
+        variants = _topic_variants(value.get("topic_variants"), entry)
+        indices = [[] for _ in variants]
         cases, case_details, case_keys = [], [], []
         for ordinal, binding in enumerate(bindings[:_MAX_CASES]):
+            variant = binding.get("variant") if isinstance(binding, dict) else None
+            if variants and (type(variant) is not int or not 0 <= variant < len(variants) or not variants[variant]):
+                continue
             case = _render_case(cfg, binding, token=token, ordinal=ordinal, full=value["v"] == 2)
             if case is None:
                 continue
+            if variants:
+                indices[variant].append(len(cases))
             cases.append(case)
+            for message in case["messages"]:
+                message["text"] = _clean_projection(message["text"])
+                if variants:
+                    message.pop("sender_name", None)
+                elif "sender_name" in message:
+                    message["sender_name"] = _clean_projection(message["sender_name"])
             if entry["kind"] == "topics":
                 for index, message in enumerate(case["messages"]):
                     message["id"] = f"guest-message-{index}"
-                    message["text"] = _clean_projection(message["text"])
                 case_details.append(binding.get("topic_evidence"))
                 case_keys.append((binding["qa"], binding["anchor"]))
         payload = {"entry": entry, "cases": cases, "total_cases": total}
         if entry["kind"] == "topics":
             payload["topic_detail"] = guest_topic.resolve(entry, cases, total, value.get("topic_workspace"),
                                                          case_details, case_keys, _clean_projection)
+        if variants:
+            payload["topic_variants"] = [
+                guest_topic.resolve_variant(entry, variant, index, indices[index], cases,
+                                            case_details, case_keys, _clean_projection)
+                for index, variant in enumerate(variants) if variant
+            ]
         return payload
     except (sqlite3.Error, OSError, ValueError, RecursionError):
         return None

@@ -32,7 +32,13 @@ type GuestEntry = {
   taxonomy?: { primary: string; secondary: string; count?: number }[]
   sections?: GuestSection[]
 }
-export type GuestPayload = { entry: GuestEntry; cases: GuestCase[]; total_cases: number; topic_detail?: TopicDetail }
+export type GuestPayload = {
+  entry: GuestEntry
+  cases: GuestCase[]
+  total_cases: number
+  topic_detail?: TopicDetail
+  topic_variants?: { topic_detail: TopicDetail; case_indices: number[] }[]
+}
 type GuestDetailProps = GuestPayload & { period: string; onOpen: (index: number, locate?: boolean) => void }
 
 const facts = new Set(['电商后台设置', '知汇鸽场景条件', '实际触发结果'])
@@ -211,12 +217,15 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
   </ConversationSection>
 }
 
-export function VocGuestPage({ entry, cases, total_cases, topic_detail }: GuestPayload) {
+export function VocGuestPage({ entry, cases, total_cases, topic_detail, topic_variants }: GuestPayload) {
   const [selection, setSelection] = useState<{ index: number; open: boolean; locate: boolean | string } | null>(null)
+  const [variantIndex, setVariantIndex] = useState(0)
   const trigger = useRef<HTMLElement | null>(null)
   const item = selection && cases[selection.index]
   const caseTime = item?.time || item?.messages.find(message => message.anchor)?.time
   const isSop = entry.kind === 'sops'
+  const activeVariant = topic_variants?.[variantIndex]
+  const topicDetail = activeVariant?.topic_detail ?? topic_detail
   const period = entry.start && entry.end
     ? `统计区间 ${entry.start === entry.end ? entry.start : `${entry.start} 至 ${entry.end}`}` : ''
   const open = (index: number, locate: boolean | string = false) => {
@@ -227,7 +236,7 @@ export function VocGuestPage({ entry, cases, total_cases, topic_detail }: GuestP
     const match = /^guest-case-(\d+)$/.exec(evidence.id)
     if (!match) return
     const index = Number(match[1])
-    if (cases[index]) open(index, messageId)
+    if (cases[index] && (!activeVariant || activeVariant.case_indices.includes(index))) open(index, messageId)
   }
   const sheetProps = {
     open: selection?.open === true,
@@ -244,8 +253,19 @@ export function VocGuestPage({ entry, cases, total_cases, topic_detail }: GuestP
 
   if (!isSop) return <div className="min-h-screen bg-muted/30">
     <main className="mx-auto flex min-h-screen w-full flex-col bg-background sm:max-w-3xl xl:max-w-4xl">
-      <TopicDetailPanel standalone>
-        {topic_detail ? <TopicWorkbench detail={topic_detail} onOpenEvidence={openTopicEvidence} readOnly />
+      <TopicDetailPanel standalone exchangeOnly={Boolean(activeVariant)}>
+        {topic_variants && topic_variants.length > 1 && <div className="mb-4 space-y-2" role="group" aria-label="选择具体问法">
+          <p className="text-sm font-medium">选择具体问法</p>
+          <div className="grid max-h-56 gap-2 overflow-y-auto pr-1">
+            {topic_variants.map(({ topic_detail: { topic } }, index) => <Button key={topic.id} type="button"
+              variant={index === variantIndex ? 'default' : 'outline'} size="sm" aria-pressed={index === variantIndex}
+              className="h-auto min-w-0 justify-start whitespace-normal py-2 text-left [overflow-wrap:anywhere]"
+              onClick={() => { setVariantIndex(index); setSelection(null) }}>
+              {topic.question} · {count(topic.consultation_count ?? 0)} 次咨询
+            </Button>)}
+          </div>
+        </div>}
+        {topicDetail ? <TopicWorkbench key={variantIndex} detail={topicDetail} onOpenEvidence={openTopicEvidence} readOnly exchangeOnly={Boolean(activeVariant)} />
           : <p className="py-8 text-center text-sm text-muted-foreground">当前链接暂无可展示的主题详情。</p>}
       </TopicDetailPanel>
     </main>

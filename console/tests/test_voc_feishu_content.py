@@ -31,11 +31,13 @@ class TestFeishuContent(LocalFixture):
         ]
         filters = {**self.scope, "group": "当前客户群限定", "staff": "当前客服限定", "days": 7}
         ranking = {"items": topics, "comparison": {"current": {"source_pairs": 50, "processed_pairs": 40}},
-                   "guest_anchors": {topic_id(0): [(1001, "private-source-anchor")]}}
+                   "guest_anchors": {topic_id(0): [(1001, "private-source-anchor")]},
+                   "guest_rows": {topic["id"]: [] for topic in topics},
+                   "guest_topics": {topic["id"]: topic for topic in topics}}
         with patch.object(export.voc_engine, "feishu_topics", return_value=ranking) as read, \
                 patch.object(export.guest_evidence, "issue_url") as issue:
             result = export.build_document(self.cfg, filters, "topics")
-        read.assert_called_once_with(self.cfg, {**filters, "days": 0})
+        read.assert_called_once_with(self.cfg, {**filters, "days": 0}, grouped=True)
         issue.assert_not_called()
         self.assertEqual((result["count"], result["total"]), (20, 21))
         first = result["records"][0]
@@ -52,6 +54,34 @@ class TestFeishuContent(LocalFixture):
         self.assertEqual(result["items"][0], {"title": first["title"], "summary": first["summary"]})
         for private in ("现场客服阿兰", "小周店主", "示例内部群", "当前客户群限定", "当前客服限定", "无关会话原话"):
             self.assertNotIn(private, str(result))
+
+    def test_grouped_topic_keeps_member_counts_and_allocates_cases_across_members(self):
+        members = [
+            {"id": topic_id(1), "question": "机器人没回复", "consultation_count": 3},
+            {"id": topic_id(2), "question": "机器人答错了", "consultation_count": 1},
+        ]
+        group = {**members[0], "theme": "回复异常", "members": members}
+
+        def row(topic, qa):
+            return {"topic_id": topic["id"], "data": {},
+                    "source": {"qa_id": qa, "customer_id": "customer", "session_id": str(1 if qa == 4 else qa)}}
+
+        rows = {members[0]["id"]: [row(members[0], qa) for qa in (1, 2, 3)],
+                members[1]["id"]: [row(members[1], 4)]}
+        ranking = {"items": [group], "comparison": {"current": {"source_pairs": 4, "processed_pairs": 4}},
+                   "guest_anchors": {}, "guest_rows": rows, "guest_topics": {item["id"]: item for item in members}}
+        with patch.object(export.voc_engine, "feishu_topics", return_value=ranking), \
+                patch.object(export.voc_topic_insights, "gaps", return_value=[]), \
+                patch.object(export, "_case_projection", side_effect=lambda row, _, **kwargs: row["source"]):
+            document = export.build_document(self.cfg, self.scope, "topics")
+
+        record = document["records"][0]
+        self.assertEqual((record["title"], record["consultations"]), ("回复异常", 3))
+        self.assertIn("机器人答错了", record["detail"])
+        view = record["_guest_view"]
+        self.assertEqual([(item["topic"]["question"], item["topic"]["consultation_count"])
+                          for item in view["topic_variants"]], [("机器人没回复", 3), ("机器人答错了", 1)])
+        self.assertEqual([(case["variant"], case["qa_id"]) for case in view["cases"]], [(0, 1), (1, 4), (0, 2), (0, 3)])
 
     def test_sops_publish_validated_steps_without_failed_attempts_or_chat(self):
         def sop(number, status, result=None):

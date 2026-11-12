@@ -312,6 +312,71 @@ class TestGuestEvidence(LocalFixture):
         self.assertEqual(stale["topic_detail"]["events"], [])
         self.assertEqual(stale["topic_detail"]["workbench"]["knowledge"], [])
 
+    def test_grouped_variants_use_pinned_cases_and_local_ids(self):
+        qa = self._seed_case(controlled=True)
+        reply = "请检查授权并重新同步。"
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("UPDATE raw_message SET content=? WHERE session_id=? AND source_message_id='own-answer'",
+                       (reply, self.source))
+            db.execute("UPDATE qa_pair SET answer=? WHERE qa_id=?", (reply, qa))
+
+        def variant(index, question, count, end=None):
+            return {
+                "topic_id": f"t_{index:024x}",
+                "topic": {"question": question, "theme": "授权", "consultation_count": count},
+                "comparison": {"current": {"start": self.entry["start"], "end": end or self.entry["end"],
+                                            "source_pairs": 9, "processed_pairs": 8}},
+            }
+
+        primary = {"qa_id": qa, "anchor_id": "own-question", "title": "这一条如何处理？", "variant": 0,
+                   "topic_evidence": {"staff_source_verified": True, "source_anchored": True, "source_reply": reply},
+                   "sections": [{"title": "上下文", "lines": ["内部地址 /login?next=/api/voc2/topics"]}]}
+        second = {**primary, "variant": 2, "topic_evidence": {"staff_source_verified": True,
+                                                           "source_anchored": True, "source_reply": "未出现的回复"}}
+        view = {
+            "topic_workspace": variant(1, "授权", 6),
+            "topic_variants": [
+                variant(1, "如何恢复授权？", 3),
+                variant(2, "其他统计范围", 4, end="2026-11-13"),
+                variant(3, "如何同步授权？", 2),
+                variant(4, "如何检查授权？", 1),
+            ],
+            "cases": [primary, primary, {**primary, "variant": 1}, second, {**primary, "variant": False}],
+        }
+        token = self._token(guest.issue_url(self.cfg, qa, "own-question", entry=self.entry, view=view))
+        public = guest.resolve_payload(self.cfg, token)
+        self.assertEqual(public["topic_detail"]["topic"]["consultation_count"], 6)
+        self.assertEqual(len(public["cases"]), 2)
+        first, second, empty = public["topic_variants"]
+        self.assertEqual(first["case_indices"], [0])
+        self.assertEqual(second["case_indices"], [1])
+        self.assertEqual(empty["case_indices"], [])
+        self.assertEqual(first["topic_detail"]["topic"]["consultation_count"], 3)
+        self.assertEqual(second["topic_detail"]["topic"]["consultation_count"], 2)
+        self.assertEqual(first["topic_detail"]["topic"]["id"], "guest-topic-0")
+        self.assertEqual(second["topic_detail"]["topic"]["id"], "guest-topic-2")
+        event, = first["topic_detail"]["events"]
+        self.assertEqual(event["id"], "guest-case-0")
+        self.assertEqual(event["answer"], reply)
+        self.assertEqual(event["source_kind"], "source-anchored")
+        self.assertEqual(second["topic_detail"]["events"][0]["answer"], "")
+        self.assertEqual(second["topic_detail"]["events"][0]["qa_id"], 2)
+        serialized = json.dumps(public, ensure_ascii=False)
+        for private in ("own-question", "其他统计范围", "未出现的回复", "/login", "/api/voc2/topics",
+                        f"t_{1:024x}", f"t_{3:024x}"):
+            self.assertNotIn(private, serialized)
+
+        with closing(guest.sqlite3.connect(guest._registry(self.cfg))) as db, db:
+            stored = json.loads(db.execute("SELECT payload FROM guest_evidence WHERE token=?", (token,)).fetchone()[0])
+            stored["cases"][0]["fingerprint"] = "0" * 64
+            db.execute("UPDATE guest_evidence SET payload=? WHERE token=?", (json.dumps(stored), token))
+        changed = guest.resolve_payload(self.cfg, token)["topic_variants"]
+        self.assertEqual(changed[0]["case_indices"], [])
+        self.assertEqual(changed[0]["topic_detail"]["topic"]["consultation_count"], 3)
+        self.assertEqual(changed[1]["case_indices"], [0])
+        self.assertEqual(changed[1]["topic_detail"]["events"][0]["id"], "guest-case-0")
+        self.assertEqual(changed[1]["topic_detail"]["events"][0]["qa_id"], 1)
+
     def test_legacy_only_shows_exact_pair_and_archived_source_is_unavailable(self):
         qa = self._seed_case(controlled=False)
         token = self._token(guest.issue_url(self.cfg, qa, entry=self.entry))

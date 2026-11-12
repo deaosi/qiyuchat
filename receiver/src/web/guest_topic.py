@@ -153,6 +153,12 @@ def evidence(value, clean) -> dict:
         return {}
     domain, facts = _mapping(value.get("domain")), _mapping(value.get("workbench"))
     diagnosis = _mapping(domain.get("diagnosis"))
+    verified = value.get("staff_source_verified") is True
+    source = {}
+    if type(value.get("source_anchored")) is bool:
+        source["source_anchored"] = value["source_anchored"]
+        if verified and (reply := clean(value.get("source_reply"))[:6000]):
+            source["source_reply"] = reply
     actions = []
     for action in _items(domain.get("actions")):
         action = _mapping(action)
@@ -176,7 +182,8 @@ def evidence(value, clean) -> dict:
         "workbench": {**{key: _refs(facts.get(key), clean) for key in _FACTS},
                       "suspected_report_ready": facts.get("suspected_report_ready") is True},
         "claims": [text for value in _items(value.get("claims")) if (text := clean(value)[:3000])],
-        "staff_source_verified": value.get("staff_source_verified") is True,
+        "staff_source_verified": verified,
+        **source,
     }
 
 
@@ -280,6 +287,8 @@ def _event(case: dict, detail: dict, index: int) -> dict:
         return value
 
     event = add_locations(detail)
+    source_anchored = event.pop("source_anchored", None)
+    source_reply = event.pop("source_reply", "")
     event["domain"]["actions"] = [action for action in event["domain"]["actions"] if action["instruction"]]
     diagnosis = event["domain"]["diagnosis"]
     if not diagnosis["cause"] and not diagnosis["evidence"] and _DIAGNOSES.get(case["category"]) != diagnosis["status"]:
@@ -289,10 +298,17 @@ def _event(case: dict, detail: dict, index: int) -> dict:
     anchor = next((item["id"] for item in messages if item.get("anchor")), "")
     if anchor:
         event["workbench"]["question_message_id"] = anchor
-    quotes = [quote for quote in event.pop("claims") if quote in existing
-              or any(message["role"] == "staff" and quote in message["text"] for message in messages)]
+    staff_messages = [message["text"] for message in messages if message["role"] == "staff"]
+    quotes = [quote for quote in event.pop("claims") if (source_anchored is None and quote in existing)
+              or any(quote in message for message in staff_messages)]
+    reply = "\n".join(quotes)
+    if source_reply and " ".join(source_reply.split()) in " ".join(" ".join(staff_messages).split()):
+        reply = source_reply
+    if (source_anchored and case.get("scope") in ("context", "limited") and anchor
+            and any(message["role"] == "user" and message.get("anchor") and question in message["text"] for message in messages)):
+        event["source_kind"] = "source-anchored"
     return {**event, "id": key, "event_id": key, "qa_id": index + 1,
-            "question": question, "question_quote": question, "answer": "\n".join(quotes),
+            "question": question, "question_quote": question, "answer": reply,
             "asked_at": case["time"] or next((item["time"] for item in messages if item.get("anchor")), ""),
             "claims": [{"role": "staff", "quote": quote, "start": 0, "end": len(quote), "source_refs": []}
                        for quote in quotes]}
@@ -348,7 +364,8 @@ def _public_knowledge(items, events, cases, case_keys) -> list[dict]:
     return result
 
 
-def resolve(entry: dict, cases: list[dict], total: int, value, case_details: list, case_keys: list, clean) -> dict:
+def resolve(entry: dict, cases: list[dict], total: int, value, case_details: list, case_keys: list, clean, *,
+            indices: list[int] | None = None, topic_id: str = "guest-topic") -> dict:
     legacy = _legacy_workspace(entry, total)
     stored = workspace(value, clean)
     topic = {**legacy["topic"], **stored.get("topic", {})}
@@ -357,13 +374,28 @@ def resolve(entry: dict, cases: list[dict], total: int, value, case_details: lis
         topic["consultation_count"] = published
         topic.pop("trend", None)
     topic = {key: value for key, value in topic.items() if value is not None}
-    topic.update(id="guest-topic", question=topic["question"] or entry["title"], samples=[])
+    topic.update(id=topic_id, question=topic["question"] or entry["title"], samples=[])
     comparison = stored.get("comparison") or legacy["comparison"]
     current = comparison.get("current")
     if not current or (current["start"], current["end"]) != (entry["start"], entry["end"]):
         comparison = legacy["comparison"]
-    events = [_event(case, evidence(detail, clean) or _legacy_evidence(case, clean), index)
-              for index, (case, detail) in enumerate(zip(cases, case_details))]
+    selected = range(len(cases)) if indices is None else indices
+    events = [_event(cases[index], evidence(case_details[index], clean) or _legacy_evidence(cases[index], clean), index)
+              for index in selected]
+    cases = [cases[index] for index in selected]
+    case_keys = [case_keys[index] for index in selected]
     knowledge = _public_knowledge(stored.get("knowledge", []), events, cases, case_keys)
     return {"topic": topic, "events": events, "workbench": {"comparison": comparison, "knowledge": knowledge,
                                                               "gaps": stored.get("gaps", legacy["gaps"])}}
+
+
+def resolve_variant(entry: dict, value: dict, ordinal: int, indices: list[int], cases: list[dict],
+                    case_details: list, case_keys: list, clean) -> dict:
+    topic = value["topic"]
+    scoped = {**{field: entry[field] for field in ("kind", "start", "end")},
+              "title": topic["question"], "summary": f'{topic["consultation_count"]} 次咨询', "detail": ""}
+    return {
+        "topic_detail": resolve(scoped, cases, len(indices), value, case_details, case_keys, clean,
+                                indices=indices, topic_id=f"guest-topic-{ordinal}"),
+        "case_indices": indices,
+    }

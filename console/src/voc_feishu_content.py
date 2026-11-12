@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from itertools import islice, zip_longest
 from pathlib import Path
 import re
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -168,7 +169,7 @@ def _workbench_evidence(row: dict, facts: dict) -> dict:
     }
 
 
-def _case_projection(row: dict, names: re.Pattern[str] | None) -> dict:
+def _case_projection(row: dict, names: re.Pattern[str] | None, *, grouped: bool = False) -> dict:
     source, data = row["source"], row["data"]
     domain = data.get("domain", {})
     diagnosis = domain.get("diagnosis", {})
@@ -210,7 +211,12 @@ def _case_projection(row: dict, names: re.Pattern[str] | None) -> dict:
                   and reply[claim["start"]:claim["end"]] == claim.get("quote")]
         if claims:
             sections.append(_section("客服原话" if verified else "回复原话 · 来源未核验", claims, names))
-    detail = guest_evidence.sanitize_topic_evidence(_workbench_evidence(row, facts), names)
+    detail = _workbench_evidence(row, facts)
+    if grouped:
+        detail["source_anchored"] = source.get("source_kind") == "source-anchored"
+        if verified:
+            detail["source_reply"] = source.get("answer", "")
+    detail = guest_evidence.sanitize_topic_evidence(detail, names)
     return {"qa_id": source["qa_id"], "anchor_id": facts.get("question_message_id", ""),
             "title": _public_text(data["question_span"].get("quote"), names) or "会话依据",
             "category": label, "time": _public_text(source.get("asked_at_text"), names),
@@ -218,7 +224,20 @@ def _case_projection(row: dict, names: re.Pattern[str] | None) -> dict:
             "topic_evidence": detail}
 
 
-def _topic_guest_view(topic: dict, rows: list[dict], comparison: dict, names: re.Pattern[str] | None) -> dict:
+def _topic_case_rows(rows: list[dict]) -> list[dict]:
+    candidates = sorted(
+        (row for row in rows if type(row["source"].get("qa_id")) is int and row["source"]["qa_id"] > 0),
+        key=lambda row: (not row["source"].get("_staff_verified"), not row["source"].get("answer"),
+                         -int(row["source"].get("asked_at") or 0), row["source"]["qa_id"]),
+    )
+    by_consultation = {}
+    for row in candidates:
+        by_consultation.setdefault(voc_variants.consultation_key(row), row)
+    return list(by_consultation.values())
+
+
+def _topic_guest_view(topic: dict, rows: list[dict], comparison: dict, names: re.Pattern[str] | None,
+                      *, case_limit: int = _CASE_LIMIT) -> dict:
     metric_fields = (("咨询次数", "consultation_count"), ("独立会话", "session_count"), ("可识别商家", "merchant_count"))
     metrics = [{"label": label, "value": topic[field]} for label, field in metric_fields if type(topic.get(field)) is int]
     platform_text = "、".join(topic.get("platforms", []))
@@ -249,20 +268,37 @@ def _topic_guest_view(topic: dict, rows: list[dict], comparison: dict, names: re
     if gaps:
         sections.append(_section("待补证据", [f"{_GAPS[item['code']]} · {item['count']} 次咨询"
                                              for item in gaps if item["code"] in _GAPS], names))
-    candidates = sorted(
-        (row for row in rows if type(row["source"].get("qa_id")) is int and row["source"]["qa_id"] > 0),
-        key=lambda row: (not row["source"].get("_staff_verified"), not row["source"].get("answer"),
-                         -int(row["source"].get("asked_at") or 0), row["source"]["qa_id"]),
-    )
-    by_consultation = {}
-    for row in candidates:
-        by_consultation.setdefault(voc_variants.consultation_key(row), row)
-    cases = [_case_projection(row, names) for row in list(by_consultation.values())[:_CASE_LIMIT]]
+    candidates = _topic_case_rows(rows)
+    cases = [_case_projection(row, names) for row in candidates[:case_limit]]
     workspace = guest_evidence.sanitize_topic_workspace(
         {"topic_id": topic.get("id"), "topic": topic, "comparison": comparison, "gaps": gaps}, names)
     return {"taxonomy": _topic_taxonomy(topic, rows, names), "metrics": metrics,
             "sections": [section for section in sections if section["lines"]],
-            "cases": cases, "total_cases": len(by_consultation), "topic_workspace": workspace}
+            "cases": cases, "total_cases": len(candidates), "topic_workspace": workspace}
+
+
+def _grouped_guest_view(topic: dict, ranked: dict, names: re.Pattern[str] | None) -> dict:
+    members = topic.get("members") or [topic]
+    comparison = ranked["comparison"]
+    by_topic = ranked["guest_rows"]
+    member_topics = ranked["guest_topics"]
+    rows_by_member = [by_topic[item["id"]] for item in members]
+    all_rows = [row for rows in rows_by_member for row in rows]
+    view = _topic_guest_view(topic, all_rows, comparison, names, case_limit=0)
+    view["total_cases"] = topic["consultation_count"]
+    members = members[:guest_evidence.MAX_TOPIC_VARIANTS]
+    view["topic_variants"] = [
+        guest_evidence.sanitize_topic_workspace(
+            {"topic_id": member["id"], "topic": member_topics[member["id"]], "comparison": comparison}, names)
+        for member in members
+    ]
+    # Allocate representative cases across variants before taking more from any one variant.
+    candidates = [_topic_case_rows(rows) for rows in rows_by_member[:len(members)]]
+    by_round = ((variant, row) for group in zip_longest(*candidates)
+                for variant, row in enumerate(group) if row is not None)
+    view["cases"] = [{**_case_projection(row, names, grouped=True), "variant": variant}
+                     for variant, row in islice(by_round, _CASE_LIMIT)]
+    return view
 
 
 def _attach_guest_knowledge(cfg: Settings, ranked: dict, views: dict, names: re.Pattern[str] | None) -> None:
@@ -369,29 +405,30 @@ def select_topic_anchors(cfg: Settings, pinned_scope: dict, topic_ids: set[str])
 
 
 def _topic_records(cfg: Settings, scope: dict, names: re.Pattern[str] | None) -> tuple[list[dict], str]:
-    ranked = voc_engine.feishu_topics(cfg, scope)
+    ranked = voc_engine.feishu_topics(cfg, scope, grouped=True)
     coverage = ranked["comparison"]["current"]
     source, processed = coverage["source_pairs"], coverage["processed_pairs"]
     if type(source) is not int or type(processed) is not int or not 0 <= processed <= source:
         raise voc.VocError("当前范围的整理进度无法核验。")
-    coverage_text = f"已整理 {processed} / {source} 条问答。咨询次数按各问题下的咨询统计。"
+    coverage_text = f"已整理 {processed} / {source} 条问答。同一会话内，同一客户对同一分类只计一次咨询。"
     records = []
     for topic in ranked["items"]:
         key, count = topic["id"], topic["consultation_count"]
-        title = _public_text(topic["question"], names) or _public_text(topic.get("theme"), names)
+        label = topic.get("theme") if topic.get("members") else topic["question"]
+        title = _public_text(label, names) or _public_text(topic["question"], names)
         if not _TOPIC_ID.fullmatch(key) or not title or type(count) is not int or count <= 0:
             continue
         category = _TOPIC_LABELS.get(topic.get("primary_intent"), "")
         summary = " · ".join(value for value in (f"{count} 次咨询", category) if value)
         detail = f"{summary}。\n统计区间 {scope['start']} 至 {scope['end']}（上海时间）。\n{coverage_text}"
+        questions = [text for item in topic.get("members", []) if (text := _public_text(item["question"], names))]
+        if questions:
+            detail += "\n具体问法\n" + "\n".join(f"• {question}" for question in questions)
         record = {"key": key, "title": title, "summary": summary, "detail": detail,
                   "url": "", "consultations": count, "_guest_anchors": ranked["guest_anchors"].get(key, [])}
         if len(records) < _LIMIT:
-            record["_guest_view"] = _topic_guest_view(ranked.get("guest_topics", {}).get(key, topic),
-                                                      ranked.get("guest_rows", {}).get(key, []),
-                                                      ranked["comparison"], names)
+            record["_guest_view"] = _grouped_guest_view(topic, ranked, names)
         records.append(record)
-    _attach_guest_knowledge(cfg, ranked, {row["key"]: row["_guest_view"] for row in records[:_LIMIT]}, names)
     return records, coverage_text
 
 

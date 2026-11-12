@@ -76,6 +76,47 @@ it('shows the regular topic detail and switches to another scoped case without a
   expect(fetch).not.toHaveBeenCalled()
 })
 
+it('switches concrete questions and opens only the selected guest case on the same page', () => {
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  const detail = payload.topic_detail!
+  const firstQuestion = '如何检查命中条件？'
+  const secondQuestion = '为什么更新后未触发？'
+  const firstAnswer = '请重新测试命中条件。'
+  render(<VocGuestPage {...payload} topic_variants={[
+    { case_indices: [0], topic_detail: {
+      ...detail,
+      topic: { ...detail.topic, id: 'guest-question-0', question: firstQuestion },
+      events: [{ ...first, question_quote: quote, source_kind: 'source-anchored', answer: firstAnswer }],
+    } },
+    { case_indices: [1], topic_detail: {
+      ...detail,
+      topic: { ...detail.topic, id: 'guest-question-1', question: secondQuestion, consultation_count: 1 },
+      events: [{ ...second, question_quote: second.question, source_kind: 'source-anchored' }],
+    } },
+  ]} />)
+  const variants = within(screen.getByRole('group', { name: '选择具体问法' }))
+  expect(variants.getByRole('button', { name: `${firstQuestion} · 2 次咨询` }).getAttribute('aria-pressed')).toBe('true')
+  expect(screen.getByRole('heading', { name: '代表问答' })).toBeTruthy()
+  expect(screen.getByText(quote)).toBeTruthy()
+  expect(screen.getByText(firstAnswer)).toBeTruthy()
+
+  const secondButton = variants.getByRole('button', { name: `${secondQuestion} · 1 次咨询` })
+  fireEvent.click(secondButton)
+  expect(secondButton.getAttribute('aria-pressed')).toBe('true')
+  expect(screen.getByText('1 次咨询 · 已整理 8 / 10 条问答')).toBeTruthy()
+  expect(screen.getByText(second.question)).toBeTruthy()
+  expect(screen.queryByText(firstAnswer)).toBeNull()
+  expect(screen.queryByRole('button', { name: '追问这个问题' })).toBeNull()
+  expect(screen.queryByRole('link')).toBeNull()
+
+  fireEvent.click(screen.getByRole('button', { name: '跳转到会话上下文' }))
+  const sheet = screen.getByRole('dialog', { name: '问答与相关会话上下文' })
+  expect(within(sheet).getByText(second.question)).toBeTruthy()
+  expect(within(sheet).queryByText(firstAnswer)).toBeNull()
+  expect(fetch).not.toHaveBeenCalled()
+})
+
 it('opens the same chat drawer at the exact shared source when locating a quotation', () => {
   render(<VocGuestPage {...payload} />)
   fireEvent.click(screen.getByRole('button', { name: '跳转到原话' }))
