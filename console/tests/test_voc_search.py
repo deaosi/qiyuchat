@@ -53,12 +53,17 @@ class MaterialRetrieval(unittest.TestCase):
 
     def run_search(self, knowledge_items=(), event_items=(), *, query='子账号权限如何重新授权', limit=5, require_staff=False):
         scope = {'days': 7, 'group': 'synthetic-group', 'support_intent': 'configuration_guidance'}
+        rows = [{**item, 'source': {'_staff_verified': item['staff_source_verified']}} for item in event_items]
         with patch.object(engine, 'topics', return_value={'items': self.topics}), \
+             patch.object(engine, '_topic_items', return_value=self.topics), \
              patch.object(engine, 'knowledge', return_value={'items': list(knowledge_items)}) as know, \
-             patch.object(engine, '_events', return_value=list(event_items)) as events, \
+             patch.object(engine, '_events', return_value=rows) as events, \
              patch.object(engine.quality, 'evidence', side_effect=lambda row: row):
             result = engine.search(self.cfg, scope, query, limit, require_staff=require_staff)
-            know.assert_called_once_with(self.cfg, scope)
+            if require_staff:
+                know.assert_not_called()
+            else:
+                know.assert_called_once_with(self.cfg, scope)
             events.assert_called_once_with(self.cfg, scope)
             return result
 

@@ -313,6 +313,12 @@ def _topic_evidence(row: dict) -> dict:
     evidence = quality.evidence(row)
     if row.get("episode_id"):
         evidence["episode_id"] = row["episode_id"]
+        if domain := evidence.get("domain"):
+            # An episode can be derived without a classified legacy event.
+            # Give its public evidence the same shape without changing its proof fingerprint.
+            empty_lists = ("platforms", "modules", "reproduction_context", "prerequisites", "operation_path", "actions", "tags")
+            diagnosis = {"cause_code": "", "cause": None, "evidence": [], **domain["diagnosis"]}
+            evidence["domain"] = {**{key: [] for key in empty_lists}, **domain, "diagnosis": diagnosis}
     return evidence
 
 
@@ -1298,6 +1304,18 @@ def relevant_topics(cfg: Settings, filters: dict, query: str) -> list[dict]:
 def search(cfg: Settings, filters: dict, query: str, limit: int = 5, *, require_staff: bool = False) -> dict:
     if not isinstance(query, str) or not 1 <= len(query.strip()) <= 1000 or type(limit) is not int or not 1 <= limit <= 10:
         raise EngineError("检索词须为 1–1000 字，结果数为 1–10。")
+    if require_staff:
+        rows = _topic_view(cfg, filters)
+        topics_by_id = {item['id']: item for item in _topic_items(cfg, rows)}
+        event_items = [{**_topic_evidence(row), 'topic_id': row['topic_id']} for row in rows
+                       if row['topic_id'] in topics_by_id and row['source'].get('_staff_verified')]
+        events = relevant_items(cfg, event_items, query, kind='event', limit=limit, require_staff=True) if event_items else []
+        if events:
+            selected = [topics_by_id[identity] for identity in dict.fromkeys(row['topic_id'] for row in events)]
+        else:
+            selected = relevant_items(cfg, list(topics_by_id.values()), query, kind='topic', limit=limit)
+        return {"topics": selected, "knowledge": [], "events": events}
+
     candidates = topics(cfg, filters)["items"]
     if not candidates:
         return {"topics": [], "knowledge": [], "events": []}
@@ -1319,7 +1337,7 @@ def search(cfg: Settings, filters: dict, query: str, limit: int = 5, *, require_
     know = relevant_items(cfg, [item for item in knowledge(cfg, filters)['items'] if topic_ids(item)],
                           query, kind='knowledge', limit=limit)
     event_items = [{**_topic_evidence(row), 'topic_id': row['topic_id']} for row in rows]
-    events = relevant_items(cfg, event_items, query, kind='event', limit=limit, require_staff=require_staff)
+    events = relevant_items(cfg, event_items, query, kind='event', limit=limit)
     selected = relevant_items(cfg, candidates, query, kind='topic')
     # A precise answer can be relevant when the broad topic title is not.
     material_scores = {}

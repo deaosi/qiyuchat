@@ -116,6 +116,20 @@ class TestEpisodeProjection(unittest.TestCase):
         self.assertEqual(engine.topics(self.cfg, {"q": "还是没有触发"})["items"], [])
         self.assertEqual(engine.topic_detail(self.cfg, {"q": "还是没有触发"}, self.old)["events"][0]["id"], "i-2")
 
+    def test_episode_without_legacy_classification_exposes_complete_evidence_shape(self):
+        self.legacy()
+        self.assertEqual(live.run(self.cfg, max_calls=1, max_tokens=200_000, extract=self.extract)["assigned"], 1)
+        with assets.connection(engine.path(self.cfg), write=True) as conn, assets.transaction(conn):
+            conn.execute("DELETE FROM v2_intent WHERE qa_id IN (1,2)")
+        [row] = [item for item in engine._topic_view(self.cfg, {}) if item.get("episode_id")]
+        self.assertNotIn("actions", row["data"]["domain"])
+        event = engine.event_detail(self.cfg, {}, row["id"])["event"]
+        self.assertEqual(event["domain"]["diagnosis"], {"status": "reported", "cause_code": "", "cause": None, "evidence": []})
+        self.assertEqual(event["domain"]["fragment_role"], "request")
+        self.assertTrue(all(isinstance(event["domain"][key], list) for key in (
+            "platforms", "modules", "reproduction_context", "prerequisites", "operation_path", "actions", "tags")))
+        self.assertEqual(event["source_fingerprint"], row["source"]["_fingerprint"])
+
     def test_followup_in_same_qa_can_fold_without_hiding_other_intents(self):
         self.legacy(same_qa=True)
         self.assertEqual(live.run(self.cfg, max_calls=1, max_tokens=200_000, extract=self.extract)["assigned"], 1)
