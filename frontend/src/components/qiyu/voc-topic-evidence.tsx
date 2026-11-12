@@ -76,15 +76,17 @@ function DomainEvidence({ domain }: { domain?: Domain }) {
   </div>
 }
 
-export function OriginalExchange({ item }: { item: Evidence }) {
+export function OriginalExchange({ item, exactQuestion = false }: { item: Evidence; exactQuestion?: boolean }) {
   const claims = [...new Set(item.claims.filter(claim => claim.role === 'staff').map(claim => claim.quote.trim()).filter(Boolean))]
   const reply = item.staff_source_verified ? item.answer.trim() || claims.join('\n') : ''
   const missing = item.answer.trim() || claims.length
     ? '回复来源尚未核验，请查看会话上下文确认。'
     : '当前问答片段未提取到客服回复，请查看会话上下文。'
+  const question = exactQuestion ? item.question_quote?.trim() : item.question || item.question_quote
+  const questionLabel = exactQuestion && item.source_kind !== 'source-anchored' ? '会话片段（发言人待核对）' : '客户问题原文'
   return <div className="space-y-3 rounded-lg border bg-muted/20 p-4 text-sm">
-    <div className="space-y-1"><h5 className="font-medium">客户问题原文</h5>
-      <p className="whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]">{item.question || item.question_quote || '未记录咨询原文'}</p></div>
+    <div className="space-y-1"><h5 className="font-medium">{questionLabel}</h5>
+      <p className="whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]">{question || (exactQuestion ? '未提取到当前会话片段，请查看会话上下文。' : '未提取到当前客户问题原文，请查看会话上下文。')}</p></div>
     <div className="space-y-1"><h5 className="font-medium">客服回复原文</h5>
       {reply && <p className="text-xs text-muted-foreground">同一问答中的原始回复，可能包含其他咨询内容。</p>}
       <p className={`whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]${reply ? '' : ' text-muted-foreground'}`}>{reply || missing}</p></div>
@@ -108,7 +110,7 @@ export function EvidenceList({ evidence, onOpenEvidence, onSelectCase, readOnly 
           {item.qa_id && <Button variant="ghost" size="xs" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文 {!exchangeOnly && <ArrowUpRight />}</Button>}
         </div>
       </div>
-      <div className="mt-2"><OriginalExchange item={item} /></div>
+      <div className="mt-2"><OriginalExchange item={item} exactQuestion={exchangeOnly} /></div>
       {!exchangeOnly && <DomainEvidence domain={item.domain} />}
     </div>
   })}</div>

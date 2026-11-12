@@ -203,6 +203,23 @@ export function TopicDetailPanel({ standalone = false, exchangeOnly = false, chi
   </>
 }
 
+function distinctQuestionCases(events: Evidence[]) {
+  const cases = new Map<string, Evidence>()
+  const quality = (item: Evidence) => {
+    const verified = item.staff_source_verified && Boolean(item.answer.trim())
+    const anchored = item.source_kind === 'source-anchored'
+    return Number(verified) * 4 + Number(anchored) * 2 + Number(Boolean(item.question_quote?.trim()))
+  }
+  for (const item of events) {
+    const id = typeof item.qa_id === 'number' || typeof item.qa_id === 'string' && /^\d+$/.test(item.qa_id) ? Number(item.qa_id) : NaN
+    const key = Number.isSafeInteger(id) && id > 0 ? `qa:${id}` : `event:${item.id}`
+    const previous = cases.get(key)
+    if (!previous) { cases.set(key, item); continue }
+    if (quality(item) > quality(previous)) cases.set(key, item)
+  }
+  return [...cases.values()]
+}
+
 export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = false, exchangeOnly = false }: {
   detail: TopicDetail
   onOpenEvidence: OpenTopicEvidence
@@ -210,13 +227,16 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
   readOnly?: boolean
   exchangeOnly?: boolean
 }) {
-  const { topic, events, workbench } = detail
+  const { topic, workbench } = detail
+  const events = exchangeOnly ? distinctQuestionCases(detail.events) : detail.events
   const [caseId, setCaseId] = useState<string | null>(null)
   const [evidenceLimit, setEvidenceLimit] = useState(8)
   const caseHeading = useRef<HTMLHeadingElement>(null)
   const title = topic.theme.trim() || topic.question
   const trend = trendBadgeText(topic.trend)
-  const representative = (exchangeOnly ? events.find(item => item.staff_source_verified && item.answer.trim()) : undefined)
+  const representative = (exchangeOnly ? events.find(item => item.source_kind === 'source-anchored' && item.staff_source_verified && item.answer.trim())
+    ?? events.find(item => item.staff_source_verified && item.answer.trim())
+    ?? events.find(item => item.source_kind === 'source-anchored') : undefined)
     ?? events.find(item => item.workbench?.suspected_report_ready)
     ?? events.find(item => item.staff_source_verified && confirmed.has(item.domain?.diagnosis.status ?? ''))
     ?? events.find(item => item.staff_source_verified)
@@ -238,7 +258,7 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
     {workbench && activeCase && <section className="space-y-3">
       <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">{exchangeOnly ? (caseId ? '当前问答' : '代表问答') : `处理判断 · ${caseId ? '当前案例' : '代表案例'}`}</h4>
       {exchangeOnly ? <DecisionCaseCard metadata={[activeCase.customer_name || '匿名商家', displayTime(activeCase.asked_at)].filter(Boolean).join(' · ')}
-        intro={<OriginalExchange item={activeCase} />} facts={[]}
+        intro={<OriginalExchange item={activeCase} exactQuestion />} facts={[]}
         action={activeCase.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenEvidence(activeCase, questionAnchor(activeCase))}>查看会话上下文</Button>} />
         : <DecisionCase item={activeCase} title={title} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />}
       {!exchangeOnly && gaps.length > 0 && <div className="space-y-2 rounded-lg border bg-muted/25 p-3">
