@@ -1,4 +1,4 @@
-import { ArrowUpRight, Files, Layers3, MessageSquareText, UsersRound } from 'lucide-react'
+import { ArrowUpRight, ContactRound, Files, MessageSquareText, UsersRound } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import type { SummaryData } from '@/lib/api'
@@ -8,9 +8,9 @@ export function QiyuSectionCards({ summary, rangeLabel, loading = false, onNavig
   summary: SummaryData | null; rangeLabel: string; loading?: boolean; onNavigate: (page: string) => void
 }) {
   const items = [
-    { title: '有效问答', value: summary?.qa_pair, icon: Files, badge: rangeLabel, footer: `覆盖 ${summary?.group_count ?? '—'} 个客户群`, note: '当前筛选内抽取出的有效问答', page: 'pairs' },
-    { title: '咨询客户', value: summary?.customer_count, icon: UsersRound, badge: '按 ID 去重', footer: '查看客户的咨询与历史问题', note: '匿名客户按服务端口径统计', page: 'customers' },
-    { title: '问题簇', value: summary?.cluster_count, icon: Layers3, badge: '相似问法归并', footer: summary?.top[0]?.question || '按相似问法整理问题', note: '保留原话，便于逐条追溯与复核', page: 'clusters' },
+    { title: '有效问答', value: summary?.qa_pair, icon: Files, badge: rangeLabel, footer: '查看问答明细', note: '当前筛选内抽取出的有效问答', page: 'pairs' },
+    { title: '咨询客户', value: summary?.customer_count, icon: ContactRound, badge: '按 ID 去重', footer: '查看客户的咨询与历史问题', note: '匿名客户按服务端口径统计', page: 'customers' },
+    { title: '咨询客户群', value: summary?.group_count, icon: UsersRound, badge: '按群汇总', footer: '查看群内高频问题', note: '可追溯群内客户与问答记录', page: 'groups' },
     { title: '未发现回复', value: summary?.unanswered, icon: MessageSquareText, badge: summary ? `${summary.qa_pair ? (summary.unanswered / summary.qa_pair * 100).toFixed(1) : '0.0'}%` : '—', footer: '结合会话上下文进一步复核', note: '答案为空，不能直接判断是否已解决', page: 'unanswered' },
   ]
   return <div className="grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4" aria-busy={loading}>
