@@ -3,15 +3,16 @@ import { ArrowUpRight, ChevronLeft, ChevronRight, Copy, Search } from 'lucide-re
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
-import { normalizePair, type ApiFilters, type VocSop, type VocSopEvidence, type VocSopStep } from '@/lib/api'
+import { normalizePair, type ApiFilters, type VocPlaybook, type VocSop, type VocSopEvidence, type VocSopStep } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { QueryPanel, VocKnowledgeWorkspace, type OpenEvidencePair } from './voc-next-workspace'
 import { displayTime } from './voc-topic-evidence'
+import { VocPlaybookResults } from './voc-pilot-workspaces'
 
 type Props = { filters: ApiFilters; refreshKey?: number; onOpenPair: OpenEvidencePair }
 const statuses: Record<VocSop['status'], string> = { verified: '效果已验证', guidance: '已核验指引', incomplete: '待补证据' }
@@ -228,9 +229,26 @@ export function VocSopWorkspace({ filters, refreshKey = 0, onOpenPair }: Props) 
 }
 
 export function VocKnowledgeLibrary(props: Props) {
-  return <Tabs defaultValue="sop" className="gap-4">
-    <TabsList aria-label="知识库内容"><TabsTrigger value="sop">处理 SOP</TabsTrigger><TabsTrigger value="answers">可复用答案</TabsTrigger></TabsList>
+  return <Tabs defaultValue="playbooks" className="gap-4">
+    <TabsList aria-label="知识库内容">
+      <TabsTrigger value="playbooks">处理手册</TabsTrigger><TabsTrigger value="sop">处理 SOP</TabsTrigger><TabsTrigger value="answers">可复用答案</TabsTrigger>
+    </TabsList>
+    <TabsContent value="playbooks"><VocPlaybookWorkspace {...props} /></TabsContent>
     <TabsContent value="sop"><VocSopWorkspace {...props} /></TabsContent>
     <TabsContent value="answers"><VocKnowledgeWorkspace {...props} /></TabsContent>
   </Tabs>
+}
+
+function VocPlaybookWorkspace({ filters, refreshKey = 0, onOpenPair }: Props) {
+  const [revision, setRevision] = useState(0)
+  const key = refreshKey + revision
+  const playbooks = useApi<{ items: VocPlaybook[]; total: number }>('voc2/playbooks', filters, key)
+  const refresh = useCallback(() => setRevision(value => value + 1), [])
+  useBackgroundRefresh(refresh, false, playbooks.loading || playbooks.refreshing, key)
+  return <Card className="gap-3">
+    <CardHeader><CardTitle>问题处理手册</CardTitle><CardDescription>查看排查决策、分支条件和有会话证据支持的操作步骤。</CardDescription></CardHeader>
+    <CardContent><QueryPanel hasData={playbooks.data !== null} loading={playbooks.loading} error={playbooks.error} retry={playbooks.retry}>
+      <VocPlaybookResults items={playbooks.data?.items ?? []} onOpenPair={onOpenPair} />
+    </QueryPanel></CardContent>
+  </Card>
 }

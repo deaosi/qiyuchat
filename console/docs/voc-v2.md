@@ -393,3 +393,19 @@ its known conditions. A verified effect requires an explicit customer report
 that covers the actual action path and has no conflicting follow-up. Other
 cases show their known steps and missing evidence. SOP reads use the existing
 episode output and do not call a model or change the business source.
+
+## Actionable issues and handling playbooks
+
+`GET /api/voc2/issue-pilot` builds scoped product issues from the current event
+and episode view. Specific configuration and reply patterns improve known
+workflows, while other grounded tasks and symptoms can form their own issues.
+Routing labels do not limit which issues can be represented. A result with
+unknown applicability remains distinct from a fully scoped issue, and inferred
+causes never stand in for source evidence. Consultation counts and identified
+merchant counts are separate.
+
+`GET /api/voc2/playbooks` distinguishes investigation from a sourced procedure.
+Reusable branches require bound staff instructions, applicable conditions and a
+post-action check. Compatible evidence can corroborate a branch across cases.
+The requested period controls which citations are returned; conflicting cases
+outside it can still withhold reuse. These read paths do not call the gateway.

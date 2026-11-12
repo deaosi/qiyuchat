@@ -52,6 +52,8 @@ beforeEach(() => {
       'voc2/topic': { topic, events: [evidence] },
       'voc2/knowledge': { items: knowledge, total: knowledge.length },
       'voc2/sops': { items: [], total: 0 },
+      'voc2/playbooks': { items: [], total: 0 },
+      'voc2/issue-pilot': { items: [], total: 0, coverage: { source_events: 0, matched_consultations: 0, classified_consultations: 0, needs_context: 0 } },
     }[endpoint] ?? null,
     loading: false, refreshing: false, error: null, retry: vi.fn(),
   }))
@@ -112,7 +114,7 @@ describe('VOC navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
     expect(window.location.hash).toBe('#voc-next')
     expect(screen.getByRole('heading', { name: '沉淀知识库' })).toBeTruthy()
-    expect(screen.getByRole('tab', { name: '处理 SOP' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('tab', { name: '处理手册' }).getAttribute('aria-selected')).toBe('true')
     openReusableAnswers()
     expect(screen.getByText(reusable.question)).toBeTruthy()
     expect(screen.getByText(/现在触发了.*客户反馈/)).toBeTruthy()
@@ -200,6 +202,9 @@ describe('VOC navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
     expect(screen.getByRole('combobox', { name: '客服筛选' })).toBe(staffFilter)
+    const playbookRequest = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/playbooks')
+    expect(playbookRequest?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
+    fireEvent.mouseDown(screen.getByRole('tab', { name: '处理 SOP' }), { button: 0 })
     const sopRequest = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/sops')
     expect(sopRequest?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
     openReusableAnswers()

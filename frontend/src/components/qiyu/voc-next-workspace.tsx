@@ -3,7 +3,7 @@ import { ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, CircleAlert, Copy, L
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
-import { apiPost, type ApiFilters, type VocConversationVerification, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
+import { apiPost, type ApiFilters, type VocConversationVerification, type VocIssuePilot, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -16,6 +16,7 @@ import { Progress } from '@/components/ui/progress'
 import { LoadingMark, LoadingState, LoadingValue } from './loading-state'
 import { diagnosisLabels, displayTime, intentLabels, KnowledgeContent, knowledgeReuseLevel } from './voc-topic-evidence'
 import { copyKnowledge, TopicWorkbench, TrendComparison, trendBadgeText, trendLabels, type TrendComparisonData, type TrendFilter, type TopicTrend } from './voc-topic-detail'
+import { VocIssuePilotResults } from './voc-pilot-workspaces'
 
 export type PrimaryIntent = 'configuration_guidance' | 'functional_anomaly' | 'unclear'
 export type DiagnosisStatus = 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
@@ -72,6 +73,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const offset = page * topicPageSize
   const key = refreshKey + revision
   const summary = useApi<Summary>('voc2/summary', resultFilters, key)
+  const pilot = useApi<VocIssuePilot>('voc2/issue-pilot', filters, key)
   const topics = useApi<TopicList>('voc2/topics', { ...resultFilters, workbench: 1, trend, limit: topicPageSize, offset }, key)
   const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, workbench: 1, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
   const comparison = topics.data?.comparison
@@ -118,6 +120,15 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
         <Button onClick={() => setRunOpen(true)} disabled={active(job)}>{active(job) ? <LoadingMark /> : <Sparkles />}{active(job) ? '正在整理' : 'AI 整理当前范围'}</Button>
       </div>
     </div>
+    <Card className="gap-3" aria-labelledby="voc-issue-pilot-heading">
+      <CardHeader>
+        <CardTitle id="voc-issue-pilot-heading" role="heading" aria-level={2}>产品问题清单</CardTitle>
+        <CardDescription>按上方时间、客户群和客服筛选，查看影响范围、处理进度和会话依据。</CardDescription>
+      </CardHeader>
+      <CardContent><QueryPanel hasData={pilot.data !== null} loading={pilot.loading} error={pilot.error} retry={pilot.retry}>
+        {pilot.data && <VocIssuePilotResults data={pilot.data} onOpenPair={onOpenPair} />}
+      </QueryPanel></CardContent>
+    </Card>
     <div className="flex flex-wrap items-center gap-3">
       <Select value={supportIntent} onValueChange={value => setSupportIntent(value as NonNullable<ApiFilters['support_intent']>)}>
         <SelectTrigger className="w-full sm:w-[205px]" aria-label="支持类型"><SelectValue /></SelectTrigger>

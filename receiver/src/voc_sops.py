@@ -18,7 +18,8 @@ _COMMAND = r"(?:^|[，,；;]|(?:请|建议|先|再|然后|接着|并|之后))\s*
 _CHECK = re.compile(_COMMAND + r"(?:检查|核对|查看|确认|比对).{0,22}(?:开关|权限|状态|规则|设置|版本|配置|参数|日志|场景|账号|记录|选项)")
 _RETEST = re.compile(_COMMAND + r"(?:复测|重新测试|再测试|测试|重试|再试|试一下|验证是否|看是否)")
 _CHANGE = re.compile(_COMMAND + r"(?:开启|启用|关闭|禁用|保存|设置|调整|修改|改成|重启|刷新|更新|升级|安装|卸载|绑定|解绑|授权|同步|提交|切换|重新登录|重新登陆|导入|导出|移除|删除)")
-_RESULT_CHECK = re.compile(r"(?:确认|核对|检查|查看|验证|看).{0,10}(?:是否|有没有|能否|可否|状态|结果)")
+_RETEST_TARGET = re.compile(r"(?:是否|能否|能不能|有没有|可否)[^。！？!?\s]+|触发|命中|回复|生效|同步|恢复|正常|成功|登录|授权|下发|送达")
+_INLINE_RETEST = re.compile(r"(?:后|然后|再|接着|并)\s*(?:请您?)?((?:复测|重新测试|再测试|测试|重试|再试|试一下|验证是否|看是否).+)")
 _ESCALATE = re.compile(_COMMAND + r"(?:联系(?:技术|客服|管理员)|提交(?:工单|故障单)|转交(?:技术|研发))")
 _STAFF_SELF_ACTION = re.compile(r"^(?:我(?:们)?|这边|技术|同事|工程师).{0,18}(?:已经|已|刚刚|帮您|帮你|会|将|正在|先(?:帮|查|看))")
 _PERSONAL_OR_MEDIA = re.compile(r"\[(?:链接|名称|图片|文件|手机号|电话|邮箱|身份证|联系方式)\]|https?://")
@@ -91,6 +92,24 @@ def _phase(quote: str, question: str) -> str:
     if _ESCALATE.search(quote):
         return "escalation"
     return ""
+
+
+def _post_retest(steps: list[dict], *, require_action: bool = False) -> tuple[int, str] | None:
+    actions = [index for index, step in enumerate(steps) if step["phase"] == "action"]
+    prior = actions or ([] if require_action else [index for index, step in enumerate(steps) if step["phase"] == "diagnosis"])
+    if not prior:
+        return None
+    last = prior[-1]
+    if actions:
+        text = steps[last]["evidence"]["quote"]
+        for inline in _INLINE_RETEST.finditer(text):
+            if _RETEST_TARGET.search(inline[1]):
+                return last, inline[1]
+    for index in range(last + 1, len(steps)):
+        step = steps[index]
+        if step["phase"] == "retest" and _RETEST_TARGET.search(step["evidence"]["quote"]):
+            return index, step["evidence"]["quote"]
+    return None
 
 
 def _procedure_confirmed(actions: list[tuple], feedback: str) -> bool:
@@ -193,8 +212,7 @@ def compile_case(episode: dict, messages: list[dict], qa_id: int) -> dict | None
     path = [step for step in steps if step[0] > last_failure and step[2]["phase"] != "escalation"]
     actions = [step for step in path if step[2]["phase"] == "action"]
     concrete = any(step["phase"] in ("action", "diagnosis") for _, _, step in path)
-    has_retest = any(step["phase"] == "retest" or _RETEST.search(step["evidence"]["quote"])
-                     or _RESULT_CHECK.search(step["evidence"]["quote"]) for _, _, step in path)
+    has_retest = _post_retest([step for _, _, step in path]) is not None
     if not actions:
         missing.append("action")
     if not any(step["phase"] == "diagnosis" for _, _, step in steps):

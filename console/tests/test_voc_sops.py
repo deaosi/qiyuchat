@@ -57,6 +57,16 @@ class TestVocSops(unittest.TestCase):
         self.assertEqual(incomplete["status"], "incomplete")
         self.assertIn("retest", incomplete["missing"])
 
+    def test_preflight_check_is_not_the_post_change_retest(self):
+        for turns in ([self.check], [self.check, self.fix], [self.check, self.fix, turn("t", "staff", "请再试一下。", 6)]):
+            result = self.compile(turns)
+            self.assertEqual(result["status"], "incomplete")
+            self.assertIn("retest", result["missing"])
+        inline = {**self.fix, "text": "请调整退款场景的触发条件并保存，然后重新测试退款场景是否触发。"}
+        result = self.compile([self.check, inline])
+        self.assertEqual(result["status"], "guidance")
+        self.assertNotIn("retest", result["missing"])
+
     def test_separate_staff_actions_need_explicit_evidence_for_each_operation(self):
         change = turn("x", "staff", "请开启退款场景开关。", 4)
         save = turn("y", "staff", "请保存退款场景配置。", 5)

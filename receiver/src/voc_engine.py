@@ -682,6 +682,72 @@ def sops(cfg: Settings, filters: dict, identity: str = "") -> dict:
     return {"items": items, "total": len(items)}
 
 
+def _read_issue_pilot(cfg: Settings, filters: dict) -> dict:
+    from . import voc_issue_pilot
+
+    if variants.mode(cfg) != "zhihuige" or cfg.runtime.mock:
+        return voc_issue_pilot.build([])
+    source = _sources(cfg, episode_projection.source_filters(filters), identify_merchants=True)
+    return voc_issue_pilot.build(_topic_view(cfg, filters, current=source))
+
+
+def issue_pilot(cfg: Settings, filters: dict) -> dict:
+    result = _read_issue_pilot(cfg, filters)
+    return {**result, "items": [{key: value for key, value in item.items() if not key.startswith("_")}
+                                for item in result["items"]]}
+
+
+def _playbook_branch_key(branch: dict) -> tuple:
+    if branch.get("id"):
+        return (branch["id"],)
+    return branch["condition"], tuple(step["text"] for step in branch["steps"]), branch["retest"]
+
+
+def _recheck_playbook_branches(scoped: dict, global_result: dict) -> dict:
+    """Keep evidence within the requested view without hiding counterevidence."""
+    global_items = {item["id"]: item for item in global_result["items"]}
+    updated = []
+    for item in scoped["items"]:
+        if not item["branches"]:
+            updated.append(item)
+            continue
+        global_item = global_items.get(item["id"], {})
+        current_branches = {_playbook_branch_key(branch): branch for branch in global_item.get("branches", [])}
+        retained = []
+        for branch in item["branches"]:
+            current = current_branches.get(_playbook_branch_key(branch))
+            if current is None:
+                continue
+            if branch.get("status") == "verified" and current.get("status") != "verified":
+                branch = {**branch, "status": "guidance", "result_evidence": []}
+            retained.append(branch)
+        missing = list(item["missing"])
+        if len(retained) < len(item["branches"]):
+            reason = "conflicting_case" if "conflicting_case" in global_item.get("missing", []) else "case_evidence"
+            if reason not in missing:
+                missing.append(reason)
+        status = ("verified" if retained and all(branch.get("status") == "verified" for branch in retained)
+                  else "guidance" if retained else "investigation")
+        if status != "verified" and "verified_outcome" not in missing:
+            missing.append("verified_outcome")
+        updated.append({**item, "branches": retained, "status": status, "missing": missing})
+    return {**scoped, "items": updated}
+
+
+def playbooks(cfg: Settings, filters: dict) -> dict:
+    from . import voc_playbooks
+
+    issues = _read_issue_pilot(cfg, filters)["items"]
+    if not issues:
+        return {"items": [], "total": 0}
+    result = voc_playbooks.build(issues, sops(cfg, filters)["items"])
+    if any(item["branches"] for item in result["items"]) and any(
+            value not in (None, "", 0, "all", "local") for value in filters.values()):
+        all_issues = _read_issue_pilot(cfg, {})["items"]
+        result = _recheck_playbook_branches(result, voc_playbooks.build(all_issues, sops(cfg, {})["items"]))
+    return result
+
+
 def exceptions(cfg: Settings, filters: dict) -> dict:
     current = _sources(cfg, filters)
     rows = _events(cfg, filters, _current=current)

@@ -10,6 +10,7 @@ const topics = Array.from({ length: 45 }, (_, index) => ({
   consultation_count: 45 - index, event_count: 45 - index, customer_count: 1, session_count: 1,
 }))
 const summary = { source_pairs: 45, total_events: 45, topic_count: 45, coverage: { processed_pairs: 45, pending_pairs: 0 }, semantics: { ready: true }, latest_job: null }
+const pilot = { items: [], total: 0, coverage: { source_events: 45, matched_consultations: 0, classified_consultations: 0, needs_context: 0 } }
 const comparison = {
   current: { start: '2026-11-05', end: '2026-11-11', source_pairs: 12, processed_pairs: 10 },
   previous: { start: '2026-10-29', end: '2026-11-04', source_pairs: 10, processed_pairs: 8 },
@@ -29,6 +30,7 @@ beforeEach(() => {
   total = 45
   secondPage = undefined
   vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+    if (name === 'voc2/issue-pilot') return pilot
     if (name === 'voc2/topics') return filters.offset === 20 && secondPage ? secondPage : pageResult(filters.offset ?? 0, filters.limit ?? total)
     if (name === 'voc2/topic') return { topic: topics.find(topic => topic.id === filters.id), events: [] }
     return summary
@@ -110,6 +112,7 @@ describe('VOC frequency ranking pagination', () => {
   it('opens all trend filters when the comparison range is unavailable and resets pagination', async () => {
     const unbounded = { ...comparison, current: { ...comparison.current, start: '', end: '' }, previous: null, comparable: false }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+      if (name === 'voc2/issue-pilot') return pilot
       if (name !== 'voc2/topics') return summary
       return filters.trend === 'all'
         ? { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison: unbounded }
@@ -136,6 +139,7 @@ describe('VOC frequency ranking pagination', () => {
   it('explains which period lacks data when a dated trend filter is empty', async () => {
     const unavailable = { ...comparison, previous: { ...comparison.previous, source_pairs: 0, processed_pairs: 0 }, comparable: false }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+      if (name === 'voc2/issue-pilot') return pilot
       if (name !== 'voc2/topics') return summary
       return filters.trend === 'all'
         ? { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison: unavailable }
@@ -182,6 +186,7 @@ describe('VOC frequency ranking pagination', () => {
     const reference: Knowledge = { ...reusable, id: 'knowledge-2', question: '仅参考的历史步骤', reuse_level: 'reference' }
     const blocked: Knowledge = { ...reusable, id: 'knowledge-3', question: '存在冲突的历史步骤', reuse_level: 'blocked' }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
+      if (name === 'voc2/issue-pilot') return pilot
       if (name === 'voc2/topics') return filters.trend === 'rising' ? { comparison, items: [topic], total: 1 }
         : { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison }
       if (name === 'voc2/topic') return { topic, events: [evidence], workbench: { comparison, knowledge: [reusable, reference, blocked], gaps: [{ code: 'closure_unconfirmed', count: 2 }] } }

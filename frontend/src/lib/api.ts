@@ -182,6 +182,52 @@ export type VocSop = {
   missing: string[]
 }
 
+const vocPilotFamilies = ['no_reply', 'scenario_config', 'configuration', 'anomaly', 'platform_limit', 'other'] as const
+const vocPilotEvidenceStatuses = ['reported', 'staff_investigated', 'cause_confirmed'] as const
+const vocPlaybookStatuses = ['investigation', 'guidance', 'verified'] as const
+export type VocPilotFamily = typeof vocPilotFamilies[number]
+export type VocPilotEvidence = { qa_id: number; message_id: string; quote: string; ts: number }
+export type VocPilotIssue = {
+  id: string
+  family: VocPilotFamily
+  title: string
+  platform: string
+  module: string
+  condition: string
+  scope_status?: 'needs_context' | 'scoped'
+  evidence_status: typeof vocPilotEvidenceStatuses[number]
+  impact: { consultations: number; sessions: number; merchants: number; unidentified_sessions: number }
+  next: { owner: string; action: string; missing: string[] }
+  cases: (VocPilotEvidence & { anchored: boolean; has_reply: boolean })[]
+}
+export type VocIssuePilot = {
+  items: VocPilotIssue[]
+  total: number
+  coverage: { source_events: number; matched_consultations: number; classified_consultations: number; needs_context: number }
+}
+export type VocPlaybookBranch = {
+  id?: string
+  condition: string
+  steps: { text: string; evidence: VocPilotEvidence[] }[]
+  retest: string
+  escalation: string
+  status?: 'guidance' | 'verified'
+  case_count?: number
+  retest_evidence?: VocPilotEvidence[]
+  escalation_evidence?: VocPilotEvidence[]
+  condition_evidence?: VocPilotEvidence[]
+  result_evidence?: VocPilotEvidence[]
+}
+export type VocPlaybook = Pick<VocPilotIssue, 'id' | 'family' | 'title' | 'platform' | 'module' | 'condition'> & {
+  issue_id: string
+  status: typeof vocPlaybookStatuses[number]
+  checked_cases: number
+  triage: { check: string; when_yes: string; when_no: string }[]
+  branches: VocPlaybookBranch[]
+  missing: string[]
+  evidence: VocPilotEvidence[]
+}
+
 function validateVoc2Response(name: string, data: unknown, workbench = false): void {
   if (!name.startsWith('voc2/')) return
   const messageRefs = (v: unknown) => Array.isArray(v) && v.every(item => isRecord(item)
@@ -247,6 +293,37 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
       && vocSopOutcomes.some(outcome => outcome === step.outcome) && sopEvidence(step.evidence)
       && (step.feedback === undefined || sopEvidence(step.feedback)))
     && (v.result === null || sopEvidence(v.result)) && isStringArray(v.missing)
+  const pilotBase = (v: Record<string, unknown>) => typeof v.id === 'string' && Boolean(v.id.trim())
+    && vocPilotFamilies.some(family => family === v.family)
+    && typeof v.title === 'string' && Boolean(v.title.trim())
+    && ['platform', 'module', 'condition'].every(key => typeof v[key] === 'string')
+  const pilotEvidence = (v: unknown, needsAnchor = true) => isRecord(v) && isCount(v.qa_id) && v.qa_id > 0
+    && typeof v.message_id === 'string' && (!needsAnchor || Boolean(v.message_id.trim()))
+    && typeof v.quote === 'string' && Boolean(v.quote.trim()) && isCount(v.ts)
+  const pilotEvidenceList = (v: unknown) => Array.isArray(v) && v.every(item => pilotEvidence(item))
+  const pilotIssue = (v: unknown) => isRecord(v) && pilotBase(v)
+    && vocPilotEvidenceStatuses.some(status => status === v.evidence_status)
+    && (v.scope_status === undefined || v.scope_status === 'needs_context' || v.scope_status === 'scoped')
+    && isRecord(v.impact) && hasCounts(v.impact, ['consultations', 'sessions', 'merchants', 'unidentified_sessions'])
+    && isRecord(v.next) && typeof v.next.owner === 'string' && typeof v.next.action === 'string' && isStringArray(v.next.missing)
+    && Array.isArray(v.cases) && v.cases.every(item => isRecord(item) && typeof item.anchored === 'boolean'
+      && typeof item.has_reply === 'boolean' && pilotEvidence(item, item.anchored))
+  const playbook = (v: unknown) => isRecord(v) && pilotBase(v) && typeof v.issue_id === 'string'
+    && vocPlaybookStatuses.some(status => status === v.status) && isCount(v.checked_cases)
+    && Array.isArray(v.triage) && v.triage.every(item => isRecord(item)
+      && ['check', 'when_yes', 'when_no'].every(key => typeof item[key] === 'string'))
+    && Array.isArray(v.branches) && v.branches.every(branch => isRecord(branch)
+      && ['condition', 'retest', 'escalation'].every(key => typeof branch[key] === 'string')
+      && (branch.id === undefined || typeof branch.id === 'string')
+      && (branch.status === undefined || branch.status === 'guidance' || branch.status === 'verified')
+      && (branch.case_count === undefined || isCount(branch.case_count))
+      && (branch.retest_evidence === undefined || pilotEvidenceList(branch.retest_evidence))
+      && (branch.escalation_evidence === undefined || pilotEvidenceList(branch.escalation_evidence))
+      && (branch.condition_evidence === undefined || pilotEvidenceList(branch.condition_evidence))
+      && (branch.result_evidence === undefined || pilotEvidenceList(branch.result_evidence))
+      && Array.isArray(branch.steps) && branch.steps.every(step => isRecord(step) && typeof step.text === 'string'
+        && pilotEvidenceList(step.evidence)))
+    && isStringArray(v.missing) && pilotEvidenceList(v.evidence)
   const job = (v: unknown) => isRecord(v) && typeof v.id === 'string'
     && ['queued', 'running', 'completed', 'partial', 'failed', 'skipped'].includes(String(v.status))
     && hasCounts(v, ['total', 'processed', 'failed', 'skipped', 'usage_tokens'])
@@ -276,6 +353,9 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
       && (!workbench || comparison(data.comparison)); break
     case 'voc2/knowledge': valid = data.item !== undefined ? knowledge(data.item) : isCount(data.total) && Array.isArray(data.items) && data.items.every(knowledge); break
     case 'voc2/sops': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(sop); break
+    case 'voc2/issue-pilot': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(pilotIssue)
+      && isRecord(data.coverage) && hasCounts(data.coverage, ['source_events', 'matched_consultations', 'classified_consultations', 'needs_context']); break
+    case 'voc2/playbooks': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(playbook); break
     case 'voc2/exceptions': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => isRecord(item)
       && ['id', 'kind', 'question', 'reason', 'created_at'].every(key => typeof item[key] === 'string')); break
     case 'voc2/topic': valid = (workbench ? enrichedTopic(data.topic) : topic(data.topic))
