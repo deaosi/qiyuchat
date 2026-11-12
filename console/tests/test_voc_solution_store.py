@@ -83,3 +83,25 @@ class TestSolutionStore(unittest.TestCase):
         with patch("src.voc_solution.run", side_effect=reviewed), patch("src.voc_solution_store.time.time", return_value=1601):
             result = store.run(self.cfg, {}, max_calls=1, max_tokens=100_000, qa_ids={self.qa_id})
         self.assertEqual((result["generated"], result["calls"]), (1, 1))
+
+    def test_partial_review_can_enrich_a_literal_case_but_never_supplies_a_sop_candidate(self):
+        def source(number, quote, stamp):
+            return {"qa_id": self.qa_id, "message_id": f"source:15429:{number}", "quote": quote, "ts": stamp}
+
+        [candidate] = store._candidates(self.cfg, {self.qa_id: self.sources[self.qa_id]})
+        question, reply = candidate["messages"][:2]
+        literal = {"id": "literal", "qa_id": self.qa_id, "problem": source(1, question["text"], question["ts"]),
+                   "steps": [{"action": "配置为知识加入待办", "evidence": source(2, reply["text"], reply["ts"])}]}
+        diagnostic = {"kind": "diagnosis", "text": "客服指出机器人参考了聊天记录。",
+                      "evidence": [{"message_id": reply["id"], "quote": reply["text"], "ts": reply["ts"]}]}
+        with (patch("src.voc_case_paths.build", return_value=[literal]),
+              patch("src.voc_solution.run", return_value={"solution": None, "partial": {"sections": [diagnostic]}, "usage_tokens": 88})):
+            store.run(self.cfg, {}, max_calls=2, max_tokens=100_000, qa_ids={self.qa_id})
+        proof = {}
+        [case] = store.enrich(self.cfg, self.sources, [literal], proof_by_qa=proof)
+        sections = case["solution"]["sections"]
+        self.assertEqual([s["kind"] for s in sections], ["problem", "diagnosis", "action"])
+        self.assertEqual(sections[-1]["text"], "客服原话「配置为知识加入待办」")
+        self.assertEqual(sections[1]["evidence"][0]["message_id"], "source:15429:2")
+        self.assertEqual(proof, {})
+        self.assertEqual(store.enrich(self.cfg, self.sources, []), [])

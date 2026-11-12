@@ -68,10 +68,11 @@ def _candidates(cfg, sources, *, session_ids=None) -> list[dict]:
             if size > _MAX_INPUT_BYTES:
                 continue
             anchor_ids = {originals[mid][1]["id"] for mid in ids}
+            fingerprint_parts = [segment["fingerprint"], source["_fingerprint"], profile, messages]
             records.append({"qa_id": qa_id, "session_id": segment["session_id"], "segment_key": segment["segment_key"],
                             "messages": messages, "anchors": anchor_ids, "original": segment["original"],
-                            "fingerprint": assets.digest([_VERSION, voc_solution.VERSION, segment["fingerprint"],
-                                                          source["_fingerprint"], profile, messages]),
+                            "fingerprint": assets.digest([_VERSION, voc_solution.VERSION, *fingerprint_parts]),
+                            "previous_fingerprint": assets.digest([_VERSION, "voc-solution-v3", *fingerprint_parts]),
                             "size": size, "asked_at": source["asked_at"]})
     return records
 
@@ -90,6 +91,8 @@ def _rows(path: Path, ids=None) -> dict[int, dict]:
 
 
 def _due(row, candidate, now) -> bool:
+    if row is not None and row["state"] == "complete" and row["solution"] and row["fingerprint"] == candidate["previous_fingerprint"]:
+        return False
     return (row is None or row["fingerprint"] != candidate["fingerprint"]
             or row["state"] in ("retry", "running") and row["retry_at"] <= now)
 
@@ -209,6 +212,8 @@ def run(cfg, filters, *, max_calls, max_tokens, qa_ids=None) -> dict:
             errors["source_changed"] += 1
             continue
         solution = result["solution"]
+        if solution is None and candidate["qa_id"] in preferred and result.get("partial"):
+            solution = {**result["partial"], "partial": True}
         error = "model_validation" if result.get("retry") else ""
         if error:
             errors[error] += 1
@@ -216,6 +221,24 @@ def run(cfg, filters, *, max_calls, max_tokens, qa_ids=None) -> dict:
             report["generated"] += 1
     report["errors"] = dict(errors)
     return report
+
+
+def _literal_sections(case, candidate):
+    by_raw = {candidate["original"][turn["id"]]["source_message_id"]: turn for turn in candidate["messages"]}
+    question = by_raw.get(case["problem"]["message_id"])
+    if question is None or question["id"] not in candidate["anchors"]:
+        return []
+
+    def source(turn):
+        return {"message_id": turn["id"], "ts": turn["ts"], "quote": turn["text"]}
+
+    problem = {"kind": "problem", "text": question["text"], "evidence": [source(question)]}
+    actions = []
+    for step in case["steps"]:
+        turn = by_raw.get(step["evidence"]["message_id"])
+        if turn and turn["role"] == "staff" and step["action"] in turn["text"]:
+            actions.append({"kind": "action", "text": f"客服原话「{step['action']}」", "evidence": [source(turn)]})
+    return [problem, *actions] if actions else []
 
 
 def enrich(cfg, sources, cases, *, proof_by_qa=None):
@@ -238,9 +261,20 @@ def enrich(cfg, sources, cases, *, proof_by_qa=None):
     for candidate in proof:
         qa_id = candidate["qa_id"]
         row = stored[qa_id]
-        if row["fingerprint"] != candidate["fingerprint"]:
+        if row["fingerprint"] not in (candidate["fingerprint"], candidate["previous_fingerprint"]):
             continue
         solution = json.loads(row["solution"])
+        partial = solution.get("partial") is True
+        if partial:
+            base = by_qa.get(qa_id)
+            literal = _literal_sections(base, candidate) if base else []
+            if not literal:
+                continue
+            kinds = {section["kind"] for section in solution["sections"]}
+            sections = [*solution["sections"], *(section for section in literal if section["kind"] not in kinds)]
+            order = {"problem": 0, "diagnosis": 1, "action": 2, "decision": 3, "verification": 4}
+            sections.sort(key=lambda section: order[section["kind"]])
+            solution = {"title": literal[0]["text"][:120], "sections": sections}
         anchors = candidate["anchors"]
         problems = [ref for section in solution["sections"] if section["kind"] == "problem"
                     for ref in section["evidence"] if ref["message_id"] in anchors]
@@ -266,6 +300,6 @@ def enrich(cfg, sources, cases, *, proof_by_qa=None):
                     "qa_id": qa_id, "problem": original_ref(problems[0]), "steps": [],
                     "platform": "", "outcome": "not_recorded"}
         published.append({**case, "solution": {"title": solution["title"], "sections": sections}})
-        if proof_by_qa is not None:
+        if proof_by_qa is not None and not partial:
             proof_by_qa[qa_id] = candidate
     return published + [case for case in cases if case["id"] not in replaced]

@@ -54,7 +54,7 @@ class TestVocSolution(unittest.TestCase):
         self.assertEqual(complete.call_count, 2)
         self.assertTrue(all(call.args[0] == self.cfg.llm for call in complete.call_args_list))
         review = complete.call_args_list[1].args[2]
-        self.assertEqual(review["sections"][3][2], [2])
+        self.assertEqual(review["sections"][3], [3, "action", action["text"], [2]])
         self.assertEqual(review["messages"], [["U", self.problem["text"]], ["S", self.diagnosis["text"]],
                                                ["S", self.action["text"]], ["U", self.goal["text"]]])
         self.assertEqual(review["anchors"], [0])
@@ -121,13 +121,26 @@ class TestVocSolution(unittest.TestCase):
                 self.assertEqual(len(result["solution"]["sections"]), len(accepted))
 
     def test_required_claim_needs_independent_approval_and_invalid_verdict_fails_closed(self):
-        terminal, _ = self.extract(self.messages, [self.question_claim, self.action_claim], {"title_supported": True, "supported": [0]})
+        terminal, _ = self.extract(self.messages, [self.question_claim, self.action_claim], {"title_supported": True, "supported": []})
         self.assertEqual(terminal, {"solution": None, "usage_tokens": 56})
         for verdict in ({"title_supported": True, "supported": [False, 1]},
                         {"title_supported": True, "supported": [0, 1, 1]}, {"title_supported": "true", "supported": [0, 1]}):
             with self.subTest(verdict=verdict):
                 result, _ = self.extract(self.messages, [self.question_claim, self.action_claim], verdict)
                 self.assertEqual(result, {"solution": None, "usage_tokens": 56, "retry": True})
+
+    def test_partial_keeps_only_reviewed_sections_without_a_solution_or_title(self):
+        for supported, expected in (([0, 2], ["problem", "diagnosis"]), ([1], ["action"])):
+            with self.subTest(supported=supported):
+                result, _ = self.extract(self.messages, [self.question_claim, self.action_claim,
+                    claim("diagnosis", "客服判断没有命中知识。", self.diagnosis)],
+                    {"title_supported": True, "supported": supported}, title="不能作为完整方案的标题")
+                self.assertIsNone(result["solution"])
+                self.assertEqual(result["usage_tokens"], 56)
+                self.assertNotIn("retry", result)
+                self.assertEqual(set(result["partial"]), {"sections"})
+                self.assertEqual([section["kind"] for section in result["partial"]["sections"]], expected)
+                self.assertTrue(all(section["evidence"][0]["ts"] > 0 for section in result["partial"]["sections"]))
 
     def test_gateway_error_preserves_status_and_usage_from_completed_draft(self):
         complete = Mock(side_effect=[response({"sections": [self.question_claim, self.action_claim]}, 37), ModelProtocolError("模型超时", 504)])
