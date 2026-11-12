@@ -14,7 +14,7 @@ import { TopicDetailPanel, TopicWorkbench } from './voc-topic-detail'
 import type { OpenTopicEvidence } from './voc-topic-evidence'
 
 type GuestSection = { title: string; lines: string[] }
-type GuestMessage = { role: string; time: string; text: string; anchor?: boolean; id?: string; images?: string[] }
+type GuestMessage = { role: string; time: string; text: string; sender_name?: string; anchor?: boolean; id?: string; images?: string[] }
 type GuestCase = {
   title: string
   category: string
@@ -202,7 +202,7 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
           const anchored = typeof locate === 'string' ? message.id === locate : message.anchor
           const imageUrls = imageBase && Array.isArray(message.images)
             ? message.images.filter(id => typeof id === 'string' && guestImageId.test(id)).map(id => imageBase + id) : []
-          return <ConversationBubble key={index} side={role.side} sender={role.label} time={message.time} question={message.anchor} anchored={anchored}>
+          return <ConversationBubble key={index} side={role.side} sender={message.sender_name || role.label} time={message.time} question={message.anchor} anchored={anchored}>
             <ConversationMessageBody text={message.text} imageUrls={imageUrls} />
           </ConversationBubble>
         })}

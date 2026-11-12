@@ -35,8 +35,8 @@ const payload: GuestPayload = {
   cases: [
     { title: first.question, category: '', time, sections: [], scope: 'context', messages: [
       { id: 'guest-message-0', role: 'user', text: '之前的客户消息', time, anchor: true },
-      { id: 'guest-message-1', role: 'user', text: quote, time },
-      { id: 'guest-message-2', role: 'staff', text: '请重新测试命中条件。', time },
+      { id: 'guest-message-1', role: 'user', text: quote, time, sender_name: '客户来源昵称' },
+      { id: 'guest-message-2', role: 'staff', text: '请重新测试命中条件。', time, sender_name: '七鱼坐席昵称' },
     ] },
     { title: second.question, category: '', time, sections: [], scope: 'pair', messages: [
       { id: 'guest-message-0', role: 'user', text: second.question, time, anchor: true },
@@ -87,6 +87,18 @@ it('opens the same chat drawer at the exact shared source when locating a quotat
   expect(before.hasAttribute('data-evidence-anchor')).toBe(false)
   expect(target.getAttribute('data-side')).toBe('left')
   expect(reply.getAttribute('data-side')).toBe('right')
+  expect(within(target).getByText('客户来源昵称')).toBeTruthy()
+  expect(within(reply).getByText('七鱼坐席昵称')).toBeTruthy()
+  expect(within(before).getByText('客户')).toBeTruthy()
+})
+
+it('shows the same sender nicknames in a shared SOP case', () => {
+  const entry = { ...payload.entry, kind: 'sops' as const }
+  render(<VocGuestPage entry={entry} cases={[payload.cases[0]]} total_cases={1} />)
+  fireEvent.click(screen.getByRole('button', { name: '查看详情' }))
+  const sheet = screen.getByRole('dialog')
+  expect(within(sheet).getByText('客户来源昵称').closest('li')?.dataset.side).toBe('left')
+  expect(within(sheet).getByText('七鱼坐席昵称').closest('li')?.dataset.side).toBe('right')
 })
 
 it('keeps message sides and previews only scoped images without fetching through the admin API', () => {

@@ -31,7 +31,6 @@ interface ContextMessage {
   ts?: number
   isQuestion: boolean
   images: DetailMessageImage[]
-  official?: true
 }
 interface DetailResponse {
   pair: Record<string, unknown>
@@ -92,7 +91,7 @@ function mergeOfficialReplies(retained: ContextMessage[], replies: DetailReplies
   const official = replies.map((reply): ContextMessage => ({
     key: `official-${reply.source_message_id}`, role: reply.role, content: reply.content, time: reply.time,
     senderName: reply.sender_name?.trim(),
-    sourceMessageId: reply.source_message_id, ts: reply.ts, isQuestion: false, images: reply.images ?? [], official: true,
+    sourceMessageId: reply.source_message_id, ts: reply.ts, isQuestion: false, images: reply.images ?? [],
   }))
   // Stable sort retains the saved message order for equal timestamps.
   return [...retained, ...official].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))
@@ -108,10 +107,7 @@ function messageSender(message: ContextMessage, pair: QAPair) {
   if (message.senderKind === 'unidentified') return ['身份未确认', message.senderName || message.senderAccount].filter(Boolean).join(' · ')
   switch (message.role) {
     case 'user': return message.senderName || customerLabel(pair.customerName, pair.customerId)
-    case 'staff': {
-      const name = message.senderName || (message.official ? '' : pair.staffName.trim())
-      return ['', '未记录', '未记录客服'].includes(name) ? '客服' : name
-    }
+    case 'staff': return message.senderName || '客服'
     case 'bot': return '机器人'
     case 'system': return '系统'
     default: return '消息'
