@@ -53,7 +53,9 @@ it('only displays complete branches and opens and copies their exact procedure a
   expect(drawer.getByText(verified.escalation)).toBeTruthy()
 
   const result = drawer.getByRole('heading', { name: '复测结果' }).closest('section')!
-  fireEvent.click(within(result).getByRole('button', { name: '查看原话' }))
+  const jump = within(result).getByRole('button', { name: '跳转到问答 134 的原话' })
+  expect(jump.textContent?.trim()).toBe('跳转')
+  fireEvent.click(jump)
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '134' }), 'm7')
   fireEvent.click(drawer.getByRole('button', { name: '复制 SOP' }))
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('复测结果 保存后重新测试，机器人回复正常。')))

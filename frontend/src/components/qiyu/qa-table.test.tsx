@@ -13,7 +13,8 @@ it('sends only the settled search on page one when typing on a later page', asyn
     return Response.json({ items: matches.slice(offset, offset + 8), total: matches.length, limit: 8, offset })
   })
   vi.stubGlobal('fetch', fetch)
-  render(<QATable data={[]} remote={{ filters: { source: 'local' } }} onSelect={vi.fn()} />)
+  const open = vi.fn()
+  render(<QATable data={[]} remote={{ filters: { source: 'local' } }} onSelect={open} />)
   await screen.findByText('第 1 / 3 页')
   fireEvent.click(screen.getByRole('button', { name: '下一页' }))
   await screen.findByText('第 2 / 3 页')
@@ -25,4 +26,8 @@ it('sends only the settled search on page one when typing on a later page', asyn
   expect(fetch).toHaveBeenCalledTimes(3)
   const search = new URL(fetch.mock.calls[2][0], location.origin).searchParams
   expect([search.get('q'), search.get('offset')]).toEqual(['客户问题 18', '0'])
+  const jump = screen.getByRole('button', { name: '跳转到问答 18 的会话详情' })
+  expect(jump.textContent).toBe('跳转')
+  fireEvent.click(jump)
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '18' }))
 })

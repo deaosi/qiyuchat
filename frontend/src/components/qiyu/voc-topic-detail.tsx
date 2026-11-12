@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, Copy, MessagesSquare } from 'lucide-react'
+import { Copy, MessagesSquare } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { DecisionCaseCard, DecisionCaseSection, TopicSummary } from './voc-detail-display'
@@ -102,7 +102,7 @@ function FactQuotes({ item, refs, onOpenEvidence }: { item: Evidence; refs: Ref[
       <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{ref.quote}</p>
       <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
         <span>{source}</span>
-        {item.qa_id && anchor && <button type="button" className="inline-flex min-h-6 items-center gap-1 text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground focus-visible:outline-2" onClick={() => onOpenEvidence(item, anchor)}>定位原话<ArrowUpRight aria-hidden="true" className="size-3" /></button>}
+        {item.qa_id && anchor && <Button type="button" variant="outline" size="xs" aria-label="跳转到原话" onClick={() => onOpenEvidence(item, anchor)}>跳转</Button>}
       </div>
     </li>
   })}</ul>
@@ -154,7 +154,7 @@ function DecisionCase({ item, title, onOpenEvidence, readOnly }: { item: Evidenc
   return <DecisionCaseCard diagnosis={diagnosis} intro={<OriginalExchange item={item} />}
     metadata={[item.customer_name || '匿名商家', displayTime(item.asked_at)].filter(Boolean).join(' · ')}
     action={<>
-        {item.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文<ArrowUpRight /></Button>}
+        {item.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>跳转</Button>}
         {suspected && !readOnly && <Button variant="outline" size="sm" onClick={copyReport}><Copy />复制疑似异常摘要</Button>}
     </>}
     facts={facts.map(({ label, refs, missing }) => ({
@@ -239,7 +239,7 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
       <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">{exchangeOnly ? (caseId ? '当前问答' : '代表问答') : `处理判断 · ${caseId ? '当前案例' : '代表案例'}`}</h4>
       {exchangeOnly ? <DecisionCaseCard metadata={[activeCase.customer_name || '匿名商家', displayTime(activeCase.asked_at)].filter(Boolean).join(' · ')}
         intro={<OriginalExchange item={activeCase} />} facts={[]}
-        action={activeCase.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenEvidence(activeCase, questionAnchor(activeCase))}>查看会话上下文</Button>} />
+        action={activeCase.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(activeCase, questionAnchor(activeCase))}>跳转</Button>} />
         : <DecisionCase item={activeCase} title={title} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />}
       {!exchangeOnly && gaps.length > 0 && <div className="space-y-2 rounded-lg border bg-muted/25 p-3">
         <h5 className="text-xs font-medium">待补证据</h5>

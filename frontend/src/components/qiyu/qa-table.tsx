@@ -1,6 +1,6 @@
 import * as React from 'react'
 import {
-  ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight,
+  Check, ChevronDown, ChevronLeft, ChevronRight,
   ChevronsLeft, ChevronsRight, CircleCheck, CircleDashed,
   AlertCircle, Columns3, RefreshCw, Search, SearchX, X,
 } from 'lucide-react'
@@ -234,7 +234,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
               {visible.has('customer') && <TableHead className="min-w-36">客户 / 客户群</TableHead>}
               {visible.has('status') && <TableHead className="min-w-36">回复状态</TableHead>}
               {visible.has('time') && <TableHead className="min-w-28">提问时间</TableHead>}
-              <TableHead className="w-12"><span className="sr-only">查看详情</span></TableHead>
+              <TableHead className="w-16"><span className="sr-only">跳转</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody className={pending ? undefined : 'qiyu-page-enter'}>
@@ -272,9 +272,7 @@ export function QATable({ data, onSelect, initialReply, remote, onFiltersChange 
                   {pairTime(row.askedAt).time && <div className="mt-1.5 text-xs text-muted-foreground">{pairTime(row.askedAt).time}</div>}
                 </TableCell>}
                 <TableCell className="pr-3 align-top pt-4">
-                  <Button variant="ghost" size="icon-sm" onClick={() => onSelect(row)} aria-label={`查看 ${row.id} 的会话详情`}>
-                    <ArrowUpRight className="size-4 text-muted-foreground" />
-                  </Button>
+                  <Button type="button" variant="outline" size="xs" onClick={() => onSelect(row)} aria-label={`跳转到问答 ${row.id} 的会话详情`}>跳转</Button>
                 </TableCell>
               </TableRow>
             )) : (

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUpRight } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -117,7 +116,7 @@ function GuestCases({ cases, total, onOpen }: {
     </div>
     {cases.length ? cases.map((item, index) =>
       <EvidenceCaseCard key={index} label={item.category} time={item.time} question={item.title || `会话 ${index + 1}`}
-        footer={<Button className="ml-auto" variant="outline" size="sm" onClick={() => onOpen(index)}>查看详情<ArrowUpRight /></Button>} />
+        footer={<Button type="button" className="ml-auto" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpen(index)}>跳转</Button>} />
     ) : <p className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">当前条目暂无可公开查看的会话上下文。</p>}
   </section>
 }
@@ -148,7 +147,7 @@ function GuestSop({ entry, cases, total_cases: total, period, onOpen }: GuestDet
     <SopDetailHeader title={<h1 className="text-lg leading-7 font-semibold [overflow-wrap:anywhere]">{entry.title}</h1>}
       kind={kind} status={status} verified={status === '效果已验证'} metadata={<>
         {period && <span className="tabular-nums">{period}</span>}
-        {cases[0]?.messages.some(message => message.anchor) && <Button variant="ghost" size="xs" onClick={() => onOpen(0, true)}>定位问题原话<ArrowUpRight /></Button>}
+        {cases[0]?.messages.some(message => message.anchor) && <Button type="button" variant="outline" size="xs" aria-label="跳转到问题原话" onClick={() => onOpen(0, true)}>跳转</Button>}
       </>} />
     <div className="space-y-6 px-5 py-6 sm:px-7">
       {!!entry.taxonomy?.length && <Taxonomy rows={entry.taxonomy} />}

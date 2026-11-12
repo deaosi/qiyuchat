@@ -33,7 +33,9 @@ it('shows an unfamiliar product issue and opens its exact conversation anchor', 
   expect(detail.queryByText('核对授权回执。')).toBeNull()
   expect(detail.getByText('原因确认', { exact: false })).toBeTruthy()
   expect(detail.getByRole('link', { name: '查看处理手册' }).getAttribute('href')).toBe(`#voc-next?issue=${issueId}`)
-  fireEvent.click(detail.getByRole('button', { name: '查看原话' }))
+  const jump = detail.getByRole('button', { name: '跳转到问答 42 的原话' })
+  expect(jump.textContent).toBe('跳转')
+  fireEvent.click(jump)
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-3')
 })
 
@@ -72,9 +74,9 @@ it('shows the actual authorization consultation and exact message instead of a s
   expect(detail.getByText('使用的平台、完整处理记录')).toBeTruthy()
   expect(detail.queryByText(/授权角色|排查决策|检查账户权限|旧版会话依据/)).toBeNull()
   expect(detail.queryByRole('button', { name: '复制处理步骤' })).toBeNull()
-  fireEvent.click(detail.getByRole('button', { name: '查看原话' }))
+  fireEvent.click(detail.getByRole('button', { name: '跳转到问答 42 的原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: question.quote }), 'source-3')
-  fireEvent.click(detail.getByRole('button', { name: '查看会话' }))
+  fireEvent.click(detail.getByRole('button', { name: '跳转到问答 61 的会话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '61' }), undefined)
 })
 
@@ -109,7 +111,7 @@ it('shows the sourced operation ahead of pending consultations and keeps the act
   const original = detail.getByText('查看客服原话').closest('details')!
   expect(within(original).getByText(evidence.quote)).toBeTruthy()
   fireEvent.click(original.querySelector('summary')!)
-  fireEvent.click(within(original).getByRole('button', { name: '查看原话' }))
+  fireEvent.click(within(original).getByRole('button', { name: '跳转到问答 42 的原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-4')
 })
 
@@ -141,6 +143,10 @@ it('makes the model summary searchable and opens the exact evidence for a model-
   const detail = within(screen.getByRole('dialog', { name: '拼多多回复后未生成待办' }))
   const next = detail.getByRole('heading', { name: '下一步怎么做' }).closest('section')!
   expect(within(next).getByText('保持 AI 回复，用同样的“稍等”场景复测。')).toBeTruthy()
+  const jump = within(next).getByRole('button', { name: '跳转到问答 42 的原话 2' })
+  expect(jump.textContent).toBe('跳转')
+  fireEvent.click(jump)
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: action.quote }), 'source-4')
   const criteria = detail.getByRole('heading', { name: '通过标准' }).closest('section')!
   expect(next.compareDocumentPosition(criteria) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   expect(within(criteria).getByText('同时确认 AI 照常回复并生成待办。')).toBeTruthy()
@@ -149,7 +155,7 @@ it('makes the model summary searchable and opens the exact evidence for a model-
   fireEvent.click(original.querySelector('summary')!)
   const operation = within(original).getByRole('heading', { name: '客服处理记录' }).closest('section')!
   expect(within(operation).getByText('客服将当前知识配置为加入待办。')).toBeTruthy()
-  fireEvent.click(within(operation).getByRole('button', { name: '查看原话' }))
+  fireEvent.click(within(operation).getByRole('button', { name: '跳转到问答 42 的原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: action.quote }), 'source-4')
   expect(within(original).getByText(additionalSource.quote)).toBeTruthy()
   expect(within(original).getByText('客服 · 提出建议')).toBeTruthy()
@@ -190,7 +196,7 @@ it('preserves the playbook deep link and copies only branches with sourced steps
   expect(detail.queryByText(/清空店铺授权|转交平台核对/)).toBeNull()
   const evidence = detail.getByText('步骤依据').closest('details')!
   fireEvent.click(evidence.querySelector('summary')!)
-  fireEvent.click(within(evidence).getByRole('button', { name: '查看原话' }))
+  fireEvent.click(within(evidence).getByRole('button', { name: '跳转到问答 42 的原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-3')
   fireEvent.click(detail.getByRole('button', { name: '复制处理步骤' }))
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('核对回执与子账号是否一致。')))

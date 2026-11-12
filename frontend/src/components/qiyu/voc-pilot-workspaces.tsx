@@ -91,7 +91,8 @@ function SourceLine({ source, onOpenPair, anchored = true, label, children }: { 
     {children}
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       {source.ts > 0 && <span className="tabular-nums">{displayTime(source.ts)}</span>}
-      <Button type="button" variant="outline" size="xs" onClick={() => openSource(source, onOpenPair, hasAnchor)}>{hasAnchor ? '查看原话' : '查看会话'}</Button>
+      <Button type="button" variant="outline" size="xs" onClick={() => openSource(source, onOpenPair, hasAnchor)}
+        aria-label={`跳转到问答 ${source.qa_id} 的${hasAnchor ? '原话' : '会话'}`}>跳转</Button>
     </div>
   </div>
 }
@@ -296,9 +297,11 @@ function CaseSolutionSections({ sections, onOpenPair }: { sections: SolutionSect
       <h3 className="text-sm font-medium">{solutionLabel(section)}</h3>
       <p className={`whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere] ${section.kind === 'next_step' ? 'font-medium' : ''}`}>{section.text}</p>
       <div className="flex flex-wrap gap-2">{section.evidence.map((source, sourceIndex) =>
-        <Button key={`${source.qa_id}-${source.message_id}-${sourceIndex}`} type="button" variant="outline" size="xs" onClick={() => openSource(source, onOpenPair)}>
-          {section.evidence.length === 1 ? '查看原话' : `查看原话 ${sourceIndex + 1}`}
-        </Button>)}</div>
+        <span key={`${source.qa_id}-${source.message_id}-${sourceIndex}`} className="inline-flex items-center gap-1.5">
+          {section.evidence.length > 1 && <span className="text-xs text-muted-foreground">原话 {sourceIndex + 1}</span>}
+          <Button type="button" variant="outline" size="xs" onClick={() => openSource(source, onOpenPair)}
+            aria-label={`跳转到问答 ${source.qa_id} 的原话${section.evidence.length === 1 ? '' : ` ${sourceIndex + 1}`}`}>跳转</Button>
+        </span>)}</div>
     </section>)}</div>
 }
 

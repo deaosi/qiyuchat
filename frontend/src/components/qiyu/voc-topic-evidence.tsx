@@ -1,4 +1,3 @@
-import { ArrowUpRight } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import type { VocKnowledgeKind, VocKnowledgeReuse } from '@/lib/api'
@@ -105,7 +104,7 @@ export function EvidenceList({ evidence, onOpenEvidence, onSelectCase, readOnly 
         <span>{!readOnly && item.qa_id ? `问答 ${item.qa_id} · ` : ''}{item.customer_name || '匿名商家'}{displayTime(item.asked_at) ? ` · ${displayTime(item.asked_at)}` : ''}</span>
         <div className="flex flex-wrap gap-1">
           {onSelectCase && <Button variant="outline" size="xs" onClick={() => onSelectCase(item.id)}>{exchangeOnly ? '查看问答' : '查看处理判断'}</Button>}
-          {item.qa_id && <Button variant="ghost" size="xs" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文 {!exchangeOnly && <ArrowUpRight />}</Button>}
+          {item.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>跳转</Button>}
         </div>
       </div>
       <div className="mt-2"><OriginalExchange item={item} /></div>
@@ -140,7 +139,7 @@ export function KnowledgeContent({ item, onOpenEvidence, readOnly = false }: {
         const source = qaId ? item.evidence.find(evidence => String(evidence.qa_id) === qaId) : undefined
         return <p key={index} className="mt-2 whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">
           “{ref.quote}” · {ref.role === 'user' || ref.role === 'merchant' ? '客户反馈' : '会话证据'}{ref.ts ? ` · ${displayTime(ref.ts)}` : ''}{!readOnly && anchor ? ` · 消息 ${anchor}` : ''}
-          {source && anchor && <Button variant="ghost" size="xs" onClick={() => onOpenEvidence(source, anchor)}>定位原话<ArrowUpRight /></Button>}
+          {source && anchor && <Button type="button" variant="outline" size="xs" className="ml-2" aria-label="跳转到原话" onClick={() => onOpenEvidence(source, anchor)}>跳转</Button>}
         </p>
       })}
     </div>

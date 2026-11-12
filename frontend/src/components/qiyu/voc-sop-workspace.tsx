@@ -40,9 +40,13 @@ function EvidenceLinks({ sources, onOpenPair }: { sources: VocPilotEvidence[]; o
   const unique = [...new Map(sources.map(source => [`${source.qa_id}:${source.message_id}`, source])).values()]
   if (!unique.length) return null
   return <div className="flex flex-wrap gap-2">
-    {unique.map((source, index) => <Button key={`${source.qa_id}:${source.message_id}`} type="button" variant="outline" size="xs" onClick={() => openSource(source, onOpenPair)}>
-      查看原话{unique.length > 1 ? ` ${index + 1}` : ''}
-    </Button>)}
+    {unique.map((source, index) => {
+      const order = unique.length > 1 ? ` ${index + 1}` : ''
+      return <Button key={`${source.qa_id}:${source.message_id}`} type="button" variant="outline" size="xs"
+        onClick={() => openSource(source, onOpenPair)} aria-label={`跳转到问答 ${source.qa_id} 的原话${order}`}>
+        跳转{order}
+      </Button>
+    })}
   </div>
 }
 

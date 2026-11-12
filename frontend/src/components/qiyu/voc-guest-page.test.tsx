@@ -69,7 +69,7 @@ it('shows the regular topic detail and switches to another scoped case without a
   expect(screen.queryByText(/问答 [12] ·/)).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '查看处理判断' }))
   const card = screen.getByText(second.question).closest('article')!
-  fireEvent.click(within(card).getByRole('button', { name: '查看会话上下文' }))
+  fireEvent.click(within(card).getByRole('button', { name: '跳转到会话上下文' }))
   const sheet = screen.getByRole('dialog', { name: '问答与相关会话上下文' })
   expect(within(sheet).getByText(second.question)).toBeTruthy()
   expect(within(sheet).queryByText(quote)).toBeNull()
@@ -78,7 +78,7 @@ it('shows the regular topic detail and switches to another scoped case without a
 
 it('opens the same chat drawer at the exact shared source when locating a quotation', () => {
   render(<VocGuestPage {...payload} />)
-  fireEvent.click(screen.getByRole('button', { name: '定位原话' }))
+  fireEvent.click(screen.getByRole('button', { name: '跳转到原话' }))
   const sheet = screen.getByRole('dialog')
   const target = within(sheet).getByText(quote).closest('li')!
   const before = within(sheet).getByText('之前的客户消息').closest('li')!
@@ -95,7 +95,7 @@ it('opens the same chat drawer at the exact shared source when locating a quotat
 it('shows the same sender nicknames in a shared SOP case', () => {
   const entry = { ...payload.entry, kind: 'sops' as const }
   render(<VocGuestPage entry={entry} cases={[payload.cases[0]]} total_cases={1} />)
-  fireEvent.click(screen.getByRole('button', { name: '查看详情' }))
+  fireEvent.click(screen.getByRole('button', { name: '跳转到会话上下文' }))
   const sheet = screen.getByRole('dialog')
   expect(within(sheet).getByText('客户来源昵称').closest('li')?.dataset.side).toBe('left')
   expect(within(sheet).getByText('七鱼坐席昵称').closest('li')?.dataset.side).toBe('right')
@@ -120,7 +120,7 @@ it('keeps message sides and previews only scoped images without fetching through
       ],
     }, payload.cases[1]]} />)
     const representative = screen.getByText(first.question).closest('article')!
-    fireEvent.click(within(representative).getByRole('button', { name: '查看会话上下文' }))
+    fireEvent.click(within(representative).getByRole('button', { name: '跳转到会话上下文' }))
     const conversation = within(screen.getByRole('dialog', { name: '问答与相关会话上下文' }))
     const thumbnail = conversation.getByRole('img', { name: '会话图片' })
     const url = `${guestPath}/images/${imageId}`

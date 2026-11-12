@@ -89,7 +89,7 @@ describe('VOC navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: /场景未触发.*3 次咨询/ }))
     const detail = within(screen.getByRole('dialog', { name: '问题与原句依据' }))
     expect(detail.getByText(evidence.answer)).toBeTruthy()
-    expect(detail.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
+    expect(detail.getByRole('button', { name: '跳转到会话上下文' })).toBeTruthy()
   })
 
   it('opens a single verified SOP list from the knowledge sidebar', () => {
@@ -110,7 +110,7 @@ describe('VOC navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: `查看 SOP · ${completeSop.title}` }))
     const detail = within(screen.getByRole('dialog', { name: completeSop.title }))
     expect(detail.getByText('重新测试后，场景成功触发。')).toBeTruthy()
-    expect(detail.getAllByRole('button', { name: '查看原话' })).toHaveLength(4)
+    expect(detail.getAllByRole('button', { name: /^跳转/ })).toHaveLength(4)
     expect(query.mock.calls.some(([endpoint]) => ['voc2/playbooks', 'voc2/knowledge', 'voc2/sops'].includes(endpoint))).toBe(false)
   })
 

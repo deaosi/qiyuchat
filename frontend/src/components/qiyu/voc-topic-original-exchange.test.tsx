@@ -27,7 +27,7 @@ it('shows the original question and verified reply in the main case, without tre
   const main = screen.getByText(verified.question).closest('article')!
   expect(within(main).getByText(verified.answer)).toBeTruthy()
   expect(within(main).getByText('客户问题原文')).toBeTruthy()
-  fireEvent.click(within(main).getByRole('button', { name: '查看会话上下文' }))
+  fireEvent.click(within(main).getByRole('button', { name: '跳转到会话上下文' }))
   expect(open).toHaveBeenCalledWith(verified, 'question-11')
   expect(screen.queryByText(unverified.answer)).toBeNull()
   expect(screen.getByText('回复来源尚未核验，请查看会话上下文确认。')).toBeTruthy()
