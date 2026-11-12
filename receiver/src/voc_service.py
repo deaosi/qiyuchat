@@ -332,6 +332,7 @@ def get(cfg: Settings, name: str, filters: dict, identity: str = '', *,
     if name=='jobs':return jobs(cfg)
     functions={'topics':lambda:engine.topics(cfg,filters),
                'knowledge':lambda:engine.knowledge(cfg,filters,identity),
+               'sops':lambda:engine.sops(cfg,filters,identity),
                'exceptions':lambda:engine.exceptions(cfg,filters),
                'defects':lambda:engine.defects(cfg,filters),
                'topic':lambda:engine.topic_detail(cfg,filters,identity),

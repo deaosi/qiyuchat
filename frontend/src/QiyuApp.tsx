@@ -19,7 +19,8 @@ import { QATable } from '@/components/qiyu/qa-table'
 import { QADetail } from '@/components/qiyu/qa-detail'
 import { AudienceWorkspace } from '@/components/qiyu/audience-workspace'
 import { RuleClusterWorkspace } from '@/components/qiyu/rule-cluster-workspace'
-import { VocFrequencyWorkspace, VocKnowledgeWorkspace } from '@/components/qiyu/voc-next-workspace'
+import { VocFrequencyWorkspace } from '@/components/qiyu/voc-next-workspace'
+import { VocKnowledgeLibrary } from '@/components/qiyu/voc-sop-workspace'
 import { VocChatWorkspace } from '@/components/qiyu/voc-chat-workspace'
 import { VocBriefingDialog } from '@/components/qiyu/voc-briefing-dialog'
 import { VocJobHistory } from '@/components/qiyu/voc-job-history'
@@ -242,7 +243,7 @@ function Workspace() {
         {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={clearDrill}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={openPair} initialReply={initialReply} onFiltersChange={captureTableFilters} /></div>}
         {view === 'settings' && <div className="px-4 lg:px-6"><GatewaySettings onSaved={() => setRefreshKey(key => key + 1)} /></div>}
         {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace key={linkedTopic ?? 'ranking'} initialTopic={linkedTopic} onCloseLinkedTopic={clearLinkedTopic} filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} onOpenChat={openChat} /></div>}
-        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} /></div>}
+        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeLibrary filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
         {view === 'clusters' && <div className="px-4 lg:px-6">
           <RuleClusterWorkspace filters={sharedScope} refreshKey={refreshKey} onDrill={drill} />

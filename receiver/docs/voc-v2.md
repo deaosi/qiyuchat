@@ -378,3 +378,18 @@ consultations were linked. A linked consultation is counted on the date of
 its first question. Its evidence can include later replies and follow-ups.
 The knowledge compiler continues to verify its
 original message evidence before making any answer available for reuse.
+
+## Handling SOPs
+
+`GET /api/voc2/sops` presents the handling path in the knowledge library. It
+reads the persisted episode ledger, rechecks the current official snapshot and
+first-question anchor, and keeps the original message and timestamp for each
+step. Only a directive supported by complete staff text enters the procedure.
+Conditions and outcomes remain case-specific. Failed attempts remain visible
+as evidence and are excluded from copied procedures.
+
+A procedure with a sourced retest criterion can be offered as guidance within
+its known conditions. A verified effect requires an explicit customer report
+that covers the actual action path and has no conflicting follow-up. Other
+cases show their known steps and missing evidence. SOP reads use the existing
+episode output and do not call a model or change the business source.

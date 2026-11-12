@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from src import voc_assets as assets, voc_engine as engine, voc_episode, voc_episode_live as live
 from src import voc_episode_projection as projection, voc_topic_insights as insights, voc_variants as variants
+from src import voc_service
 from tests import test_voc_episode_replay as official
 
 
@@ -127,6 +128,21 @@ class TestEpisodeProjection(unittest.TestCase):
         [episode] = [row for row in rows if row.get("episode_id")]
         self.assertEqual(episode["legacy_event_ids"], ("i-1", "i-1-followup"))
         self.assertEqual({row["id"] for row in rows}, {episode["id"], "i-1-other", "i-2"})
+
+    def test_sop_case_uses_original_evidence_and_is_withheld_when_source_changes(self):
+        self.legacy()
+        self.assertEqual(live.run(self.cfg, max_calls=1, max_tokens=200_000, extract=self.extract)["episodes"], 1)
+        first_day = {"start": "2026-11-09", "end": "2026-11-09"}
+        followup_day = {"start": "2026-11-10", "end": "2026-11-10"}
+        with patch("src.voc_episode.extract", side_effect=AssertionError("SOP reads must not call a model")):
+            [item] = voc_service.get(self.cfg, "sops", first_day)["items"]
+            self.assertEqual(item["qa_id"], 1)
+            self.assertEqual(item["problem"]["message_id"], "source:15429:1")
+            self.assertEqual(voc_service.get(self.cfg, "sops", first_day, item["id"]), {"item": item})
+            self.assertEqual(voc_service.get(self.cfg, "sops", followup_day), {"items": [], "total": 0})
+        with closing(sqlite3.connect(self.path)) as conn, conn:
+            conn.execute("UPDATE push_sync_state SET status='archived',source_version='',source_json=''")
+        self.assertEqual(voc_service.get(self.cfg, "sops", {}), {"items": [], "total": 0})
 
     def test_overlapping_other_legacy_intent_cannot_be_hidden_by_episode(self):
         self.legacy()

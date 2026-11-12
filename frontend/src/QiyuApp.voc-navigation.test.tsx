@@ -51,6 +51,7 @@ beforeEach(() => {
       'voc2/topics': { items: [topic], total: 1 },
       'voc2/topic': { topic, events: [evidence] },
       'voc2/knowledge': { items: knowledge, total: knowledge.length },
+      'voc2/sops': { items: [], total: 0 },
     }[endpoint] ?? null,
     loading: false, refreshing: false, error: null, retry: vi.fn(),
   }))
@@ -61,6 +62,10 @@ afterEach(() => {
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
 })
+
+function openReusableAnswers() {
+  fireEvent.mouseDown(screen.getByRole('tab', { name: '可复用答案' }), { button: 0 })
+}
 
 describe('VOC navigation', () => {
   it('opens a shared topic at the fixed dates and omits customer and staff identifiers from its link', () => {
@@ -107,6 +112,8 @@ describe('VOC navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
     expect(window.location.hash).toBe('#voc-next')
     expect(screen.getByRole('heading', { name: '沉淀知识库' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: '处理 SOP' }).getAttribute('aria-selected')).toBe('true')
+    openReusableAnswers()
     expect(screen.getByText(reusable.question)).toBeTruthy()
     expect(screen.getByText(/现在触发了.*客户反馈/)).toBeTruthy()
     expect(screen.getByText(reusable.scope, { exact: false })).toBeTruthy()
@@ -124,6 +131,7 @@ describe('VOC navigation', () => {
     }]
     window.history.replaceState(null, '', '#voc-next')
     render(<QiyuApp />)
+    openReusableAnswers()
 
     expect(screen.getByText('操作效果已验证')).toBeTruthy()
     expect(screen.getByText(/我重新保存以后，场景就触发了。.*客户反馈.*消息 51/)).toBeTruthy()
@@ -146,6 +154,7 @@ describe('VOC navigation', () => {
     knowledge = [reusable, guidance, advice, reference, legacyAcknowledgement]
     window.history.replaceState(null, '', '#voc-next')
     render(<QiyuApp />)
+    openReusableAnswers()
 
     expect(screen.getByText('操作效果已验证')).toBeTruthy()
     const configurationCard = within(screen.getByRole('heading', { name: guidance.question }).closest('article')!)
@@ -173,6 +182,7 @@ describe('VOC navigation', () => {
     knowledge = [sourceOnly]
     window.history.replaceState(null, '', '#voc-next')
     render(<QiyuApp />)
+    openReusableAnswers()
 
     expect(screen.getByRole('heading', { name: '沉淀知识库' })).toBeTruthy()
     expect(screen.getByText('当前范围暂无可复用答案')).toBeTruthy()
@@ -190,6 +200,9 @@ describe('VOC navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
     expect(screen.getByRole('combobox', { name: '客服筛选' })).toBe(staffFilter)
+    const sopRequest = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/sops')
+    expect(sopRequest?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
+    openReusableAnswers()
     const request = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/knowledge')
     expect(request?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
     expect(request?.[1]).not.toHaveProperty('q')

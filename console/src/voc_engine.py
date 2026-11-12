@@ -624,6 +624,39 @@ def knowledge(cfg: Settings, filters: dict, knowledge_id: str = "") -> dict:
     return {"items": items, "total": len(items)}
 
 
+def sops(cfg: Settings, filters: dict, identity: str = "") -> dict:
+    """Read workflows against the same official proof used by the episode ledger."""
+    from . import voc_episode_live, voc_sops
+
+    source = _sources(cfg, episode_projection.source_filters(filters))
+    sessions = {row["_session_key"] for row in source.values() if row.get("_question_parts")}
+    items = []
+    for segment in voc_episode_live.load_current(cfg, sessions, include_messages=True):
+        for episode in segment["episodes"]:
+            if filters.get("focus_topic") and episode.get("topic_id") != filters["focus_topic"]:
+                continue
+            intent = episode_projection._INTENTS.get(episode["kind"])
+            diagnosis = "not_applicable" if intent == "configuration_guidance" else "reported"
+            if filters.get("support_intent") not in (None, "", "all", intent):
+                continue
+            if filters.get("diagnosis_status") not in (None, "", "all", diagnosis):
+                continue
+            matching = [qa_id for qa_id in segment["qa_anchors"] if qa_id in source
+                        and episode_projection._question_span(source[qa_id], episode["question"]) is not None]
+            if len(matching) != 1:
+                continue
+            case = voc_sops.compile_case(episode, segment["messages"], matching[0])
+            if case is not None and (not identity or case["id"] == identity):
+                items.append(case)
+    if identity:
+        if len(items) != 1:
+            raise EngineError("当前范围内没有可用的该处理流程。", 404)
+        return {"item": items[0]}
+    order = {"verified": 0, "guidance": 1, "incomplete": 2}
+    items.sort(key=lambda item: (order[item["status"]], -item["problem"]["ts"], item["id"]))
+    return {"items": items, "total": len(items)}
+
+
 def exceptions(cfg: Settings, filters: dict) -> dict:
     current = _sources(cfg, filters)
     rows = _events(cfg, filters, _current=current)

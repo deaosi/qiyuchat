@@ -156,7 +156,7 @@ def pending(cfg: Settings, filters: dict | None = None) -> bool:
     return any(_due(stored.get(segment["segment_key"]), segment, now) for segment in _gather(cfg, filters=filters))
 
 
-def load_current(cfg: Settings, session_keys: set[str]) -> list[dict]:
+def load_current(cfg: Settings, session_keys: set[str], *, include_messages: bool = False) -> list[dict]:
     """Read only current, independently checked segment publications."""
     if not session_keys or cfg.runtime.voc_domain != "zhihuige" or cfg.runtime.mock:
         return []
@@ -166,8 +166,17 @@ def load_current(cfg: Settings, session_keys: set[str]) -> list[dict]:
         row = stored.get(segment["segment_key"])
         if _matches(row, segment):
             fields = ("session_key", "session_id", "customer_id", "customer_key", "segment_key", "official_version", "qa_anchors")
-            records.append({**{field: segment[field] for field in fields}, "episodes": json.loads(row["episodes"])})
+            record = {**{field: segment[field] for field in fields}, "episodes": json.loads(row["episodes"])}
+            if include_messages:
+                record["messages"] = [_original_message(message, segment["original"][message["id"]])
+                                      for message in segment["messages"]]
+            records.append(record)
     return records
+
+
+def _original_message(message: dict, raw: dict) -> dict:
+    return {"id": raw["source_message_id"], "role": message["role"], "kind": message["kind"],
+            "ts": message["ts"], "text": mask_pii(clean_visible_text(raw["content"] or ""))}
 
 
 def _claim(path: Path, segment: dict, lease_seconds: int) -> tuple[str, int] | None:

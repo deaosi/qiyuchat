@@ -131,6 +131,32 @@ export type VocConversationVerification = {
   fingerprint: string
 }
 
+const vocSopKinds = ['configuration', 'anomaly'] as const
+const vocSopStatuses = ['verified', 'guidance', 'incomplete'] as const
+const vocSopPhases = ['diagnosis', 'action', 'retest', 'escalation'] as const
+const vocSopOutcomes = ['verified', 'failed', 'unconfirmed'] as const
+export type VocSopEvidence = { message_id: string; quote: string; ts: number }
+export type VocSopStep = {
+  phase: typeof vocSopPhases[number]
+  evidence: VocSopEvidence
+  outcome: typeof vocSopOutcomes[number]
+  feedback?: VocSopEvidence
+}
+export type VocSop = {
+  id: string
+  topic_id: string
+  qa_id: number
+  title: string
+  kind: typeof vocSopKinds[number]
+  status: typeof vocSopStatuses[number]
+  problem: VocSopEvidence
+  conditions: VocSopEvidence[]
+  replies?: VocSopEvidence[]
+  steps: VocSopStep[]
+  result: VocSopEvidence | null
+  missing: string[]
+}
+
 function validateVoc2Response(name: string, data: unknown, workbench = false): void {
   if (!name.startsWith('voc2/')) return
   const messageRefs = (v: unknown) => Array.isArray(v) && v.every(item => isRecord(item)
@@ -185,6 +211,17 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     && (v.reuse_level === undefined || ['direct', 'reference', 'history', 'blocked'].includes(String(v.reuse_level)))
     && (v.conversation_verification === undefined || closure(v.conversation_verification))
     && (v.knowledge_reuse === undefined || reuse(v.knowledge_reuse))
+  const sopEvidence = (v: unknown) => isRecord(v) && typeof v.message_id === 'string' && Boolean(v.message_id.trim())
+    && typeof v.quote === 'string' && Boolean(v.quote.trim()) && isCount(v.ts)
+  const sop = (v: unknown) => isRecord(v) && typeof v.id === 'string' && Boolean(v.id.trim()) && typeof v.topic_id === 'string'
+    && isCount(v.qa_id) && v.qa_id > 0 && typeof v.title === 'string' && Boolean(v.title.trim())
+    && vocSopKinds.some(kind => kind === v.kind) && vocSopStatuses.some(status => status === v.status)
+    && sopEvidence(v.problem) && Array.isArray(v.conditions) && v.conditions.every(sopEvidence)
+    && (v.replies === undefined || Array.isArray(v.replies) && v.replies.every(sopEvidence))
+    && Array.isArray(v.steps) && v.steps.every(step => isRecord(step) && vocSopPhases.some(phase => phase === step.phase)
+      && vocSopOutcomes.some(outcome => outcome === step.outcome) && sopEvidence(step.evidence)
+      && (step.feedback === undefined || sopEvidence(step.feedback)))
+    && (v.result === null || sopEvidence(v.result)) && isStringArray(v.missing)
   const job = (v: unknown) => isRecord(v) && typeof v.id === 'string'
     && ['queued', 'running', 'completed', 'partial', 'failed', 'skipped'].includes(String(v.status))
     && hasCounts(v, ['total', 'processed', 'failed', 'skipped', 'usage_tokens'])
@@ -213,6 +250,7 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     case 'voc2/topics': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(workbench ? enrichedTopic : topic)
       && (!workbench || comparison(data.comparison)); break
     case 'voc2/knowledge': valid = data.item !== undefined ? knowledge(data.item) : isCount(data.total) && Array.isArray(data.items) && data.items.every(knowledge); break
+    case 'voc2/sops': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(sop); break
     case 'voc2/exceptions': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => isRecord(item)
       && ['id', 'kind', 'question', 'reason', 'created_at'].every(key => typeof item[key] === 'string')); break
     case 'voc2/topic': valid = (workbench ? enrichedTopic(data.topic) : topic(data.topic))
