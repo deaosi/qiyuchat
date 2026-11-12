@@ -25,7 +25,7 @@ class TestSolutionStore(unittest.TestCase):
         self.sources = voc_engine._sources(self.cfg, {})
         self.qa_id = next(qa_id for qa_id, row in self.sources.items() if "为什么没有待办" in row["question"])
 
-    def synthesize(self, _cfg, messages, anchors):
+    def synthesize(self, _cfg, messages, anchors, **kwargs):
         self.assertEqual(len(messages), 4)
         self.assertIn(messages[0]["id"], anchors)
         self.assertNotIn("merchant-a", repr(messages))
@@ -64,3 +64,22 @@ class TestSolutionStore(unittest.TestCase):
         self.assertEqual(store.enrich(self.cfg, self.sources, fallback), fallback)
         self.assertEqual(store.run(self.cfg, {}, max_calls=2, max_tokens=100_000,
                                    qa_ids={self.qa_id})["calls"], 0)
+
+    def test_retry_reuses_the_current_draft_and_reserves_only_the_review_call(self):
+        saved_draft = {"title": "暂存初稿", "sections": []}
+
+        def interrupted(_cfg, _messages, _anchors, *, draft, checkpoint):
+            self.assertIsNone(draft)
+            checkpoint(saved_draft)
+            raise ModelProtocolError("safe", 504)
+
+        with patch("src.voc_solution.run", side_effect=interrupted), patch("src.voc_solution_store.time.time", return_value=1000):
+            store.run(self.cfg, {}, max_calls=2, max_tokens=100_000, qa_ids={self.qa_id})
+
+        def reviewed(cfg, messages, anchors, *, draft, checkpoint):
+            self.assertEqual(draft, saved_draft)
+            return self.synthesize(cfg, messages, anchors)
+
+        with patch("src.voc_solution.run", side_effect=reviewed), patch("src.voc_solution_store.time.time", return_value=1601):
+            result = store.run(self.cfg, {}, max_calls=1, max_tokens=100_000, qa_ids={self.qa_id})
+        self.assertEqual((result["generated"], result["calls"]), (1, 1))

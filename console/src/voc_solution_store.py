@@ -16,7 +16,7 @@ from .voc_case_paths import _safe_label
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS voc_solution_case (
  qa_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
- state TEXT NOT NULL, solution TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+ state TEXT NOT NULL, solution TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', draft TEXT NOT NULL DEFAULT '',
  attempts INTEGER NOT NULL, retry_at REAL NOT NULL, owner TEXT NOT NULL, updated_at REAL NOT NULL
 );
 """
@@ -100,24 +100,36 @@ def _claim(path, candidate, timeout, observed_at):
         row = db.execute("SELECT * FROM voc_solution_case WHERE qa_id=?", (candidate["qa_id"],)).fetchone()
         if not _due(row, candidate, now) or row is not None and row["updated_at"] > observed_at:
             return None
-        attempts = row["attempts"] + 1 if row is not None and row["fingerprint"] == candidate["fingerprint"] else 1
-        db.execute("""INSERT INTO voc_solution_case(qa_id,session_id,fingerprint,state,attempts,retry_at,owner,updated_at)
-                    VALUES(?,?,?,'running',?,?,?,?) ON CONFLICT(qa_id) DO UPDATE SET
+        same_source = row is not None and row["fingerprint"] == candidate["fingerprint"]
+        attempts = row["attempts"] + 1 if same_source else 1
+        draft = row["draft"] if same_source else ""
+        db.execute("""INSERT INTO voc_solution_case(qa_id,session_id,fingerprint,state,attempts,retry_at,owner,updated_at,draft)
+                    VALUES(?,?,?,'running',?,?,?,?,?) ON CONFLICT(qa_id) DO UPDATE SET
                     session_id=excluded.session_id,fingerprint=excluded.fingerprint,state='running',solution='',error='',
-                    attempts=excluded.attempts,retry_at=excluded.retry_at,owner=excluded.owner,updated_at=excluded.updated_at""",
+                    attempts=excluded.attempts,retry_at=excluded.retry_at,owner=excluded.owner,updated_at=excluded.updated_at,draft=excluded.draft""",
                    (candidate["qa_id"], candidate["session_id"], candidate["fingerprint"], attempts,
-                    now + max(300, timeout * 2 + 90), owner, now))
-    return owner, attempts
+                    now + max(300, timeout * 2 + 90), owner, now, draft))
+    return owner, attempts, json.loads(draft) if draft else None
+
+
+def _checkpoint(path, candidate, owner, draft) -> None:
+    with assets.connection(path, write=True) as db, assets.transaction(db):
+        saved = db.execute("""UPDATE voc_solution_case SET draft=? WHERE qa_id=? AND fingerprint=? AND owner=? AND state='running'""",
+                           (assets.dump(draft), candidate["qa_id"], candidate["fingerprint"], owner)).rowcount
+        if saved != 1:
+            raise RuntimeError("VOC solution lease changed")
 
 
 def _finish(path, candidate, claim, solution=None, error="") -> bool:
-    owner, attempts = claim
+    owner, attempts, _ = claim
     now = time.time()
     retry_at = now + min(21600, 600 * 2 ** min(attempts - 1, 6)) if error else 0
     with assets.connection(path, write=True) as db, assets.transaction(db):
-        return db.execute("""UPDATE voc_solution_case SET state=?,solution=?,error=?,retry_at=?,owner='',updated_at=?
+        return db.execute("""UPDATE voc_solution_case SET state=?,solution=?,error=?,retry_at=?,owner='',updated_at=?,
+                    draft=CASE WHEN ? THEN draft ELSE '' END
                     WHERE qa_id=? AND fingerprint=? AND owner=? AND state='running'""",
                    ("retry" if error else "complete", assets.dump(solution) if solution else "", error, retry_at, now,
+                    error.startswith("gateway_") or error == "model_validation",
                     candidate["qa_id"], candidate["fingerprint"], owner)).rowcount == 1
 
 
@@ -135,7 +147,7 @@ def pending(cfg, filters=None) -> bool:
 def run(cfg, filters, *, max_calls, max_tokens, qa_ids=None) -> dict:
     """Budget two model requests per case and publish only while the source still matches."""
     report = {"calls": 0, "reserved_tokens": 0, "usage_tokens": 0, "generated": 0, "errors": {}}
-    if (max_calls < _CALLS_PER_CASE or max_tokens < 8192 or cfg.runtime.voc_domain != "zhihuige"
+    if (max_calls < 1 or max_tokens < 8192 or cfg.runtime.voc_domain != "zhihuige"
             or cfg.runtime.mock or not voc.configured(cfg)):
         return report
     from . import voc_case_paths, voc_engine
@@ -151,26 +163,37 @@ def run(cfg, filters, *, max_calls, max_tokens, qa_ids=None) -> dict:
     if not candidates:
         return report
     preferred = {item["qa_id"] for item in voc_case_paths.build(cfg, sources)}
-    candidates.sort(key=lambda item: (item["qa_id"] not in preferred, -len(item["messages"]), -item["asked_at"], item["qa_id"]))
+    def previous_draft(item):
+        prior = stored.get(item["qa_id"], {})
+        return bool(prior.get("fingerprint") == item["fingerprint"] and prior.get("draft"))
+
+    candidates.sort(key=lambda item: (not previous_draft(item), item["qa_id"] not in preferred,
+                                      -len(item["messages"]), -item["asked_at"], item["qa_id"]))
     with assets.connection(path, write=True) as db:
         db.executescript(_SCHEMA)
+        with assets.transaction(db):
+            if "draft" not in {row[1] for row in db.execute("PRAGMA table_info(voc_solution_case)")}:
+                db.execute("ALTER TABLE voc_solution_case ADD COLUMN draft TEXT NOT NULL DEFAULT ''")
 
     used_segments = set()
     errors: Counter = Counter()
     for candidate in candidates:
-        if report["calls"] + _CALLS_PER_CASE > max_calls:
-            break
-        reservation = 3 * candidate["size"] + 14_000
+        resume = previous_draft(candidate)
+        calls = 1 if resume else _CALLS_PER_CASE
+        if report["calls"] + calls > max_calls:
+            continue
+        reservation = (2 * candidate["size"] + 7_000) if resume else (3 * candidate["size"] + 14_000)
         if candidate["segment_key"] in used_segments or max(report["reserved_tokens"], report["usage_tokens"]) + reservation > max_tokens:
             continue
         claim = _claim(path, candidate, cfg.llm.timeout, observed_at)
         if claim is None:
             continue
         used_segments.add(candidate["segment_key"])
-        report["calls"] += _CALLS_PER_CASE
+        report["calls"] += calls
         report["reserved_tokens"] += reservation
         try:
-            result = voc_solution.run(cfg, candidate["messages"], candidate["anchors"])
+            result = voc_solution.run(cfg, candidate["messages"], candidate["anchors"], draft=claim[2],
+                                      checkpoint=lambda draft: _checkpoint(path, candidate, claim[0], draft))
         except ModelProtocolError as exc:
             report["usage_tokens"] += getattr(exc, "usage_tokens", 0)
             code = f"gateway_{exc.status}"

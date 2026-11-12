@@ -53,7 +53,11 @@ class TestVocSolution(unittest.TestCase):
         self.assertEqual(set(solution), {"title", "sections"})
         self.assertEqual(complete.call_count, 2)
         self.assertTrue(all(call.args[0] == self.cfg.llm for call in complete.call_args_list))
-        self.assertEqual(complete.call_args_list[1].args[2]["sections"][3]["evidence"], [2])
+        review = complete.call_args_list[1].args[2]
+        self.assertEqual(review["sections"][3][2], [2])
+        self.assertEqual(review["messages"], [["U", self.problem["text"]], ["S", self.diagnosis["text"]],
+                                               ["S", self.action["text"]], ["U", self.goal["text"]]])
+        self.assertEqual(review["anchors"], [0])
 
     def test_source_guard_rejects_missing_staff_boundary_or_unknown_anchor_before_model(self):
         complete = Mock()
@@ -117,14 +121,43 @@ class TestVocSolution(unittest.TestCase):
                 self.assertEqual(len(result["solution"]["sections"]), len(accepted))
 
     def test_required_claim_needs_independent_approval_and_invalid_verdict_fails_closed(self):
-        for verdict in ({"title_supported": True, "supported": [0]}, {"title_supported": True, "supported": [False, 1]},
+        terminal, _ = self.extract(self.messages, [self.question_claim, self.action_claim], {"title_supported": True, "supported": [0]})
+        self.assertEqual(terminal, {"solution": None, "usage_tokens": 56})
+        for verdict in ({"title_supported": True, "supported": [False, 1]},
                         {"title_supported": True, "supported": [0, 1, 1]}, {"title_supported": "true", "supported": [0, 1]}):
             with self.subTest(verdict=verdict):
                 result, _ = self.extract(self.messages, [self.question_claim, self.action_claim], verdict)
-                self.assertEqual(result, {"solution": None, "usage_tokens": 56})
+                self.assertEqual(result, {"solution": None, "usage_tokens": 56, "retry": True})
 
     def test_gateway_error_preserves_status_and_usage_from_completed_draft(self):
         complete = Mock(side_effect=[response({"sections": [self.question_claim, self.action_claim]}, 37), ModelProtocolError("模型超时", 504)])
         with self.assertRaises(ModelProtocolError) as raised:
             run(self.cfg, self.messages, {"question"}, complete=complete)
         self.assertEqual((raised.exception.status, raised.exception.usage_tokens), (504, 37))
+
+    def test_review_retries_a_bound_checkpoint_without_generating_the_draft_again(self):
+        saved = []
+        source_quote = "配置为通用知识加入待办"
+        action = {**self.action_claim, "evidence": [{"message_id": "staff-action", "quote": source_quote}], "unknown": "omit"}
+        goal = claim("verification", "相同对话出现稍等时应产生待办。", self.goal, mode="expected")
+        data = {"title": "稍等没有生成待办", "sections": [self.question_claim, action, goal], "unknown": "omit"}
+        first = Mock(side_effect=[response(data, 37), ModelProtocolError("模型超时", 504)])
+        with self.assertRaises(ModelProtocolError):
+            run(self.cfg, self.messages, {"question"}, complete=first, checkpoint=saved.append)
+        [draft] = saved
+        self.assertEqual(set(draft), {"title", "sections"})
+        self.assertEqual(draft["sections"][1], self.action_claim)
+        self.assertEqual(draft["sections"][2], goal)
+
+        retry = Mock(return_value=response({"title_supported": True, "supported": [0, 1, 2]}, 19))
+        result = run(self.cfg, self.messages, {"question"}, complete=retry, draft=draft, checkpoint=saved.append)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(result["usage_tokens"], 19)
+        self.assertEqual(result["solution"]["sections"][1]["text"], f"客服提出：{self.action_claim['text']}")
+        self.assertEqual(retry.call_count, 1)
+        self.assertEqual(retry.call_args, first.call_args_list[1])
+
+        stale = Mock()
+        changed = [self.problem, self.diagnosis, {**self.action, "text": "没有配置修改。"}, self.goal]
+        self.assertEqual(run(self.cfg, changed, {"question"}, complete=stale, draft=draft), {"solution": None, "usage_tokens": 0})
+        stale.assert_not_called()
