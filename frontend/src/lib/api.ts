@@ -211,6 +211,11 @@ const vocPilotEvidenceStatuses = ['reported', 'staff_investigated', 'cause_confi
 const vocPlaybookStatuses = ['investigation', 'guidance', 'verified'] as const
 export type VocPilotFamily = typeof vocPilotFamilies[number]
 export type VocPilotEvidence = { qa_id: number; message_id: string; quote: string; ts: number }
+export type VocPilotCase = VocPilotEvidence & {
+  anchored: boolean
+  has_reply: boolean
+  details?: { goal?: string; observed?: string; checked?: string }
+}
 export type VocPilotIssue = {
   id: string
   family: VocPilotFamily
@@ -222,7 +227,7 @@ export type VocPilotIssue = {
   evidence_status: typeof vocPilotEvidenceStatuses[number]
   impact: { consultations: number; sessions: number; merchants: number; unidentified_sessions: number }
   next: { owner: string; action: string; missing: string[] }
-  cases: (VocPilotEvidence & { anchored: boolean; has_reply: boolean })[]
+  cases: VocPilotCase[]
 }
 export type VocIssuePilot = {
   items: VocPilotIssue[]
@@ -250,6 +255,9 @@ export type VocPlaybook = Pick<VocPilotIssue, 'id' | 'family' | 'title' | 'platf
   branches: VocPlaybookBranch[]
   missing: string[]
   evidence: VocPilotEvidence[]
+  cases?: VocPilotCase[]
+  impact?: VocPilotIssue['impact']
+  counterevidence?: VocPilotEvidence[]
 }
 
 function validateVoc2Response(name: string, data: unknown, workbench = false): void {
@@ -325,13 +333,18 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     && typeof v.message_id === 'string' && (!needsAnchor || Boolean(v.message_id.trim()))
     && typeof v.quote === 'string' && Boolean(v.quote.trim()) && isCount(v.ts)
   const pilotEvidenceList = (v: unknown) => Array.isArray(v) && v.every(item => pilotEvidence(item))
+  const pilotImpact = (v: unknown) => isRecord(v) && hasCounts(v, ['consultations', 'sessions', 'merchants', 'unidentified_sessions'])
+  const pilotCaseDetails = (v: unknown) => isRecord(v)
+    && [v.goal, v.observed, v.checked].every(value => value === undefined || typeof value === 'string')
+  const pilotCases = (v: unknown) => Array.isArray(v) && v.every(item => isRecord(item)
+    && typeof item.anchored === 'boolean' && typeof item.has_reply === 'boolean' && pilotEvidence(item, item.anchored)
+    && (item.details === undefined || pilotCaseDetails(item.details)))
   const pilotIssue = (v: unknown) => isRecord(v) && pilotBase(v)
     && vocPilotEvidenceStatuses.some(status => status === v.evidence_status)
     && (v.scope_status === undefined || v.scope_status === 'needs_context' || v.scope_status === 'scoped')
-    && isRecord(v.impact) && hasCounts(v.impact, ['consultations', 'sessions', 'merchants', 'unidentified_sessions'])
+    && pilotImpact(v.impact)
     && isRecord(v.next) && typeof v.next.owner === 'string' && typeof v.next.action === 'string' && isStringArray(v.next.missing)
-    && Array.isArray(v.cases) && v.cases.every(item => isRecord(item) && typeof item.anchored === 'boolean'
-      && typeof item.has_reply === 'boolean' && pilotEvidence(item, item.anchored))
+    && pilotCases(v.cases)
   const playbook = (v: unknown) => isRecord(v) && pilotBase(v) && typeof v.issue_id === 'string'
     && vocPlaybookStatuses.some(status => status === v.status) && isCount(v.checked_cases)
     && Array.isArray(v.triage) && v.triage.every(item => isRecord(item)
@@ -348,6 +361,8 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
       && Array.isArray(branch.steps) && branch.steps.every(step => isRecord(step) && typeof step.text === 'string'
         && pilotEvidenceList(step.evidence)))
     && isStringArray(v.missing) && pilotEvidenceList(v.evidence)
+    && (v.cases === undefined || pilotCases(v.cases)) && (v.impact === undefined || pilotImpact(v.impact))
+    && (v.counterevidence === undefined || pilotEvidenceList(v.counterevidence))
   const job = (v: unknown) => isRecord(v) && typeof v.id === 'string'
     && ['queued', 'running', 'completed', 'partial', 'failed', 'skipped'].includes(String(v.status))
     && hasCounts(v, ['total', 'processed', 'failed', 'skipped', 'usage_tokens'])

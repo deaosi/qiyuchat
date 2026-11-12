@@ -49,13 +49,32 @@ describe('VOC product evidence responses', () => {
     const item = { ...shared, scope_status: 'needs_context', evidence_status: 'reported',
       impact: { consultations: 1, sessions: 1, merchants: 0, unidentified_sessions: 1 },
       next: { owner: '客服支持', action: '确认授权状态。', missing: ['适用条件'] },
-      cases: [{ ...anchor, message_id: '', anchored: false, has_reply: false }],
+      cases: [{ ...anchor, message_id: '', anchored: false, has_reply: false, details: { observed: '平台侧出现授权提示' } }],
     }
     const data = { items: [item], total: 1, coverage: { source_events: 1, matched_consultations: 1, classified_consultations: 1, needs_context: 0 } }
     const fetch = vi.fn().mockResolvedValueOnce(json(data)).mockResolvedValueOnce(json({ ...data, items: [{ ...item, cases: [{ ...item.cases[0], anchored: true }] }] }))
     vi.stubGlobal('fetch', fetch)
     await expect(apiGet('voc2/issue-pilot', filters)).resolves.toEqual(data)
     await expect(apiGet('voc2/issue-pilot', filters)).rejects.toMatchObject({ status: 502 })
+  })
+
+  it('validates grounded consultations, impact and conflicting source anchors on playbooks', async () => {
+    const consultation = { ...anchor, anchored: true, has_reply: false, details: { goal: '启用商品授权', observed: '授权后商品列表为空' } }
+    const item = { ...shared, issue_id: 'issue-1', status: 'investigation', checked_cases: 0,
+      triage: [], branches: [], missing: ['case_evidence'], evidence: [], cases: [consultation],
+      impact: { consultations: 1, sessions: 1, merchants: 0, unidentified_sessions: 1 },
+      counterevidence: [{ ...anchor, qa_id: 24, message_id: 'msg-8' }],
+    }
+    const data = { items: [item], total: 1 }
+    const fetch = vi.fn().mockResolvedValueOnce(json(data))
+    for (const invalid of [
+      { cases: [{ ...consultation, details: { checked: ['尝试授权'] } }] },
+      { impact: { ...item.impact, sessions: -1 } },
+      { counterevidence: [{ ...item.counterevidence[0], message_id: '' }] },
+    ]) fetch.mockResolvedValueOnce(json({ ...data, items: [{ ...item, ...invalid }] }))
+    vi.stubGlobal('fetch', fetch)
+    await expect(apiGet('voc2/playbooks', filters)).resolves.toEqual(data)
+    for (let i = 0; i < 3; i++) await expect(apiGet('voc2/playbooks', filters)).rejects.toMatchObject({ status: 502 })
   })
 
   it('rejects a playbook when a branch points to invalid escalation evidence', async () => {

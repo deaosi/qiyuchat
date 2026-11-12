@@ -146,6 +146,7 @@ class _Record:
     cause: str
     merchant: str
     preview: str
+    details: dict[str, str]
 
 
 def _labels(patterns: dict[str, str], text: str) -> list[str]:
@@ -184,6 +185,28 @@ def _safe_label(text: str, source: dict) -> str:
         if isinstance(name, str) and len(name) >= 2 and name not in ("匿名客户", "未分组", "未记录客服"):
             text = text.replace(name, "[名称]")
     return " ".join(text.split())
+
+
+def _case_details(row: dict, case: dict, preview: str, status: str) -> dict[str, str]:
+    domain, source = row["data"].get("domain", {}), row["source"]
+    details = {}
+    for key, name in (("goal", "merchant_goal"), ("observed", "actual")):
+        refs = _refs(row, [domain.get(name)], "question")
+        if not refs:
+            continue
+        ref = refs[0]
+        if case["start"] <= ref["start"] < ref["end"] <= case["end"]:
+            text = _safe_label(ref["quote"], source)
+            if text and text != preview:
+                details[key] = text
+    if status != "reported":
+        refs = _refs(row, domain.get("diagnosis", {}).get("evidence", []), "answer")
+        checks = (_safe_label(ref["quote"], source) for ref in refs
+                  if ref["source_refs"] and _INVESTIGATED.search(ref["quote"])
+                  and not _NOT_VERIFIED.search(ref["quote"]) and not _TENTATIVE.search(ref["quote"]))
+        if checked := next((text for text in checks if text), ""):
+            details["checked"] = checked
+    return details
 
 
 def _general_family(quote: str, request: str, product_object: bool, goal: list[dict], actual: list[dict]) -> str:
@@ -379,32 +402,21 @@ def _aggregate_status(records: list[_Record], consultations: set[tuple[str, str]
     return "reported", ""
 
 
-def _next(scope: _Scope, evidence_status: str, cause_type: str, records: list[_Record]) -> dict:
+def _missing_context(scope: _Scope, evidence_status: str, cause_type: str, records: list[_Record]) -> list[str]:
     missing = []
     if not scope.platform:
         missing.append("使用的平台")
     if not scope.module:
         missing.append("具体功能模块")
-    if not scope.condition:
-        missing.append("适用账号、场景或触发条件")
-    if scope.family in ("configuration", "scenario_config"):
-        if not any(item.case["has_reply"] for item in records):
-            missing.append("可追溯的配置步骤")
-        return {"owner": "客服运营", "action": "确认适用场景，整理可复现的配置步骤和测试样例。", "missing": missing}
+    if scope.family in ("no_reply", "anomaly") and not scope.condition:
+        missing.append("问题发生时的条件")
+    if not any(item.case["has_reply"] for item in records):
+        missing.append("可核对的客服处理记录")
     if scope.family == "platform_limit" and cause_type != "platform_limit_confirmed":
-        return {"owner": "平台对接", "action": "核对当前平台规则、账户权限和可支持的操作范围。",
-                "missing": [*missing, "当前平台规则或人工核查依据"]}
-    if scope.family == "other":
-        return {"owner": "客服支持", "action": "确认用户要完成的操作和预期结果，补充可追溯的答复。", "missing": missing}
-    if cause_type == "defect_confirmed":
-        return {"owner": "产品研发", "action": "核对已确认的异常范围和复现记录，安排修复及回归验证。", "missing": missing}
-    if cause_type:
-        return {"owner": "技术支持", "action": "按已核查的范围复核处理办法，并记录复测结果。", "missing": missing}
-    if evidence_status == "staff_investigated":
-        return {"owner": "技术支持", "action": "复核已检查的条件和原始测试记录，再判断原因。",
-                "missing": [*missing, "明确归因与复测结果"]}
-    return {"owner": "客服支持", "action": "用同一测试输入复现，记录触发条件、预期和实际回复。",
-            "missing": [*missing, "客服核查或复现依据"]}
+        missing.append("平台限制依据")
+    if evidence_status == "staff_investigated" and scope.family in ("no_reply", "anomaly"):
+        missing.append("原因或复测结论")
+    return missing
 
 
 def _card(scope: _Scope, records: list[_Record]) -> dict:
@@ -420,6 +432,8 @@ def _card(scope: _Scope, records: list[_Record]) -> dict:
         case = item.case
         members.setdefault((case["qa_id"], case["start"], case["end"]), case)
         preview = {name: value for name, value in case.items() if name not in ("start", "end")}
+        if item.details:
+            preview["details"] = item.details
         representatives.setdefault(item.key, {**preview, "quote": item.preview})
     title = scope.variant
     if scope.family == "no_reply":
@@ -432,7 +446,7 @@ def _card(scope: _Scope, records: list[_Record]) -> dict:
             "scope_status": "scoped" if scope.platform and scope.module and (scope.condition or scope.family not in ("no_reply", "anomaly")) else "needs_context",
             "evidence_status": status, "impact": {"consultations": len(consultations), "sessions": len(sessions),
                                                   "merchants": len(known), "unidentified_sessions": len(sessions - known_sessions)},
-            "next": _next(scope, status, cause_type, records),
+            "next": {"owner": "", "action": "", "missing": _missing_context(scope, status, cause_type, records)},
             "cases": list(representatives.values())[:5], "_members": list(members.values())}
 
 
@@ -452,7 +466,10 @@ def build(rows: list[dict]) -> dict:
             continue
         classified.add(key)
         source = row["source"]
-        groups[scope].append(_Record(key, case, *_evidence_status(row), source.get("_known_merchant") or "", _safe_label(case["quote"], source)))
+        status, cause_type, cause = _evidence_status(row)
+        preview = _safe_label(case["quote"], source)
+        groups[scope].append(_Record(key, case, status, cause_type, cause, source.get("_known_merchant") or "",
+                                     preview, _case_details(row, case, preview, status)))
     items = [_card(scope, records) for scope, records in groups.items()]
     items.sort(key=lambda item: (-item["impact"]["consultations"], item["scope_status"] != "scoped",
                                  item["evidence_status"] == "reported", -item["impact"]["merchants"],

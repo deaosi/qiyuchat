@@ -33,6 +33,7 @@ def case(qa_id, *, platform="抖店", condition="仅限子账号", result=True):
 
 def issue(*cases, family="no_reply"):
     return {"id": "issue_1", "family": family, "title": "退款场景不触发", "platform": "抖音", "module": "退款场景", "condition": "已开启",
+            "cases": [], "impact": {"consultations": len(cases), "sessions": len(cases), "merchants": 0, "unidentified_sessions": len(cases)},
             "_members": [{**item["problem"], "qa_id": item["qa_id"], "anchored": True, "has_reply": True} for item in cases]}
 
 
@@ -60,7 +61,7 @@ class TestPlaybooks(unittest.TestCase):
         self.assertEqual((item["status"], item["branches"], item["checked_cases"]), ("investigation", [], 2))
         self.assertIn("post_change_retest", item["missing"])
         self.assertIn("applicability", item["missing"])
-        self.assertEqual(len(item["triage"]), 3)
+        self.assertEqual(item["triage"], [])
 
     def test_required_original_anchor_does_not_use_a_fuzzy_quote(self):
         example = case(1)
@@ -85,6 +86,7 @@ class TestPlaybooks(unittest.TestCase):
         self.assertEqual((item["status"], item["branches"]), ("investigation", []))
         self.assertIn("conflicting_case", item["missing"])
         self.assertIn("f2", {source["message_id"] for source in item["evidence"]})
+        self.assertEqual([source["message_id"] for source in item["counterevidence"]], ["f2"])
 
     def test_failure_on_other_account_scope_does_not_poison_established_path(self):
         success, failure = case(1), case(2, condition="仅限主账号", result=False)
@@ -172,20 +174,16 @@ class TestPlaybooks(unittest.TestCase):
         self.assertEqual((item["status"], item["branches"]), ("investigation", []))
         self.assertIn("conflicting_case", item["missing"])
 
-    def test_investigation_follows_the_actual_problem(self):
-        base = issue()
-        not_triggered = {**base, "title": "退款场景：未触发"}
-        intermittent = {**base, "title": "退款场景：没有回复", "_members": [{"quote": "有时候不回复。"}]}
-        wrong_answer = {**base, "title": "退款场景：回复错误"}
-        reply_configuration = {**base, "family": "scenario_config", "title": "退款场景：调整回复内容"}
-        platform = {**base, "family": "platform_limit", "title": "退款场景：当前版本无法绑定"}
-        items = build([not_triggered, intermittent, wrong_answer, reply_configuration, platform], [])["items"]
-        self.assertTrue(all(item["status"] == "investigation" and not item["branches"] for item in items))
-        self.assertIn("停在触发环节", items[0]["triage"][0]["when_no"])
-        self.assertIn("各取一条成功与失败样本", items[1]["triage"][0]["check"])
-        self.assertIn("预期答复和实际发出的答复", items[2]["triage"][0]["check"])
-        self.assertIn("修改的回复内容", items[3]["triage"][0]["check"])
-        self.assertIn("版本无法绑定", items[4]["triage"][0]["check"])
+    def test_missing_sop_shows_the_real_consultation_and_missing_platform(self):
+        evidence = {**ref("q7", "怎么授权啊", 10), "qa_id": 7, "anchored": True, "has_reply": False}
+        card = {**issue(family="scenario_config"), "title": "授权：绑定与授权", "platform": "", "module": "授权", "condition": "",
+                "cases": [evidence], "_members": [evidence], "impact": {"consultations": 1, "sessions": 1, "merchants": 0, "unidentified_sessions": 1},
+                "next": {"owner": "", "action": "", "missing": ["使用的平台", "可核对的客服处理记录"]}}
+        [item] = build([card], [])["items"]
+        self.assertEqual((item["status"], item["checked_cases"], item["triage"], item["branches"]), ("investigation", 0, [], []))
+        self.assertEqual(item["cases"], [evidence])
+        self.assertEqual(item["impact"], card["impact"])
+        self.assertEqual(set(item["missing"]), {"case_evidence", "使用的平台"})
 
     def test_other_families_are_visible_but_inconsistent_case_kind_cannot_publish(self):
         example = case(1)

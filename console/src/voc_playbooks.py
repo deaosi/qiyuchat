@@ -13,63 +13,6 @@ from .voc_sops import _PRESCRIBED_ACTIONS, _post_retest
 from .voc_topic_insights import _PLATFORM_NAMES
 
 
-_TRIAGE = {
-    "no_reply": (
-        ("在同一次复现里，确认该消息有没有进入预期的机器人接待或场景触发链路。",
-         "记录触发节点和时间，继续核对规则或知识检索。",
-         "记录店铺、会话、入口和触发条件，先定位接待入口或触发边界。"),
-        ("核对本次命中的规则或检索到的知识是否与客户问法、商品和场景条件相符。",
-         "记录命中对象和预期回复，继续对比生成、发送与送达结果。",
-         "记录预期和实际命中、当前条件及测试问法，沿对应规则或检索路径排查。"),
-        ("核对本次是否生成了回复，以及平台侧是否收到或展示。",
-         "保留平台显示与客户反馈的差异，确认是否在同一会话和时间点观察。",
-         "按未生成、生成未发送、发送未送达分开记录；带会话时间、测试问法和可见日志升级。"),
-    ),
-    "scenario_config": (
-        ("确认商家想在哪个平台、店铺和场景条件下，实现什么具体效果。",
-         "固定一条应触发的测试输入和一条不应触发的对照输入。",
-         "先补齐店铺、适用商品或入口、触发条件和预期效果，再决定是否调整。"),
-        ("核对现有配置及生效范围是否覆盖这条正例，并排除对照样本。",
-         "保持本次复测条件一致，检查配置结果和实际接待结果。",
-         "记录缺少或冲突的条件，按可核验的操作分支处理。"),
-        ("复测正例与对照，核对它们是否分别表现为触发与不触发。",
-         "记录测试输入、配置范围和结果，保留为后续复用依据。",
-         "保留配置前后差异、测试输入和实际结果，补证据后交接对应模块。"),
-    ),
-    "configuration": (
-        ("确认目标操作、当前配置和预期生效范围。",
-         "记录操作前的设置和一条可重复验证的输入。",
-         "补齐操作账号、适用范围、期望值和实际值，先明确需要调整哪项。"),
-        ("在相同范围用同一输入复测，实际结果是否符合预期？",
-         "保留配置前后差异、测试输入和结果。",
-         "记录哪个条件未生效，带上配置差异和复测结果交接。"),
-    ),
-    "anomaly": (
-        ("确认同一条件下的预期、实际结果和最短复现步骤。",
-         "记录首个偏离预期的步骤和时间，继续核对该步骤前的状态。",
-         "补齐触发操作、影响范围、预期结果和实际表现，复现后再归因。"),
-        ("能否在同一范围找到一个表现正常的对照样本？",
-         "比较正常与异常样本，保留第一处差异和可见错误信息。",
-         "保留异常样本、条件及时间，说明尚未获得对照，并提交相应团队核实。"),
-    ),
-    "platform_limit": (
-        ("核对适用平台、账号权限和当前版本，明确限制出现时的操作和提示。",
-         "保留原始提示和复现步骤，核对同范围的平台规则。",
-         "补齐具体账号角色、版本和可复现操作，避免把其他范围的限制套用到本案。"),
-        ("能否在适用范围内用可信规则或测试确认限制？",
-         "记录规则版本、适用范围和可核验的替代处理。",
-         "保留操作、提示与对照结果，请对应平台或支持团队确认。"),
-    ),
-    "other": (
-        ("确认商家具体要完成的操作、期望结果和当前观察。",
-         "固定对象、适用范围和最短检查步骤，留一条原始证据。",
-         "先补齐原问题、操作对象和期望结果，再选择处理方向。"),
-        ("能否在相同条件下核对预期与实际结果？",
-         "记录观察结果和下一步；有复测依据后再提炼处理方法。",
-         "保留会话时间、适用条件、已尝试动作与缺少的证据，交接相应团队。"),
-    ),
-}
-
 _KINDS = {"no_reply": {"anomaly"}, "scenario_config": {"configuration"}, "configuration": {"configuration"},
           "anomaly": {"anomaly"}, "platform_limit": {"configuration", "anomaly"}, "other": {"configuration", "anomaly"}}
 _PLATFORM_ALIASES = {"抖音": ("抖店",), "淘宝": ("千牛",)}
@@ -99,66 +42,6 @@ def _platforms(value: str) -> set[str]:
     normalized = _key(value)
     return {name for name, aliases in _PLATFORM_NAMES
             if any(alias in normalized for alias in (*aliases, *_PLATFORM_ALIASES.get(name, ())))}
-
-
-def _investigation(issue: dict) -> list[dict]:
-    family = issue["family"]
-    title, module = issue["title"], issue["module"] or "相关功能"
-    platform, condition = issue["platform"], issue["condition"]
-    scope = "、".join(value for value in (platform, module, condition) if value)
-    fallback = _TRIAGE[family]
-    if family == "no_reply":
-        if "回复错误" in title:
-            rows = (
-                (f"在「{scope}」复现一条答错的原问题，保留预期答复和实际发出的答复。",
-                 "把预期与实际答复逐项对比，记录跑偏的字段和当时条件。",
-                 "先向商家确认正确口径，并补齐原问、实际回复和对应时间。"),
-                ("能否确认本次采用的是哪条规则、哪条知识或哪个回复模板？",
-                 "对照该规则的条件、内容及优先级，检查是否命中了错误来源。",
-                 "保留店铺、会话时间、测试问题和两版答复，请技术确认回复依据。"),
-            )
-        elif "未触发" in title:
-            rows = (
-                (f"按「{scope}」固定测试输入、店铺、入口和时间，核对是否产生预期的触发记录。",
-                 "记录触发对象和时间，若最终没有答复，转查命中和发送链路。",
-                 "停在触发环节，逐项比对本次输入与生效条件，保留缺失或不匹配项。"),
-                ("能否通过同一店铺的一条正例，确认当前条件下应当触发？",
-                 "留存正例与失败样本，并标记第一次出现差异的触发条件。",
-                 "提交测试输入、预期场景、实际状态和可见日志，确认触发边界。"),
-            )
-        else:
-            rows = ((f"按「{scope}」固定一次测试，确认消息进入接待链路且能定位到时间。",
-                     fallback[0][1], fallback[0][2]), *fallback[1:])
-        sample_text = "\n".join([title, *(member.get("quote", "") for member in issue.get("_members", []))])
-        if re.search(r"偶发|偶尔|时有时无|不稳定|有时候.{0,10}(?:没有|不|没)|(?:有时|偶尔).{0,6}(?:不回复|不触发)", sample_text):
-            rows = ((f"若「{scope}」出现间歇现象，能否在同一店铺、问法和生效条件下各取一条成功与失败样本？",
-                     "比较两个样本的入口、时间、命中对象和回复结果，定位第一个差异。",
-                     "保留失败样本与已知条件，在同一范围复现，等待可比的成功样本。"), *rows)
-    elif "调整回复内容" in title:
-        rows = (
-            (f"明确「{scope}」要修改的回复内容、适用问法和适用范围。",
-             "保留修改前的答复，选择一条应命中和一条不应命中的问法。",
-             "先让商家确认期望口径与适用范围，补齐之前的实际答复。"),
-            ("用同一测试问法核对实际回复内容是否符合新口径，对照问法是否不受影响。",
-             "记录新旧答复和测试结果，确认改动只影响目标范围。",
-             "记录实际命中的规则或知识来源，检查是否有同范围的旧内容竞争。"),
-        )
-    elif "查找配置入口" in title or "绑定与授权" in title:
-        rows = (
-            (f"核对「{scope}」所用账号角色、目标店铺和当前授权状态。",
-             "按该平台已确认的操作文档核对入口或授权状态。",
-             "先确定目标店铺及操作权限，避免把其他店铺的配置路径套用进来。"),
-            ("目标账号能否在同一店铺进入相应功能或读取已授权状态？",
-             "记录账号角色、入口和核对结果，作为当前适用范围。",
-             "保留权限提示和时间点，向有权限的管理员或负责模块确认。"),
-        )
-    elif family == "scenario_config":
-        rows = ((f"明确「{scope}」的目标操作、预期生效条件和不应生效的边界。",
-                 fallback[0][1], fallback[0][2]), *fallback[1:])
-    else:
-        rows = ((f"针对「{title}」记录适用范围「{scope}」。{fallback[0][0]}",
-                 fallback[0][1], fallback[0][2]), *fallback[1:])
-    return [{"check": check, "when_yes": yes, "when_no": no} for check, yes, no in rows]
 
 
 def _ref(raw: object, qa_id: int) -> dict | None:
@@ -381,7 +264,7 @@ def build(issues: list[dict], sops: list[dict]) -> dict:
     items = []
     for issue in issues:
         family = issue.get("family")
-        if family not in _TRIAGE:
+        if family not in _KINDS:
             continue
         issue_id = issue["id"]
         members, checked = [], set()
@@ -441,8 +324,10 @@ def build(issues: list[dict], sops: list[dict]) -> dict:
         branches = list(published.values())
         if not checked:
             missing.add("case_evidence")
-        if not branches:
+        elif not branches:
             missing.add("complete_procedure")
+        missing.update(label for label in issue.get("next", {}).get("missing", [])
+                       if label != "可核对的客服处理记录")
         if any(branch["status"] == "guidance" for branch in branches):
             missing.add("verified_outcome")
         status = ("verified" if branches and all(branch["status"] == "verified" for branch in branches)
@@ -450,6 +335,7 @@ def build(issues: list[dict], sops: list[dict]) -> dict:
         items.append({"id": "playbook_" + digest([issue_id])[:24], "issue_id": issue_id, "title": issue["title"],
                       "family": family, "platform": issue.get("platform", ""), "module": issue.get("module", ""),
                       "condition": issue.get("condition", ""), "status": status, "checked_cases": len(checked),
-                      "triage": _investigation(issue),
-                      "branches": branches, "missing": sorted(missing), "evidence": _refs(counterevidence + members)})
+                      "triage": [], "cases": issue["cases"], "impact": issue["impact"],
+                      "branches": branches, "missing": sorted(missing), "evidence": _refs(counterevidence + members),
+                      "counterevidence": _refs(counterevidence)})
     return {"items": items, "total": len(items)}

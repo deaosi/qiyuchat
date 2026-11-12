@@ -23,22 +23,70 @@ it('shows an unfamiliar product issue and opens its exact conversation anchor', 
   render(<VocIssuePilotResults data={data} onOpenPair={open} />)
   expect(screen.getByText('待补上下文 3 次')).toBeTruthy()
   expect(screen.getByText('范围待补')).toBeTruthy()
-  fireEvent.change(screen.getByRole('searchbox', { name: '搜索产品问题' }), { target: { value: '子账号 回执' } })
+  const search = screen.getByRole('searchbox', { name: '搜索产品问题' })
+  fireEvent.change(search, { target: { value: '核对授权回执' } })
+  expect(screen.queryByRole('button', { name: /商品授权后拉取失败/ })).toBeNull()
+  fireEvent.change(search, { target: { value: '子账号 无法拉取' } })
   fireEvent.click(screen.getByRole('button', { name: /商品授权后拉取失败/ }))
   const detail = within(screen.getByRole('dialog', { name: '商品授权后拉取失败' }))
   expect(detail.getByText('识别 1 家商家')).toBeTruthy()
+  expect(detail.queryByText('核对授权回执。')).toBeNull()
   expect(detail.getByText('原因确认', { exact: false })).toBeTruthy()
   expect(detail.getByRole('link', { name: '查看处理手册' }).getAttribute('href')).toBe(`#voc-next?issue=${issueId}`)
   fireEvent.click(detail.getByRole('button', { name: '定位原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-3')
 })
 
-it('keeps investigation-only advice out of the copy action and preserves branch evidence', async () => {
+it('shows the actual authorization consultation and exact message instead of a stale generic guide', () => {
+  const question = { ...source, quote: '怎么授权啊' }
+  const playbook: VocPlaybook = {
+    id: 'playbook-1', issue_id: issueId, title: '授权：绑定与授权', family: 'configuration', platform: '', module: '绑定与授权', condition: '',
+    status: 'investigation', checked_cases: 0, branches: [],
+    triage: [{ check: '核对店铺、账号与授权角色。', when_yes: '检查账户权限。', when_no: '补齐账号。' }],
+    missing: ['使用的平台', 'case_evidence'], evidence: [{ ...source, quote: '旧版会话依据' }],
+    cases: [{ ...question, anchored: true, has_reply: false }, {
+      ...source, qa_id: 61, message_id: '', anchored: false, has_reply: false,
+      details: { goal: '拉取新商品', observed: '商品列表未更新', checked: '重新授权后刷新过列表' },
+    }],
+    impact: { consultations: 3, sessions: 2, merchants: 1, unidentified_sessions: 1 },
+  }
+  const open = vi.fn()
+  render(<VocPlaybookResults items={[playbook]} onOpenPair={open} />)
+  const search = screen.getByRole('searchbox', { name: '搜索处理手册' })
+  fireEvent.change(search, { target: { value: '授权角色' } })
+  expect(screen.queryByRole('button', { name: /怎么授权啊/ })).toBeNull()
+  fireEvent.change(search, { target: { value: '怎么授权啊 刷新过列表' } })
+  fireEvent.click(screen.getByRole('button', { name: /怎么授权啊.*仅有咨询记录/ }))
+
+  const detail = within(screen.getByRole('dialog', { name: '咨询详情' }))
+  expect(detail.getByText('仅有咨询记录')).toBeTruthy()
+  expect(detail.getByText('客户咨询摘录')).toBeTruthy()
+  expect(detail.queryByText('0 个关联处理案例')).toBeNull()
+  expect(detail.getByText('3 次咨询')).toBeTruthy()
+  expect(detail.getByText('2 个会话')).toBeTruthy()
+  expect(detail.getByText('识别 1 家商家')).toBeTruthy()
+  expect(detail.getByText('怎么授权啊')).toBeTruthy()
+  expect(detail.getByText('拉取新商品')).toBeTruthy()
+  expect(detail.getByText('商品列表未更新')).toBeTruthy()
+  expect(detail.getByText('重新授权后刷新过列表')).toBeTruthy()
+  expect(detail.getByText('使用的平台、完整处理记录')).toBeTruthy()
+  expect(detail.queryByText(/授权角色|排查决策|检查账户权限|旧版会话依据/)).toBeNull()
+  expect(detail.queryByRole('button', { name: '复制处理步骤' })).toBeNull()
+  fireEvent.click(detail.getByRole('button', { name: '定位原话' }))
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: question.quote }), 'source-3')
+  fireEvent.click(detail.getByRole('button', { name: '查看会话' }))
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '61' }), undefined)
+})
+
+it('preserves the playbook deep link and copies only branches with sourced steps and retest', async () => {
   const playbook: VocPlaybook = {
     id: 'playbook-1', issue_id: issueId, title: '检查商品授权', family: 'platform_limit', platform: '', module: '商品授权', condition: '子账号',
     status: 'investigation', checked_cases: 2,
     triage: [{ check: '是否有授权回执？', when_yes: '继续核对平台。', when_no: '请商家提供回执。' }],
-    branches: [{ condition: '已有回执', steps: [{ text: '核对回执与子账号是否一致。', evidence: [source] }], retest: '再次拉取商品。', escalation: '转交平台核对。' }],
+    branches: [{ condition: '已有回执', condition_evidence: [source], steps: [{ text: '核对回执与子账号是否一致。', evidence: [source] }],
+      retest: '再次拉取商品。', retest_evidence: [{ ...source, message_id: 'retest-4' }], escalation: '转交平台核对。' }, {
+      condition: '没有回执', steps: [{ text: '清空店铺授权。', evidence: [source] }], retest: '重新授权。', escalation: '',
+    }],
     missing: ['verified_outcome'], evidence: [source],
   }
   const open = vi.fn()
@@ -47,12 +95,14 @@ it('keeps investigation-only advice out of the copy action and preserves branch 
   history.replaceState(null, '', `#voc-next?issue=${issueId}`)
   const { rerender } = render(<VocPlaybookResults items={[]} onOpenPair={open} />)
   rerender(<VocPlaybookResults items={[playbook]} onOpenPair={open} />)
-  let detail = within(screen.getByRole('dialog', { name: '检查商品授权' }))
-  expect(detail.getByText('继续核对平台。', { exact: false })).toBeTruthy()
+  let detail = within(screen.getByRole('dialog', { name: '咨询详情' }))
+  expect(detail.queryByText('继续核对平台。', { exact: false })).toBeNull()
   expect(detail.queryByRole('button', { name: '复制处理步骤' })).toBeNull()
 
   rerender(<VocPlaybookResults items={[{ ...playbook, status: 'guidance' }]} onOpenPair={open} />)
   detail = within(screen.getByRole('dialog', { name: '检查商品授权' }))
+  expect(detail.getByText('2 个关联处理案例')).toBeTruthy()
+  expect(detail.queryByText(/清空店铺授权|转交平台核对/)).toBeNull()
   const evidence = detail.getByText('步骤依据').closest('details')!
   fireEvent.click(evidence.querySelector('summary')!)
   fireEvent.click(within(evidence).getByRole('button', { name: '定位原话' }))

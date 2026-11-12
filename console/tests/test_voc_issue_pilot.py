@@ -132,6 +132,24 @@ class IssueGroupingTests(unittest.TestCase):
         mixed = voc_issue_pilot.build([diagnosed(1, confirmed), diagnosed(2, investigated, status="pending")])["items"][0]
         self.assertEqual(mixed["evidence_status"], "staff_investigated")
 
+    def test_examples_surface_grounded_case_facts_without_inventing_a_next_step(self):
+        actual = "抖音下单后跟单催付未触发"
+        other_request = "怎么修改第二个店铺的授权权限"
+        question = f"{actual}，这是当前的问题。{other_request}？"
+        checked = "已核对跟单记录，本次没有触发。"
+        source = row(1, question, span=(0, question.index(other_request)), answer=checked,
+                     domain={"actual": ref(question, actual), "merchant_goal": ref(question, other_request),
+                             "diagnosis": {"evidence": [ref(checked, checked, "answer")]}})
+        [item] = voc_issue_pilot.build([source])["items"]
+        [case] = item["cases"]
+        self.assertEqual(case["details"], {"observed": actual, "checked": checked})
+        self.assertNotIn(other_request, case["quote"])
+        self.assertEqual((item["next"]["owner"], item["next"]["action"]), ("", ""))
+
+        source["source"]["_answer_parts"] = []
+        [unbound] = voc_issue_pilot.build([source])["items"]
+        self.assertEqual(unbound["cases"][0]["details"], {"observed": actual})
+
 
 if __name__ == "__main__":
     unittest.main()

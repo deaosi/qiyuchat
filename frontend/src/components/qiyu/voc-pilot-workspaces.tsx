@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { ArrowUpRight, ChevronLeft, ChevronRight, Copy } from 'lucide-react'
 import { toast } from 'sonner'
-import { normalizePair, type VocIssuePilot, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
+import { normalizePair, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -17,9 +17,8 @@ const issueStatuses: Record<VocPilotIssue['evidence_status'], string> = {
   reported: '客户反馈', staff_investigated: '客服已排查', cause_confirmed: '原因已确认',
 }
 const playbookStatuses: Record<VocPlaybook['status'], string> = {
-  investigation: '排查指南', guidance: '已核验指引', verified: '效果已验证',
+  investigation: '待沉淀', guidance: '已核验指引', verified: '效果已验证',
 }
-const owners: Record<string, string> = { support: '客服', product: '产品', engineering: '研发', merchant: '商家' }
 const gapLabels: Record<string, string> = {
   applicability: '适用条件', case_evidence: '完整处理记录', complete_procedure: '完整操作步骤',
   post_change_retest: '操作后复测', verified_outcome: '复测结果', conflicting_case: '与其他案例不一致的结果',
@@ -29,12 +28,12 @@ const count = new Intl.NumberFormat('zh-CN').format
 const issuePageSize = 6
 const playbookPageSize = 8
 
-function ownerLabel(owner: string) {
-  return owners[owner] ?? owner.trim()
-}
-
 function scopeText(item: { platform: string; module: string; condition: string }) {
   return [item.platform, item.module, item.condition].filter(Boolean).join(' · ')
+}
+
+function categoryText(item: Pick<VocPilotIssue, 'family' | 'platform' | 'module' | 'condition'>) {
+  return [families[item.family], scopeText(item)].filter(Boolean).join(' · ')
 }
 
 function matchSearch(search: string, fields: string[]) {
@@ -50,15 +49,56 @@ function MissingEvidence({ values }: { values: string[] }) {
   return <p className="text-sm leading-6 text-muted-foreground"><span className="mr-2 font-medium text-foreground">待补证据</span>{labels.join('、')}</p>
 }
 
-function SourceLine({ source, onOpenPair, anchored = true, label }: { source: VocPilotEvidence; onOpenPair: OpenEvidencePair; anchored?: boolean; label?: string }) {
-  const open = () => onOpenPair(normalizePair({ qa_id: source.qa_id, question: source.quote, asked_at: source.ts }), anchored ? source.message_id : undefined)
+function SourceLine({ source, onOpenPair, anchored = true, label, children }: { source: VocPilotEvidence; onOpenPair: OpenEvidencePair; anchored?: boolean; label?: string; children?: ReactNode }) {
+  const hasAnchor = anchored && Boolean(source.message_id.trim())
+  const open = () => onOpenPair(normalizePair({ qa_id: source.qa_id, question: source.quote, asked_at: source.ts }), hasAnchor ? source.message_id : undefined)
   return <div className="min-w-0 space-y-1 py-2">
     {label && <p className="text-xs text-muted-foreground">{label}</p>}
     <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{source.quote}</p>
+    {children}
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       {source.ts > 0 && <span className="tabular-nums">{displayTime(source.ts)}</span>}
-      <Button type="button" variant="ghost" size="xs" onClick={open}>{anchored ? '定位原话' : '查看会话'}<ArrowUpRight /></Button>
+      <Button type="button" variant="ghost" size="xs" onClick={open}>{hasAnchor ? '定位原话' : '查看会话'}<ArrowUpRight /></Button>
     </div>
+  </div>
+}
+
+const detailFields = [['goal', '咨询目标'], ['observed', '实际现象'], ['checked', '已做检查']] as const
+
+function caseSearchFields(cases: VocPilotCase[]) {
+  return cases.flatMap(source => [source.quote, ...detailFields.map(([key]) => source.details?.[key] ?? '')])
+}
+
+function CaseDetails({ source }: { source: VocPilotCase }) {
+  const shown = new Set([source.quote.trim()])
+  const fields = detailFields.flatMap(([key, label]) => {
+    const value = source.details?.[key]?.trim()
+    if (!value || shown.has(value)) return []
+    shown.add(value)
+    return [{ key, label, value }]
+  })
+  if (!fields.length) return null
+  return <dl className="grid gap-x-3 gap-y-1 py-2 text-sm leading-6 sm:grid-cols-[auto_minmax(0,1fr)]">{fields.map(({ key, label, value }) => <div key={key} className="contents">
+    <dt className="text-muted-foreground">{label}</dt><dd className="whitespace-pre-wrap [overflow-wrap:anywhere]">{value}</dd>
+  </div>)}</dl>
+}
+
+function CaseRecords({ cases, onOpenPair }: { cases: VocPilotCase[]; onOpenPair: OpenEvidencePair }) {
+  if (!cases.length) return null
+  return <section><div className="mb-1 flex flex-wrap items-center gap-x-2"><h3 className="text-sm font-medium">客户咨询摘录</h3>
+    <span className="text-xs text-muted-foreground">敏感信息已隐藏</span></div><div className="divide-y">{cases.map((source, index) =>
+    <SourceLine key={`${source.qa_id}-${source.message_id}-${index}`} source={source} anchored={source.anchored} onOpenPair={onOpenPair} label={source.has_reply ? '已采集到客服回复' : undefined}>
+      <CaseDetails source={source} />
+    </SourceLine>)}</div></section>
+}
+
+function ImpactCounts({ impact, checkedCases = 0 }: { impact?: VocPilotIssue['impact']; checkedCases?: number }) {
+  if (!impact && !checkedCases) return null
+  return <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm tabular-nums">
+    {impact && <><span>{count(impact.consultations)} 次咨询</span><span>{count(impact.sessions)} 个会话</span><span>识别 {count(impact.merchants)} 家商家</span>
+      {impact.unidentified_sessions > 0 && <span className="text-muted-foreground">{count(impact.unidentified_sessions)} 个会话身份待核实</span>}
+    </>}
+    {checkedCases > 0 && <span>{count(checkedCases)} 个关联处理案例</span>}
   </div>
 }
 
@@ -77,7 +117,7 @@ export function VocIssuePilotResults({ data, onOpenPair }: { data: VocIssuePilot
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const opener = useRef<HTMLButtonElement | null>(null)
   const input = useRef<HTMLInputElement>(null)
-  const matches = data.items.filter(item => matchSearch(search, [item.title, families[item.family], scopeText(item), item.next.action]))
+  const matches = data.items.filter(item => matchSearch(search, [item.title, categoryText(item), ...caseSearchFields(item.cases)]))
   const last = Math.max(0, Math.ceil(matches.length / issuePageSize) - 1)
   const current = Math.min(page, last)
   const selected = data.items.find(item => item.id === selectedId)
@@ -94,11 +134,10 @@ export function VocIssuePilotResults({ data, onOpenPair }: { data: VocIssuePilot
         <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-1 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
           onClick={event => { opener.current = event.currentTarget; setSelectedId(item.id) }}>
           <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
-            <span className="flex flex-wrap items-center gap-2"><span className="font-medium">{item.title}</span><Badge variant="outline" className="font-normal">{issueStatuses[item.evidence_status]}</Badge>
+            <span className="flex flex-wrap items-center gap-2"><span className="line-clamp-2 font-medium">{item.cases[0]?.quote ?? item.title}</span><Badge variant="outline" className="font-normal">{issueStatuses[item.evidence_status]}</Badge>
               {item.scope_status === 'needs_context' && <Badge variant="outline" className="font-normal">范围待补</Badge>}
             </span>
-            <span className="block text-xs text-muted-foreground">{[families[item.family], scopeText(item)].filter(Boolean).join(' · ')}</span>
-            {item.next.action && <span className="line-clamp-2 block text-sm leading-5 text-muted-foreground"><span className="mr-2 text-foreground">{ownerLabel(item.next.owner) || '下一步'}</span>{item.next.action}</span>}
+            <span className="block text-xs text-muted-foreground">{[item.cases.length ? item.title : '', categoryText(item)].filter(Boolean).join(' · ')}</span>
           </span>
           <span className="flex items-center gap-2 text-right text-xs tabular-nums"><span>{count(item.impact.consultations)} 次咨询</span><ChevronRight aria-hidden="true" className="size-4 text-muted-foreground" /></span>
         </button>
@@ -112,19 +151,15 @@ export function VocIssuePilotResults({ data, onOpenPair }: { data: VocIssuePilot
               {selected.scope_status === 'needs_context' && <Badge variant="outline" className="font-normal">范围待补</Badge>}
             </div>
             <SheetTitle className="text-lg [overflow-wrap:anywhere]">{selected.title}</SheetTitle>
-            <SheetDescription>{[families[selected.family], scopeText(selected)].filter(Boolean).join(' · ')}</SheetDescription>
+            <SheetDescription>{categoryText(selected)}</SheetDescription>
           </SheetHeader>
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm tabular-nums"><span>{count(selected.impact.consultations)} 次咨询</span><span>{count(selected.impact.sessions)} 个会话</span><span>识别 {count(selected.impact.merchants)} 家商家</span>
-              {selected.impact.unidentified_sessions > 0 && <span className="text-muted-foreground">{count(selected.impact.unidentified_sessions)} 个会话身份待核实</span>}
-            </div>
-            <section className="space-y-2 rounded-md border bg-muted/20 p-3"><h3 className="text-sm font-medium">下一步</h3>
-              <p className="text-sm leading-6 [overflow-wrap:anywhere]">{ownerLabel(selected.next.owner) && <span className="mr-2 text-muted-foreground">{ownerLabel(selected.next.owner)}</span>}{selected.next.action}</p>
+            <CaseRecords cases={selected.cases} onOpenPair={onOpenPair} />
+            <ImpactCounts impact={selected.impact} />
+            <section className="space-y-2 border-t pt-3">
               <MissingEvidence values={selected.next.missing} />
               <Button asChild variant="outline" size="sm"><a href={`#voc-next?issue=${encodeURIComponent(selected.id)}`}>查看处理手册<ArrowUpRight /></a></Button>
             </section>
-            {selected.cases.length > 0 && <section><h3 className="mb-2 text-sm font-medium">会话依据</h3><div className="divide-y">{selected.cases.map((source, index) =>
-              <SourceLine key={`${source.qa_id}-${source.message_id}-${index}`} source={source} anchored={source.anchored} onOpenPair={onOpenPair} label={source.has_reply ? '有回复' : '待补人工回复'} />)}</div></section>}
           </div>
         </>}
       </SheetContent>
@@ -132,43 +167,63 @@ export function VocIssuePilotResults({ data, onOpenPair }: { data: VocIssuePilot
   </div>
 }
 
-function canCopyBranch(playbook: VocPlaybook, branch: VocPlaybookBranch) {
-  return playbook.status !== 'investigation' && branch.steps.length > 0
+function visibleBranches(item: VocPlaybook) {
+  if (item.status === 'investigation') return []
+  return item.branches.filter(branch => branch.steps.length > 0
     && branch.steps.every(step => step.text.trim() && step.evidence.length > 0)
+    && branch.retest.trim() && branch.retest_evidence?.length)
 }
 
-async function copyBranch(playbook: VocPlaybook, branch: VocPlaybookBranch) {
-  if (!canCopyBranch(playbook, branch)) return
-  const status = branch.status ?? playbook.status
-  const text = [playbook.title, playbookStatuses[status], scopeText(playbook), branch.condition,
-    ...branch.steps.map((step, i) => `${i + 1}. ${step.text}`), branch.retest && `复测 ${branch.retest}`,
-    branch.escalation && `升级处理 ${branch.escalation}`].filter(Boolean).join('\n')
+function branchStatus(item: VocPlaybook, branch: VocPlaybookBranch) {
+  return (branch.status ?? item.status) === 'verified' && branch.result_evidence?.length ? 'verified' : 'guidance'
+}
+
+function PlaybookBadge({ item, branches }: { item: VocPlaybook; branches: VocPlaybookBranch[] }) {
+  let label = item.checked_cases === 0 && item.cases?.length ? '仅有咨询记录' : playbookStatuses.investigation
+  const verified = item.status === 'verified' && branches.length > 0 && branches.every(branch => branchStatus(item, branch) === 'verified')
+  if (branches.length > 0) label = verified ? playbookStatuses.verified : playbookStatuses.guidance
+  return <Badge variant={verified ? 'default' : 'outline'} className="w-fit font-normal">{label}</Badge>
+}
+
+async function copyBranch(playbook: VocPlaybook, branch: VocPlaybookBranch, condition: string, escalation: string) {
+  const text = [playbook.title, playbookStatuses[branchStatus(playbook, branch)], scopeText(playbook), condition,
+    ...branch.steps.map((step, i) => `${i + 1}. ${step.text}`), `复测 ${branch.retest}`,
+    escalation && `升级处理 ${escalation}`].filter(Boolean).join('\n')
   try { await navigator.clipboard.writeText(text); toast.success('已复制处理步骤。') }
   catch { toast.error('剪贴板暂不可用，可选中文字复制。') }
 }
 
+function EvidenceDetails({ title, sources, onOpenPair }: { title: string; sources?: VocPilotEvidence[]; onOpenPair: OpenEvidencePair }) {
+  if (!sources?.length) return null
+  return <details className="text-xs text-muted-foreground"><summary className="w-fit cursor-pointer">{title}</summary>
+    {sources.map((source, index) => <SourceLine key={`${source.qa_id}-${source.message_id}-${index}`} source={source} onOpenPair={onOpenPair} />)}
+  </details>
+}
+
 function Branch({ item, branch, onOpenPair }: { item: VocPlaybook; branch: VocPlaybookBranch; onOpenPair: OpenEvidencePair }) {
-  const status = branch.status ?? item.status
+  const status = branchStatus(item, branch)
+  const condition = branch.condition_evidence?.length ? branch.condition : ''
+  const escalation = branch.escalation_evidence?.length ? branch.escalation : ''
   return <section className="min-w-0 space-y-3 rounded-md border p-3">
     <div className="flex flex-wrap items-start justify-between gap-2">
-      <h4 className="text-sm font-medium [overflow-wrap:anywhere]">{branch.condition || '适用流程'}</h4>
+      <h4 className="text-sm font-medium [overflow-wrap:anywhere]">{condition || '处理步骤'}</h4>
       <div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className="font-normal">{playbookStatuses[status]}</Badge>
         {branch.case_count !== undefined && <span className="text-xs tabular-nums text-muted-foreground">{count(branch.case_count)} 个案例</span>}
-        {canCopyBranch(item, branch) && <Button type="button" variant="outline" size="xs" onClick={() => void copyBranch(item, branch)}><Copy />复制处理步骤</Button>}
+        <Button type="button" variant="outline" size="xs" onClick={() => void copyBranch(item, branch, condition, escalation)}><Copy />复制处理步骤</Button>
       </div>
     </div>
-    {!!branch.condition_evidence?.length && <details className="text-xs text-muted-foreground"><summary className="w-fit cursor-pointer">适用条件依据</summary>{branch.condition_evidence.map((source, j) => <SourceLine key={`${source.qa_id}-${source.message_id}-${j}`} source={source} onOpenPair={onOpenPair} />)}</details>}
+    <EvidenceDetails title="适用条件依据" sources={branch.condition_evidence} onOpenPair={onOpenPair} />
     <ol className="ml-5 list-decimal space-y-2 text-sm leading-6">
       {branch.steps.map((step, i) => <li key={i} className="min-w-0 [overflow-wrap:anywhere]">
         {step.text}
-        {step.evidence.length > 0 && <details className="text-xs text-muted-foreground"><summary className="w-fit cursor-pointer">步骤依据</summary>{step.evidence.map((source, j) => <SourceLine key={`${source.qa_id}-${source.message_id}-${j}`} source={source} onOpenPair={onOpenPair} />)}</details>}
+        <EvidenceDetails title="步骤依据" sources={step.evidence} onOpenPair={onOpenPair} />
       </li>)}
     </ol>
-    {branch.retest && <p className="text-sm leading-6 [overflow-wrap:anywhere]"><span className="mr-2 font-medium">复测</span>{branch.retest}</p>}
-    {!!branch.retest_evidence?.length && <details className="text-xs text-muted-foreground"><summary className="w-fit cursor-pointer">复测依据</summary>{branch.retest_evidence.map((source, j) => <SourceLine key={`${source.qa_id}-${source.message_id}-${j}`} source={source} onOpenPair={onOpenPair} />)}</details>}
-    {!!branch.result_evidence?.length && <details className="text-xs text-muted-foreground"><summary className="w-fit cursor-pointer">客户反馈依据</summary>{branch.result_evidence.map((source, j) => <SourceLine key={`${source.qa_id}-${source.message_id}-${j}`} source={source} onOpenPair={onOpenPair} />)}</details>}
-    {branch.escalation && <p className="text-sm leading-6 [overflow-wrap:anywhere]"><span className="mr-2 font-medium">升级处理</span>{branch.escalation}</p>}
-    {!!branch.escalation_evidence?.length && <details className="text-xs text-muted-foreground"><summary className="w-fit cursor-pointer">升级处理依据</summary>{branch.escalation_evidence.map((source, j) => <SourceLine key={`${source.qa_id}-${source.message_id}-${j}`} source={source} onOpenPair={onOpenPair} />)}</details>}
+    <p className="text-sm leading-6 [overflow-wrap:anywhere]"><span className="mr-2 font-medium">复测</span>{branch.retest}</p>
+    <EvidenceDetails title="复测依据" sources={branch.retest_evidence} onOpenPair={onOpenPair} />
+    <EvidenceDetails title="客户反馈依据" sources={branch.result_evidence} onOpenPair={onOpenPair} />
+    {escalation && <p className="text-sm leading-6 [overflow-wrap:anywhere]"><span className="mr-2 font-medium">升级处理</span>{escalation}</p>}
+    <EvidenceDetails title="升级处理依据" sources={branch.escalation_evidence} onOpenPair={onOpenPair} />
   </section>
 }
 
@@ -186,27 +241,32 @@ export function VocPlaybookResults({ items, onOpenPair }: { items: VocPlaybook[]
   const [linkedIssue, setLinkedIssue] = useState(linkedIssueFromHash)
   const opener = useRef<HTMLButtonElement | null>(null)
   const input = useRef<HTMLInputElement>(null)
-  const matches = items.filter(item => matchSearch(search, [item.title, families[item.family], scopeText(item),
-    ...item.triage.flatMap(row => [row.check, row.when_yes, row.when_no]),
-    ...item.branches.flatMap(branch => [branch.condition, branch.retest, branch.escalation, ...branch.steps.map(step => step.text)])]))
+  const matches = items.map(item => ({ item, branches: visibleBranches(item) })).filter(({ item, branches }) => matchSearch(search, [item.title, categoryText(item),
+    ...(item.cases === undefined ? item.evidence.map(source => source.quote) : caseSearchFields(item.cases)),
+    ...branches.flatMap(branch => [branch.retest, ...branch.steps.map(step => step.text),
+      branch.condition_evidence?.length ? branch.condition : '', branch.escalation_evidence?.length ? branch.escalation : ''])]))
   const last = Math.max(0, Math.ceil(matches.length / playbookPageSize) - 1)
   const current = Math.min(page, last)
   const selected = items.find(item => selectedId ? item.id === selectedId : item.issue_id === linkedIssue)
+  const selectedBranches = selected ? visibleBranches(selected) : []
   return <div className="space-y-3">
-    {items.length > 0 && <Input ref={input} type="search" maxLength={200} value={search} aria-label="搜索处理手册" placeholder="搜索问题、适用条件或步骤"
+    {items.length > 0 && <Input ref={input} type="search" maxLength={200} value={search} aria-label="搜索处理手册" placeholder="搜索客户咨询、适用条件或步骤"
       className="w-full sm:max-w-sm" onChange={event => { setSearch(event.target.value); setPage(0) }} />}
-    {matches.length ? <ul className="divide-y rounded-md border px-2 sm:px-3">{matches.slice(current * playbookPageSize, (current + 1) * playbookPageSize).map(item =>
+    {matches.length ? <ul className="divide-y rounded-md border px-2 sm:px-3">{matches.slice(current * playbookPageSize, (current + 1) * playbookPageSize).map(({ item, branches }) =>
       <li key={item.id}>
         <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
           onClick={event => { opener.current = event.currentTarget; setSelectedId(item.id) }}>
           <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
-            <span className="flex flex-wrap items-center gap-2"><span className="font-medium">{item.title}</span><Badge variant={item.status === 'verified' ? 'default' : 'outline'} className="font-normal">{playbookStatuses[item.status]}</Badge></span>
-            <span className="block text-xs text-muted-foreground">{[families[item.family], scopeText(item), `已核对 ${count(item.checked_cases)} 条处理记录`].filter(Boolean).join(' · ')}</span>
-            {item.triage[0] && <span className="line-clamp-2 block text-sm leading-5 text-muted-foreground">{item.triage[0].check}</span>}
+            <span className="flex flex-wrap items-center gap-2"><span className="line-clamp-2 font-medium">{item.cases?.[0]?.quote ?? item.title}</span><PlaybookBadge item={item} branches={branches} /></span>
+            <span className="block text-xs text-muted-foreground">{[item.cases?.length ? item.title : '', categoryText(item)].filter(Boolean).join(' · ')}</span>
+            {(item.impact || item.checked_cases > 0) && <span className="block text-xs tabular-nums text-muted-foreground">{[
+              item.impact ? `${count(item.impact.consultations)} 次咨询` : '',
+              item.checked_cases > 0 ? `${count(item.checked_cases)} 个关联处理案例` : '',
+            ].filter(Boolean).join(' · ')}</span>}
           </span>
           <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
         </button>
-      </li>)}</ul> : <p className="py-8 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的处理手册' : '当前范围暂无处理手册'}</p>}
+    </li>)}</ul> : <p className="py-8 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的咨询或处理流程' : '当前范围暂无可查看的咨询线索'}</p>}
     <PageNav label="处理手册分页" current={current} last={last} onChange={setPage} />
     <Sheet open={Boolean(selected)} onOpenChange={open => {
       if (open) return
@@ -217,23 +277,19 @@ export function VocPlaybookResults({ items, onOpenPair }: { items: VocPlaybook[]
       <SheetContent className="w-full gap-0 sm:max-w-2xl" onCloseAutoFocus={event => { event.preventDefault(); (opener.current?.isConnected ? opener.current : input.current)?.focus() }}>
         {selected && <>
           <SheetHeader className="shrink-0 gap-2 border-b px-5 py-5 pr-10">
-            <Badge variant={selected.status === 'verified' ? 'default' : 'outline'} className="w-fit font-normal">{playbookStatuses[selected.status]}</Badge>
-            <SheetTitle className="text-lg [overflow-wrap:anywhere]">{selected.title}</SheetTitle>
-            <SheetDescription>{[families[selected.family], scopeText(selected), `已核对 ${count(selected.checked_cases)} 条处理记录`].filter(Boolean).join(' · ')}</SheetDescription>
+            <PlaybookBadge item={selected} branches={selectedBranches} />
+            <SheetTitle className="text-lg [overflow-wrap:anywhere]">{selectedBranches.length > 0 ? selected.title : '咨询详情'}</SheetTitle>
+            <SheetDescription>{[selectedBranches.length ? '' : selected.title, categoryText(selected)].filter(Boolean).join(' · ')}</SheetDescription>
           </SheetHeader>
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
-            {selected.triage.length > 0 && <section className="space-y-2"><h3 className="text-sm font-medium">排查决策</h3>
-              <ol className="space-y-2">{selected.triage.map((row, i) => <li key={i} className="space-y-1 rounded-md border bg-muted/20 p-3 text-sm leading-6 [overflow-wrap:anywhere]">
-                <p className="font-medium">{i + 1}. {row.check}</p><p><span className="mr-2 text-muted-foreground">是</span>{row.when_yes}</p><p><span className="mr-2 text-muted-foreground">否</span>{row.when_no}</p>
-              </li>)}</ol>
-            </section>}
-            {selected.branches.length > 0 && <section className="space-y-2"><h3 className="text-sm font-medium">按条件处理</h3>
-              {selected.branches.map((branch, index) => <Branch key={branch.id ?? index} item={selected} branch={branch} onOpenPair={onOpenPair} />)}
+            <CaseRecords cases={selected.cases ?? []} onOpenPair={onOpenPair} />
+            <EvidenceDetails title="会话依据" sources={selected.cases === undefined ? selected.evidence : undefined} onOpenPair={onOpenPair} />
+            <ImpactCounts impact={selected.impact} checkedCases={selected.checked_cases} />
+            {selectedBranches.length > 0 && <section className="space-y-2"><h3 className="text-sm font-medium">有会话依据的处理流程</h3>
+              {selectedBranches.map((branch, index) => <Branch key={branch.id ?? index} item={selected} branch={branch} onOpenPair={onOpenPair} />)}
             </section>}
             <MissingEvidence values={selected.missing} />
-            {selected.evidence.length > 0 && <details className="text-sm"><summary className="w-fit cursor-pointer font-medium">会话依据</summary>
-              <div className="divide-y">{selected.evidence.map((source, i) => <SourceLine key={`${source.qa_id}-${source.message_id}-${i}`} source={source} onOpenPair={onOpenPair} />)}</div>
-            </details>}
+            <EvidenceDetails title="结果不一致的会话依据" sources={selected.counterevidence} onOpenPair={onOpenPair} />
           </div>
         </>}
       </SheetContent>

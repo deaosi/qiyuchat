@@ -241,7 +241,7 @@ function VocPlaybookWorkspace({ filters, refreshKey = 0, onOpenPair }: Props) {
   const refresh = useCallback(() => setRevision(value => value + 1), [])
   useBackgroundRefresh(refresh, false, playbooks.loading || playbooks.refreshing, key)
   return <Card className="gap-3">
-    <CardHeader><CardTitle>问题处理手册</CardTitle><CardDescription>查看排查决策、分支条件和有会话证据支持的操作步骤。</CardDescription></CardHeader>
+    <CardHeader><CardTitle>问题处理手册</CardTitle><CardDescription>从客户咨询查看问题线索，查阅有会话依据的处理流程。</CardDescription></CardHeader>
     <CardContent><QueryPanel hasData={playbooks.data !== null} loading={playbooks.loading} error={playbooks.error} retry={playbooks.retry}>
       <VocPlaybookResults items={playbooks.data?.items ?? []} onOpenPair={onOpenPair} />
     </QueryPanel></CardContent>
