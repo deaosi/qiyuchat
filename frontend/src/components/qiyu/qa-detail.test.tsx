@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiGet, apiPost, type DetailRepliesResponse } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
@@ -211,14 +211,30 @@ describe('embedded case conversation details', () => {
     expect(firstImage.getAttribute('referrerpolicy')).toBe('no-referrer')
     expect(screen.queryByText('[图片]')).toBeNull()
     fireEvent.click(thumbnail)
-    expect(screen.getByRole('button', { name: '缩小会话图片' }).getAttribute('aria-expanded')).toBe('true')
-    expect(screen.queryByRole('dialog')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '缩小会话图片' }))
+    const preview = within(screen.getByRole('dialog', { name: '会话图片预览' }))
+    expect(preview.getByAltText('会话原图').getAttribute('src')).toBe(url)
+    fireEvent.click(preview.getByRole('button', { name: '关闭图片预览' }))
     const [, secondImage] = screen.getAllByAltText('会话图片')
     fireEvent.error(secondImage)
     expect(screen.getByText('图片暂不可查看')).toBeTruthy()
     expect(screen.getByText('请看客服发来的截图。')).toBeTruthy()
     expect(screen.getAllByAltText('会话图片')).toHaveLength(1)
+  })
+
+  it('closes only the image preview on Escape and returns focus to the thumbnail in the conversation sheet', async () => {
+    const messages = [{ ...message(0, '[图片]'), images: [{ url: 'https://ysf.nosdn.127.net/customer-photo.png' }] }]
+    vi.mocked(apiGet).mockResolvedValue(response('21', messages))
+    const onClose = vi.fn()
+    render(<QADetail pair={pair()} onClose={onClose} />)
+
+    const thumbnail = await screen.findByRole('button', { name: '放大会话图片' })
+    fireEvent.click(thumbnail)
+    expect(screen.getByRole('dialog', { name: '会话图片预览' })).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: '会话图片预览' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: '问答与相关会话上下文' })).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
+    await waitFor(() => expect(document.activeElement).toBe(thumbnail))
   })
 
   it('aborts an old case lookup and ignores late replies after switching cases', async () => {

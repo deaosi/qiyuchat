@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { ConversationImage } from './conversation-image'
 
 export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean; anchorMessageId?: string; onCloseAutoFocus?: (event: Event) => void }
 
@@ -81,19 +82,6 @@ function messageRole(message: ContextMessage, pair: QAPair) {
     case 'system': return '系统'
     default: return '消息'
   }
-}
-
-function ConversationImage({ url }: DetailMessageImage) {
-  const [expanded, setExpanded] = React.useState(false)
-  const [failed, setFailed] = React.useState(false)
-
-  if (failed) return <p className="text-xs opacity-75">图片暂不可查看</p>
-  return <button type="button" aria-expanded={expanded} aria-label={expanded ? '缩小会话图片' : '放大会话图片'}
-    className={`block w-fit overflow-hidden rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 ${expanded ? 'max-w-full cursor-zoom-out' : 'max-w-[min(100%,14rem)] cursor-zoom-in'}`}
-    onClick={() => setExpanded(value => !value)}>
-    <img src={url} alt="会话图片" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)}
-      className={`block h-auto max-w-full object-contain ${expanded ? 'max-h-[65vh]' : 'max-h-36'}`} />
-  </button>
 }
 
 const messageLayout = {

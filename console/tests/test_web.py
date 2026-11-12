@@ -9,13 +9,17 @@ import re
 import threading
 import time
 from dataclasses import replace
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
+from urllib.response import addinfourl
 
 from tests.test_local import LocalFixture, make_csv
 from src import app
+from src.web import case_media
 from src.web.server import DashboardServer
 
 
@@ -347,6 +351,104 @@ class TestWeb(LocalFixture):
             self.assertNotIn("matched_sample", exact["items"][0])
         for query in ("#1", "12", "13812345678"):
             self.assertEqual(self.call(path + quote(query))[1]["total"], 0)
+
+
+    def test_case_image_auth_exact_bytes_download_and_no_database_lock(self):
+        self.server.admin_key = "image-fixture-admin"
+        auth = {"X-Admin-Key": "image-fixture-admin", "Cookie": "fixture=do-not-forward"}
+        url = "https://ysf.nosdn.127.net/preview%20sample.png?token=private-image-signature"
+        path = "/api/detail/image?url=" + quote(url, safe="")
+        image = b"\x89PNG\r\n\x1a\n" + b"synthetic-png-bytes"
+        entered, release = threading.Event(), threading.Event()
+
+        def upstream(request, **options):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError()
+            response = BytesIO(image)
+            response.status = 200
+            response.headers = Message()
+            response.headers["Content-Type"] = "image/png"
+            response.headers["Content-Length"] = str(len(image))
+            return response
+
+        with patch.object(case_media._IMAGE_OPENER, "open", side_effect=upstream) as fetch, \
+                patch("src.web.server.IMAGE_SLOTS", threading.BoundedSemaphore(1)), \
+                patch("src.web.server.log.debug") as logs:
+            self.assertEqual(self.call(path)[0], 401)
+            fetch.assert_not_called()
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                pending = workers.submit(self.call, path, headers=auth)
+                try:
+                    self.assertTrue(entered.wait(2))
+                    self.assertEqual(workers.submit(self.call, "/api/meta", headers=auth).result(2)[0], 200)
+                    self.assertEqual(self.call(path, headers=auth)[0], 503)
+                finally:
+                    release.set()
+                status, data, headers = pending.result(2)
+            self.assertEqual((status, data), (200, image))
+            self.assertEqual(headers["Content-Type"], "image/png")
+            self.assertEqual(headers["Content-Disposition"], 'inline; filename="preview_sample.png"')
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+            self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin")
+            self.assertEqual(fetch.call_args.args[0].full_url, url)
+            self.assertEqual(fetch.call_args.args[0].header_items(), [("Accept-encoding", "identity")])
+            status, data, headers = self.call(path + "&download=1", headers=auth)
+            self.assertEqual((status, data), (200, image))
+            self.assertEqual(headers["Content-Disposition"], 'attachment; filename="preview_sample.png"')
+            self.assertNotIn("private-image-signature", str(logs.call_args_list))
+
+    def test_case_image_rejects_invalid_parameters_redirects_and_bad_content(self):
+        path = "/api/detail/image?url="
+        url = "https://ysf.nosdn.127.net/photo.png"
+        valid = path + quote(url, safe="")
+        image = b"\x89PNG\r\n\x1a\n" + b"synthetic-png-bytes"
+
+        def response(content, mime="image/png", length=None, encoding=None):
+            stream = BytesIO(content)
+            stream.status = 200
+            stream.headers = Message()
+            stream.headers["Content-Type"] = mime
+            if length is not None:
+                stream.headers["Content-Length"] = str(length)
+            if encoding is not None:
+                stream.headers["Content-Encoding"] = encoding
+            return stream
+
+        with patch.object(case_media._IMAGE_OPENER, "open") as fetch:
+            for bad in ("http://ysf.nosdn.127.net/photo.png", "https://ysf.nosdn.127.net.evil.test/photo.png",
+                        "https://user@ysf.nosdn.127.net/photo.png", "https://ysf.nosdn.127.net:443/photo.png",
+                        "https://ysf.nosdn.127.net/photo.svg", "https://ysf.nosdn.127.net/photo.png#fragment"):
+                self.assertEqual(self.call(path + quote(bad, safe=""))[0], 400)
+            for bad in (path, valid + "&download=bad", valid + "&url=" + quote(url, safe="")):
+                self.assertEqual(self.call(bad)[0], 400)
+            fetch.assert_not_called()
+            mislabeled = path + quote("https://ysf.nosdn.127.net/photo.jpg", safe="") + "&download=1"
+            fetch.return_value = response(image, mime="image/jpeg")
+            status, data, headers = self.call(mislabeled)
+            self.assertEqual((status, data), (200, image))
+            self.assertEqual(headers["Content-Type"], "image/png")
+            self.assertEqual(headers["Content-Disposition"], 'attachment; filename="photo.png"')
+            for upstream in (response(image, mime="text/html"), response(b"<svg/>"),
+                             response(image, length=len(image) + 1), response(image, encoding="gzip")):
+                fetch.return_value = upstream
+                self.assertEqual(self.call(valid)[0], 502)
+            fetch.return_value = response(image, length=case_media._IMAGE_MAX_BYTES + 1)
+            self.assertEqual(self.call(valid)[0], 413)
+            with patch.object(case_media, "_IMAGE_MAX_BYTES", len(image) - 1):
+                fetch.return_value = response(image)
+                self.assertEqual(self.call(valid)[0], 413)
+            fetch.side_effect = TimeoutError
+            self.assertEqual(self.call(valid)[0], 504)
+
+        headers = Message()
+        headers["Location"] = "https://ysf.nosdn.127.net/redirected.png"
+        redirected = addinfourl(BytesIO(), headers, url, 302)
+        redirected.msg = "Found"
+        with patch("urllib.request.HTTPSHandler.https_open", return_value=redirected) as fetch:
+            self.assertEqual(self.call(valid)[0], 502)
+            fetch.assert_called_once()
 
 
 class TestAdminKey(LocalFixture):

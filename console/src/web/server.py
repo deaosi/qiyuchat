@@ -21,7 +21,7 @@ from .. import voc, knowledge, gateway, voc_service, voc_assistant
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
-from . import api
+from . import api, case_media
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
@@ -29,6 +29,7 @@ LOGIN_PAGE = Path(__file__).with_name("login.html")
 LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
 # app.get_db() 切库时会关闭旧连接；查询和写入必须持有同一把锁。
 DB_LOCK = threading.RLock()
+IMAGE_SLOTS = threading.BoundedSemaphore(3)
 
 
 def _int(qs: dict[str, list[str]], key: str, default: int) -> int:
@@ -275,7 +276,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self._gate(path, qs):
                 return
-            if path.startswith("/api/voc2/"):
+            if path == "/api/detail/image":
+                self._case_image(qs)
+            elif path.startswith("/api/voc2/"):
                 # VOC queries own their SQLite connections. A slow ranking or
                 # knowledge request must not hold the shared dashboard DB lock.
                 self._api(path[5:], qs)
@@ -291,6 +294,29 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             log.exception("查询失败")
             self._json({"error": "本地查询失败，请重试并查看服务日志"}, 500)
+
+    def _case_image(self, qs: dict[str, list[str]]) -> None:
+        urls = qs.get("url", [])
+        download = qs.get("download", ["0"])
+        if len(urls) != 1 or len(download) != 1 or download[0] not in ("0", "1"):
+            self._json({"error": "图片参数无效。"}, 400)
+            return
+        if not IMAGE_SLOTS.acquire(blocking=False):
+            self._json({"error": "图片加载繁忙，请重试。"}, 503)
+            return
+        try:
+            try:
+                data, mime, filename = case_media.fetch_image(urls[0])
+            except case_media.ImageFetchError as exc:
+                self._json({"error": str(exc)}, exc.status)
+                return
+            mode = "attachment" if download[0] == "1" else "inline"
+            self._send(data, mime, extra={
+                "Content-Disposition": f'{mode}; filename="{filename}"',
+                "Cross-Origin-Resource-Policy": "same-origin",
+            })
+        finally:
+            IMAGE_SLOTS.release()
 
     def _api(self, name: str, qs: dict[str, list[str]]) -> None:
         cfg = self._cfg(qs)
@@ -541,6 +567,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             log.exception("本地操作失败")
             self._json({"error": "本地操作失败，事务已回滚；请重试并查看服务日志"}, 500)
+
+    def log_request(self, code="-", size="-") -> None:
+        target = getattr(self, "path", "")
+        if unquote(target.partition("?")[0]).endswith("/api/detail/image"):
+            self.log_message('"%s /api/detail/image %s" %s %s',
+                             self.command, self.request_version, str(code), str(size))
+            return
+        super().log_request(code, size)
 
     def log_message(self, fmt: str, *args) -> None:
         log.debug("%s - %s", self.address_string(), fmt % args)

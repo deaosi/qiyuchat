@@ -3,8 +3,14 @@ from __future__ import annotations
 
 import html
 import json
+import re
+import time
+from http.client import HTTPException
+from io import BytesIO
 from typing import Any, Iterator
-from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from ..extract.text import _attachment, _containers, _structured, clean_visible_text
 
@@ -108,3 +114,120 @@ def project(value: Any) -> tuple[str, list[dict[str, str]]]:
         content = '[图片]' if all(image for image, _ in attachments) else '[附件]'
     urls = dict.fromkeys(url for _, url in attachments if url)
     return content, [{'url': url} for url in urls]
+
+
+_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_IMAGE_IDLE_TIMEOUT = 5
+_IMAGE_TOTAL_TIMEOUT = 15
+_IMAGE_FORMATS = {
+    'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif',
+    'image/webp': 'webp', 'image/bmp': 'bmp', 'image/heic': 'heic',
+    'image/avif': 'avif',
+}
+_IMAGE_MIME_ALIASES = {'image/x-ms-bmp': 'image/bmp', 'image/heif': 'image/heic'}
+_IMAGE_SIGNATURES = {
+    'image/jpeg': (b'\xff\xd8\xff',),
+    'image/png': (b'\x89PNG\r\n\x1a\n',),
+    'image/gif': (b'GIF87a', b'GIF89a'),
+    'image/bmp': (b'BM',),
+}
+_IMAGE_BRANDS = {
+    'image/avif': {b'avif', b'avis'},
+    'image/heic': {b'heic', b'heix', b'hevc', b'hevx', b'heim', b'heis', b'hevm', b'hevs'},
+}
+
+
+class ImageFetchError(Exception):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+class _NoImageRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Use a direct HTTPS request, with no ambient proxies, cookies or authorization.
+_IMAGE_OPENER = build_opener(ProxyHandler({}), _NoImageRedirect())
+
+
+def _matches_image_signature(mime: str, data: bytes) -> bool:
+    prefixes = _IMAGE_SIGNATURES.get(mime)
+    if prefixes:
+        return data.startswith(prefixes)
+    if mime == 'image/webp':
+        return data.startswith(b'RIFF') and data[8:12] == b'WEBP' and data[12:16] in (b'VP8 ', b'VP8L', b'VP8X')
+    if len(data) < 16 or data[4:8] != b'ftyp':
+        return False
+    size = int.from_bytes(data[:4], 'big')
+    if not 16 <= size <= len(data) or size % 4:
+        return False
+    brands = _IMAGE_BRANDS[mime]
+    return data[8:12] in brands or any(data[index:index + 4] in brands for index in range(16, size, 4))
+
+
+def fetch_image(url: str) -> tuple[bytes, str, str]:
+    """Fetch the attachment's exact bytes from its recorded CDN URL."""
+    if not _safe_image_url(url):
+        raise ImageFetchError('图片地址无效。', 400)
+    unavailable = '暂时无法读取会话图片。'
+    unsupported = '图片格式无法读取。'
+    too_large = '图片超过 20 MB，无法加载。'
+    timeout = '图片加载超时，请重试。'
+    deadline = time.monotonic() + _IMAGE_TOTAL_TIMEOUT
+    request = Request(url, headers={'Accept-Encoding': 'identity'})
+    try:
+        with _IMAGE_OPENER.open(request, timeout=_IMAGE_IDLE_TIMEOUT) as response:
+            if response.status != 200:
+                raise ImageFetchError(unavailable, 502)
+            headers = response.headers
+            mime = headers.get_content_type().lower()
+            mime = _IMAGE_MIME_ALIASES.get(mime, mime)
+            encoding = headers.get('Content-Encoding', 'identity').strip().lower()
+            if mime not in _IMAGE_FORMATS or encoding != 'identity':
+                raise ImageFetchError(unsupported, 502)
+            declared = headers.get_all('Content-Length', [])
+            if len(declared) > 1:
+                raise ImageFetchError(unavailable, 502)
+            expected = int(declared[0]) if declared else None
+            if expected is not None and expected > _IMAGE_MAX_BYTES:
+                raise ImageFetchError(too_large, 413)
+            with BytesIO() as output:
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise ImageFetchError(timeout, 504)
+                    chunk = response.read1(min(64 * 1024, _IMAGE_MAX_BYTES + 1 - output.tell()))
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    if output.tell() > _IMAGE_MAX_BYTES:
+                        raise ImageFetchError(too_large, 413)
+                data = output.getvalue()
+            if time.monotonic() >= deadline:
+                raise ImageFetchError(timeout, 504)
+            if expected is not None and expected != len(data):
+                raise ImageFetchError(unavailable, 502)
+    except HTTPError as exc:
+        exc.close()
+        if exc.code in (404, 410):
+            raise ImageFetchError('会话图片已失效或暂不可用。', 502) from None
+        raise ImageFetchError(unavailable, 502) from None
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise ImageFetchError(timeout, 504) from None
+        raise ImageFetchError(unavailable, 502) from None
+    except TimeoutError:
+        raise ImageFetchError(timeout, 504) from None
+    except (OSError, HTTPException, ValueError):
+        raise ImageFetchError(unavailable, 502) from None
+
+    # Qiyu's CDN sometimes labels PNG files as JPEG, including for .jpg URLs.
+    if not _matches_image_signature(mime, data):
+        mime = next((candidate for candidate in _IMAGE_FORMATS
+                     if candidate != mime and _matches_image_signature(candidate, data)), '')
+    if not mime:
+        raise ImageFetchError(unsupported, 502)
+    leaf = urlsplit(url).path.rsplit('/', 1)[-1].rsplit('.', 1)[0]
+    basename = re.sub(r'[^A-Za-z0-9_.-]+', '_', unquote(leaf))[:100].strip('._-')
+    return data, mime, f"{basename or 'conversation-image'}.{_IMAGE_FORMATS[mime]}"
