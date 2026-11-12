@@ -209,6 +209,7 @@ export type VocSop = {
 const vocPilotFamilies = ['no_reply', 'scenario_config', 'configuration', 'anomaly', 'platform_limit', 'other'] as const
 const vocPilotEvidenceStatuses = ['reported', 'staff_investigated', 'cause_confirmed'] as const
 const vocPlaybookStatuses = ['investigation', 'guidance', 'verified'] as const
+const vocCasePathStepStates = ['proposed', 'reported', 'instructed'] as const
 export type VocPilotFamily = typeof vocPilotFamilies[number]
 export type VocPilotEvidence = { qa_id: number; message_id: string; quote: string; ts: number }
 export type VocPilotCase = VocPilotEvidence & {
@@ -259,6 +260,16 @@ export type VocPlaybook = Pick<VocPilotIssue, 'id' | 'family' | 'title' | 'platf
   impact?: VocPilotIssue['impact']
   counterevidence?: VocPilotEvidence[]
 }
+export type VocCasePath = {
+  id: string
+  qa_id: number
+  problem: VocPilotEvidence
+  steps: { actor: 'staff' | 'merchant'; state: typeof vocCasePathStepStates[number]; action: string; evidence: VocPilotEvidence }[]
+  platform: string
+  criterion?: VocPilotEvidence
+  outcome: 'not_recorded'
+}
+export type VocPlaybookResultsData = { items: VocPlaybook[]; total: number; case_paths?: VocCasePath[] }
 
 function validateVoc2Response(name: string, data: unknown, workbench = false): void {
   if (!name.startsWith('voc2/')) return
@@ -333,6 +344,16 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     && typeof v.message_id === 'string' && (!needsAnchor || Boolean(v.message_id.trim()))
     && typeof v.quote === 'string' && Boolean(v.quote.trim()) && isCount(v.ts)
   const pilotEvidenceList = (v: unknown) => Array.isArray(v) && v.every(item => pilotEvidence(item))
+  const casePath = (v: unknown) => isRecord(v) && typeof v.id === 'string' && Boolean(v.id.trim())
+    && typeof v.platform === 'string' && v.outcome === 'not_recorded'
+    && isRecord(v.problem) && v.problem.qa_id === v.qa_id && pilotEvidence(v.problem)
+    && (v.criterion === undefined || pilotEvidence(v.criterion))
+    && Array.isArray(v.steps) && v.steps.length > 0 && v.steps.every(step => isRecord(step)
+      && (step.actor === 'staff' || step.actor === 'merchant')
+      && vocCasePathStepStates.some(state => state === step.state)
+      && typeof step.action === 'string' && Boolean(step.action.trim())
+      && isRecord(step.evidence) && typeof step.evidence.quote === 'string'
+      && step.evidence.quote.includes(step.action) && pilotEvidence(step.evidence))
   const pilotImpact = (v: unknown) => isRecord(v) && hasCounts(v, ['consultations', 'sessions', 'merchants', 'unidentified_sessions'])
   const pilotCaseDetails = (v: unknown) => isRecord(v)
     && [v.goal, v.observed, v.checked].every(value => value === undefined || typeof value === 'string')
@@ -394,7 +415,8 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     case 'voc2/sops': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(sop); break
     case 'voc2/issue-pilot': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(pilotIssue)
       && isRecord(data.coverage) && hasCounts(data.coverage, ['source_events', 'matched_consultations', 'classified_consultations', 'needs_context']); break
-    case 'voc2/playbooks': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(playbook); break
+    case 'voc2/playbooks': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(playbook)
+      && (data.case_paths === undefined || Array.isArray(data.case_paths) && data.case_paths.every(casePath)); break
     case 'voc2/exceptions': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => isRecord(item)
       && ['id', 'kind', 'question', 'reason', 'created_at'].every(key => typeof item[key] === 'string')); break
     case 'voc2/topic': valid = (workbench ? enrichedTopic(data.topic) : topic(data.topic))

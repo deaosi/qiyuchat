@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { VocIssuePilot, VocPilotEvidence, VocPlaybook } from '@/lib/api'
+import type { VocCasePath, VocIssuePilot, VocPilotEvidence, VocPlaybook } from '@/lib/api'
 import { VocIssuePilotResults, VocPlaybookResults } from './voc-pilot-workspaces'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); history.replaceState(null, '', '/') })
@@ -76,6 +76,41 @@ it('shows the actual authorization consultation and exact message instead of a s
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: question.quote }), 'source-3')
   fireEvent.click(detail.getByRole('button', { name: '查看会话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '61' }), undefined)
+})
+
+it('shows the sourced operation ahead of pending consultations and keeps the actual outcome open', () => {
+  const problem = { ...source, quote: '拼多多发出「稍等」以后没有待办。' }
+  const evidence = { ...source, message_id: 'source-4', quote: '我这边配置为知识加入待办。', ts: source.ts + 1000 }
+  const criterion = { ...source, message_id: 'source-5', quote: '想让机器人回复稍等时也能加入待办。', ts: source.ts + 2000 }
+  const path: VocCasePath = { id: 'case-1', qa_id: source.qa_id, problem, platform: '拼多多', outcome: 'not_recorded', criterion,
+    steps: [{ actor: 'staff', state: 'reported', action: '配置为知识加入待办', evidence }] }
+  const pending: VocPlaybook = { id: 'pending', issue_id: issueId, title: '商品授权待确认', family: 'configuration', platform: '', module: '', condition: '',
+    status: 'investigation', checked_cases: 0, triage: [], branches: [], missing: [], evidence: [] }
+  const open = vi.fn()
+  render(<VocPlaybookResults items={[pending]} casePaths={[path]} onOpenPair={open} />)
+
+  const caseButton = screen.getByRole('button', { name: /拼多多发出.*配置为知识加入待办/ })
+  const pendingButton = screen.getByRole('button', { name: /商品授权待确认/ })
+  expect(caseButton.compareDocumentPosition(pendingButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(screen.getByRole('heading', { name: '已有处理记录的案例' })).toBeTruthy()
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理手册' }), { target: { value: '拼多多 配置为知识加入待办' } })
+  expect(screen.queryByRole('button', { name: /商品授权待确认/ })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: /拼多多发出.*配置为知识加入待办/ }))
+
+  const detail = within(screen.getByRole('dialog', { name: '案例处理记录' }))
+  expect(detail.getByText('客服 · 说明处理情况')).toBeTruthy()
+  expect(detail.getByText('配置为知识加入待办')).toBeTruthy()
+  expect(detail.getByRole('heading', { name: '客户期望' })).toBeTruthy()
+  expect(detail.getByText(criterion.quote)).toBeTruthy()
+  expect(detail.getByText('未记录复测结果')).toBeTruthy()
+  expect(detail.queryByText('效果已验证')).toBeNull()
+  expect(detail.queryByRole('button', { name: '复制处理步骤' })).toBeNull()
+
+  const original = detail.getByText('查看客服原话').closest('details')!
+  expect(within(original).getByText(evidence.quote)).toBeTruthy()
+  fireEvent.click(original.querySelector('summary')!)
+  fireEvent.click(within(original).getByRole('button', { name: '定位原话' }))
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42' }), 'source-4')
 })
 
 it('preserves the playbook deep link and copies only branches with sourced steps and retest', async () => {

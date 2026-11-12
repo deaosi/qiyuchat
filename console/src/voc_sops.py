@@ -22,6 +22,10 @@ _RETEST_TARGET = re.compile(r"(?:是否|能否|能不能|有没有|可否)[^。�
 _INLINE_RETEST = re.compile(r"(?:后|然后|再|接着|并)\s*(?:请您?)?((?:复测|重新测试|再测试|测试|重试|再试|试一下|验证是否|看是否).+)")
 _ESCALATE = re.compile(_COMMAND + r"(?:联系(?:技术|客服|管理员)|提交(?:工单|故障单)|转交(?:技术|研发))")
 _STAFF_SELF_ACTION = re.compile(r"^(?:我(?:们)?|这边|技术|同事|工程师).{0,18}(?:已经|已|刚刚|帮您|帮你|会|将|正在|先(?:帮|查|看))")
+_STAFF_HANDLES_IT = re.compile(r"(?:我这边|我们这边|我先|研发这边|技术这边)\s*(?:已经|已|刚刚|先|会|准备|正在)?\s*"
+                               r"(?:配置|取消|调整|修改|设置|重置|提交|关闭|开启|刷新|同步|绑定|解绑|加入|移除)")
+_STATUS_ONLY = re.compile(r"^(?:(?:已|已经|刚刚)\s*)?(?:测试|复测|同步|授权|配置|更新|登录|导入|导出|绑定|保存)"
+                          r"\s*(?:已|已经)?\s*(?:成功|好了|可以|完成|通过|正常|失败|没成功)(?:了|啦|哈|哦|老师|的|[，。！!\s])*$")
 _PERSONAL_OR_MEDIA = re.compile(r"\[(?:链接|名称|图片|文件|手机号|电话|邮箱|身份证|联系方式)\]|https?://")
 _PRESCRIBED_ACTIONS = tuple(re.compile(_COMMAND + rf"(?:{verbs})") for verbs in evidence._ACTION_VERBS)
 
@@ -73,6 +77,7 @@ def _answer_units(answer: tuple) -> list[tuple[int, dict, dict, int, int]]:
 
 def _phase(quote: str, question: str) -> str:
     if (_is_notice_or_service(quote) or _STAFF_SELF_ACTION.search(quote)
+            or _STAFF_HANDLES_IT.search(quote) or _STATUS_ONLY.fullmatch(quote.strip())
             or evidence._INTERVENTION.search(quote) or evidence._PROHIBITION.search(quote)):
         return ""
     if only_collects_information(quote, question):

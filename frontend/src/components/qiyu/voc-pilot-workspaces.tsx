@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactNode } from 'react'
 import { ArrowUpRight, ChevronLeft, ChevronRight, Copy } from 'lucide-react'
 import { toast } from 'sonner'
-import { normalizePair, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
+import { normalizePair, type VocCasePath, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -234,10 +234,49 @@ function linkedIssueFromHash() {
   return issue && /^issue_[a-f0-9]{24}$/.test(issue) ? issue : null
 }
 
-export function VocPlaybookResults({ items, onOpenPair }: { items: VocPlaybook[]; onOpenPair: OpenEvidencePair }) {
+const caseStepLabels: Record<VocCasePath['steps'][number]['state'], string> = {
+  proposed: '提出建议', reported: '说明处理情况', instructed: '给出操作步骤',
+}
+
+function CasePathDetail({ item, onOpenPair }: { item: VocCasePath; onOpenPair: OpenEvidencePair }) {
+  return <>
+    <SheetHeader className="shrink-0 gap-2 border-b px-5 py-5 pr-10">
+      <SheetTitle className="text-lg">案例处理记录</SheetTitle>
+      <SheetDescription className={item.platform ? undefined : 'sr-only'}>{item.platform || '查看客户咨询和会话中的处理经过。'}</SheetDescription>
+    </SheetHeader>
+    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
+      <section>
+        <h3 className="text-sm font-medium">客户咨询</h3>
+        <SourceLine source={item.problem} onOpenPair={onOpenPair} />
+      </section>
+      <section className="border-t pt-4">
+        <h3 className="text-sm font-medium">处理经过</h3>
+        <ol className="divide-y">{item.steps.map((step, index) => {
+          const actor = step.actor === 'staff' ? '客服' : '客户'
+          const label = `${actor} · ${caseStepLabels[step.state]}`
+          return <li key={`${step.evidence.message_id}-${index}`}>
+            {step.action === step.evidence.quote ? <SourceLine source={step.evidence} onOpenPair={onOpenPair} label={label} />
+              : <div className="space-y-1 py-2">
+                <p className="text-xs text-muted-foreground">{label}</p>
+                <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{step.action}</p>
+                <EvidenceDetails title={`查看${actor}原话`} sources={[step.evidence]} onOpenPair={onOpenPair} />
+              </div>}
+          </li>
+        })}</ol>
+      </section>
+      {item.criterion && <section className="border-t pt-4">
+        <h3 className="text-sm font-medium">客户期望</h3>
+        <SourceLine source={item.criterion} onOpenPair={onOpenPair} />
+      </section>}
+      <p className="border-t pt-3 text-sm text-muted-foreground">未记录复测结果</p>
+    </div>
+  </>
+}
+
+export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { items: VocPlaybook[]; casePaths?: VocCasePath[]; onOpenPair: OpenEvidencePair }) {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selection, setSelection] = useState<{ kind: 'issue' | 'case'; id: string } | null>(null)
   const [linkedIssue, setLinkedIssue] = useState(linkedIssueFromHash)
   const opener = useRef<HTMLButtonElement | null>(null)
   const input = useRef<HTMLInputElement>(null)
@@ -245,17 +284,40 @@ export function VocPlaybookResults({ items, onOpenPair }: { items: VocPlaybook[]
     ...(item.cases === undefined ? item.evidence.map(source => source.quote) : caseSearchFields(item.cases)),
     ...branches.flatMap(branch => [branch.retest, ...branch.steps.map(step => step.text),
       branch.condition_evidence?.length ? branch.condition : '', branch.escalation_evidence?.length ? branch.escalation : ''])]))
-  const last = Math.max(0, Math.ceil(matches.length / playbookPageSize) - 1)
+  const matchingPaths = casePaths.filter(item => matchSearch(search, [item.platform, item.problem.quote, item.criterion?.quote ?? '',
+    ...item.steps.map(step => step.evidence.quote)]))
+  const last = Math.max(0, Math.ceil((matchingPaths.length + matches.length) / playbookPageSize) - 1)
   const current = Math.min(page, last)
-  const selected = items.find(item => selectedId ? item.id === selectedId : item.issue_id === linkedIssue)
+  const offset = current * playbookPageSize
+  const pathsOnPage = matchingPaths.slice(offset, offset + playbookPageSize)
+  const issueOffset = Math.max(0, offset - matchingPaths.length)
+  const issuesOnPage = matches.slice(issueOffset, issueOffset + playbookPageSize - pathsOnPage.length)
+  const selectedPath = selection?.kind === 'case' ? casePaths.find(item => item.id === selection.id) : undefined
+  const selected = selection?.kind === 'case' ? undefined : items.find(item => selection ? item.id === selection.id : item.issue_id === linkedIssue)
   const selectedBranches = selected ? visibleBranches(selected) : []
   return <div className="space-y-3">
-    {items.length > 0 && <Input ref={input} type="search" maxLength={200} value={search} aria-label="搜索处理手册" placeholder="搜索客户咨询、适用条件或步骤"
+    {(items.length > 0 || casePaths.length > 0) && <Input ref={input} type="search" maxLength={200} value={search} aria-label="搜索处理手册" placeholder="搜索客户咨询、适用条件或步骤"
       className="w-full sm:max-w-sm" onChange={event => { setSearch(event.target.value); setPage(0) }} />}
-    {matches.length ? <ul className="divide-y rounded-md border px-2 sm:px-3">{matches.slice(current * playbookPageSize, (current + 1) * playbookPageSize).map(({ item, branches }) =>
+    {pathsOnPage.length > 0 && <section className="space-y-2">
+      <h3 className="text-sm font-medium">已有处理记录的案例</h3>
+      <ul className="divide-y rounded-md border px-2 sm:px-3">{pathsOnPage.map(item => <li key={item.id}>
+        <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
+          onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'case', id: item.id }) }}>
+          <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
+            <span className="line-clamp-2 font-medium">{item.problem.quote}</span>
+            <span className="line-clamp-1 text-sm text-muted-foreground">{item.steps[0].action}</span>
+            <span className="block text-xs text-muted-foreground">{[item.platform, item.problem.ts > 0 ? displayTime(item.problem.ts) : ''].filter(Boolean).join(' · ')}</span>
+          </span>
+          <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
+        </button>
+      </li>)}</ul>
+    </section>}
+    {issuesOnPage.length > 0 && <section className="space-y-2">
+      {matchingPaths.length > 0 && <h3 className="text-sm font-medium">问题汇总</h3>}
+      <ul className="divide-y rounded-md border px-2 sm:px-3">{issuesOnPage.map(({ item, branches }) =>
       <li key={item.id}>
         <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
-          onClick={event => { opener.current = event.currentTarget; setSelectedId(item.id) }}>
+          onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'issue', id: item.id }) }}>
           <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
             <span className="flex flex-wrap items-center gap-2"><span className="line-clamp-2 font-medium">{item.cases?.[0]?.quote ?? item.title}</span><PlaybookBadge item={item} branches={branches} /></span>
             <span className="block text-xs text-muted-foreground">{[item.cases?.length ? item.title : '', categoryText(item)].filter(Boolean).join(' · ')}</span>
@@ -266,16 +328,17 @@ export function VocPlaybookResults({ items, onOpenPair }: { items: VocPlaybook[]
           </span>
           <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
         </button>
-    </li>)}</ul> : <p className="py-8 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的咨询或处理流程' : '当前范围暂无可查看的咨询线索'}</p>}
+    </li>)}</ul></section>}
+    {matchingPaths.length === 0 && matches.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的咨询或处理流程' : '当前范围暂无可查看的咨询线索'}</p>}
     <PageNav label="处理手册分页" current={current} last={last} onChange={setPage} />
-    <Sheet open={Boolean(selected)} onOpenChange={open => {
+    <Sheet open={Boolean(selected || selectedPath)} onOpenChange={open => {
       if (open) return
-      setSelectedId(null)
+      setSelection(null)
       setLinkedIssue(null)
       if (linkedIssueFromHash()) history.replaceState(null, '', '#voc-next')
     }}>
       <SheetContent className="w-full gap-0 sm:max-w-2xl" onCloseAutoFocus={event => { event.preventDefault(); (opener.current?.isConnected ? opener.current : input.current)?.focus() }}>
-        {selected && <>
+        {selectedPath ? <CasePathDetail item={selectedPath} onOpenPair={onOpenPair} /> : selected && <>
           <SheetHeader className="shrink-0 gap-2 border-b px-5 py-5 pr-10">
             <PlaybookBadge item={selected} branches={selectedBranches} />
             <SheetTitle className="text-lg [overflow-wrap:anywhere]">{selectedBranches.length > 0 ? selected.title : '咨询详情'}</SheetTitle>

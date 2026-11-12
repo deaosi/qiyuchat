@@ -671,11 +671,11 @@ def knowledge(cfg: Settings, filters: dict, knowledge_id: str = "") -> dict:
     return {"items": items, "total": len(items)}
 
 
-def sops(cfg: Settings, filters: dict, identity: str = "") -> dict:
+def sops(cfg: Settings, filters: dict, identity: str = "", *, _current: dict | None = None) -> dict:
     """Read workflows against the same official proof used by the episode ledger."""
     from . import voc_episode_live, voc_sops
 
-    source = _sources(cfg, episode_projection.source_filters(filters))
+    source = _sources(cfg, episode_projection.source_filters(filters)) if _current is None else _current
     sessions = {row["_session_key"] for row in source.values() if row.get("_question_parts")}
     items = []
     for segment in voc_episode_live.load_current(cfg, sessions, include_messages=True):
@@ -757,17 +757,26 @@ def _recheck_playbook_branches(scoped: dict, global_result: dict) -> dict:
 
 
 def playbooks(cfg: Settings, filters: dict) -> dict:
-    from . import voc_playbooks
+    from . import voc_case_paths, voc_issue_pilot, voc_playbooks
 
-    issues = _read_issue_pilot(cfg, filters)["items"]
+    if variants.mode(cfg) != "zhihuige" or cfg.runtime.mock:
+        return {"items": [], "total": 0, "case_paths": []}
+    current = _sources(cfg, episode_projection.source_filters(filters), identify_merchants=True)
+    events = _topic_view(cfg, filters, current=current)
+    issues = voc_issue_pilot.build(events)["items"]
+    path_sources = current
+    if any(filters.get(key) not in (None, "", "all") for key in ("focus_topic", "support_intent", "diagnosis_status")):
+        matching = {event["qa_id"] for event in events}
+        path_sources = {qa: source for qa, source in current.items() if qa in matching}
+    case_paths = voc_case_paths.build(cfg, path_sources)
     if not issues:
-        return {"items": [], "total": 0}
-    result = voc_playbooks.build(issues, sops(cfg, filters)["items"])
+        return {"items": [], "total": 0, "case_paths": case_paths}
+    result = voc_playbooks.build(issues, sops(cfg, filters, _current=current)["items"])
     if any(item["branches"] for item in result["items"]) and any(
             value not in (None, "", 0, "all", "local") for value in filters.values()):
         all_issues = _read_issue_pilot(cfg, {})["items"]
         result = _recheck_playbook_branches(result, voc_playbooks.build(all_issues, sops(cfg, {})["items"]))
-    return result
+    return {**result, "case_paths": case_paths}
 
 
 def exceptions(cfg: Settings, filters: dict) -> dict:

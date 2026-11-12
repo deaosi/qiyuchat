@@ -67,6 +67,14 @@ class TestVocSops(unittest.TestCase):
         self.assertEqual(result["status"], "guidance")
         self.assertNotIn("retest", result["missing"])
 
+    def test_staff_status_and_staff_only_intervention_are_not_merchant_steps(self):
+        replies = [turn("status", "staff", "同步成功了老师", 2),
+                   turn("check", "staff", "测试可以了老师", 3),
+                   turn("intervention", "staff", "改地址这个进入待办了我这边先取消一下待办辛苦观察一下效果", 4)]
+        result = self.compile(replies)
+        self.assertEqual((result["status"], result["steps"], result["result"]), ("incomplete", [], None))
+        self.assertEqual([source["message_id"] for source in result["replies"]], ["status", "check", "intervention"])
+
     def test_separate_staff_actions_need_explicit_evidence_for_each_operation(self):
         change = turn("x", "staff", "请开启退款场景开关。", 4)
         save = turn("y", "staff", "请保存退款场景配置。", 5)
