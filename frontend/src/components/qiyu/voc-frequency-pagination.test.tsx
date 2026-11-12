@@ -10,7 +10,6 @@ const topics = Array.from({ length: 45 }, (_, index) => ({
   consultation_count: 45 - index, event_count: 45 - index, customer_count: 1, session_count: 1,
 }))
 const summary = { source_pairs: 45, total_events: 45, topic_count: 45, coverage: { processed_pairs: 45, pending_pairs: 0 }, semantics: { ready: true }, latest_job: null }
-const pilot = { items: [], total: 0, coverage: { source_events: 45, matched_consultations: 0, classified_consultations: 0, needs_context: 0 } }
 const comparison = {
   current: { start: '2026-11-05', end: '2026-11-11', source_pairs: 12, processed_pairs: 10 },
   previous: { start: '2026-10-29', end: '2026-11-04', source_pairs: 10, processed_pairs: 8 },
@@ -30,7 +29,6 @@ beforeEach(() => {
   total = 45
   secondPage = undefined
   vi.mocked(apiGet).mockImplementation(async (name, filters) => {
-    if (name === 'voc2/issue-pilot') return pilot
     if (name === 'voc2/topics') return filters.offset === 20 && secondPage ? secondPage : pageResult(filters.offset ?? 0, filters.limit ?? total)
     if (name === 'voc2/topic') return { topic: topics.find(topic => topic.id === filters.id), events: [] }
     return summary
@@ -46,6 +44,8 @@ describe('VOC frequency ranking pagination', () => {
     render(<VocFrequencyWorkspace filters={initialScope} {...handlers} />)
 
     await screen.findByText('第 1 / 3 页')
+    expect(screen.queryByText('产品问题清单')).toBeNull()
+    expect(vi.mocked(apiGet).mock.calls.some(([name]) => name === 'voc2/issue-pilot')).toBe(false)
     expect(rankedRows()).toHaveLength(20)
     expect(previousPage().disabled).toBe(true)
     const heading = screen.getByRole('heading', { name: '咨询主题排行' })
@@ -112,7 +112,6 @@ describe('VOC frequency ranking pagination', () => {
   it('opens all trend filters when the comparison range is unavailable and resets pagination', async () => {
     const unbounded = { ...comparison, current: { ...comparison.current, start: '', end: '' }, previous: null, comparable: false }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
-      if (name === 'voc2/issue-pilot') return pilot
       if (name !== 'voc2/topics') return summary
       return filters.trend === 'all'
         ? { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison: unbounded }
@@ -139,7 +138,6 @@ describe('VOC frequency ranking pagination', () => {
   it('explains which period lacks data when a dated trend filter is empty', async () => {
     const unavailable = { ...comparison, previous: { ...comparison.previous, source_pairs: 0, processed_pairs: 0 }, comparable: false }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
-      if (name === 'voc2/issue-pilot') return pilot
       if (name !== 'voc2/topics') return summary
       return filters.trend === 'all'
         ? { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison: unavailable }
@@ -151,7 +149,7 @@ describe('VOC frequency ranking pagination', () => {
     expect(await screen.findByText('上期暂无会话来源，暂无法判断「明显上升」。')).toBeTruthy()
   })
 
-  it('filters trends before pagination and opens an evidence-scoped decision with distinct reuse levels', async () => {
+  it('filters trends before pagination and opens the original question and verified reply', async () => {
     const fact = (quote: string, messageId: string): Ref => ({
       quote, source: 'answer', role: 'staff', start: 0, end: quote.length, alignment: 'exact',
       source_refs: [{ message_id: messageId, start: 0, end: quote.length }],
@@ -186,7 +184,6 @@ describe('VOC frequency ranking pagination', () => {
     const reference: Knowledge = { ...reusable, id: 'knowledge-2', question: '仅参考的历史步骤', reuse_level: 'reference' }
     const blocked: Knowledge = { ...reusable, id: 'knowledge-3', question: '存在冲突的历史步骤', reuse_level: 'blocked' }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
-      if (name === 'voc2/issue-pilot') return pilot
       if (name === 'voc2/topics') return filters.trend === 'rising' ? { comparison, items: [topic], total: 1 }
         : { ...pageResult(filters.offset ?? 0, filters.limit ?? total), comparison }
       if (name === 'voc2/topic') return { topic, events: [evidence], workbench: { comparison, knowledge: [reusable, reference, blocked], gaps: [{ code: 'closure_unconfirmed', count: 2 }] } }
@@ -204,30 +201,18 @@ describe('VOC frequency ranking pagination', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /商品已配置但机器人没触发.*7 次咨询/ }))
     const drawer = within(await screen.findByRole('dialog', { name: '问题与原句依据' }))
-    expect(await drawer.findByText('疑似异常 · 待技术确认')).toBeTruthy()
-    expect(drawer.getByText('缺少处理结果或后续反馈 2 次咨询')).toBeTruthy()
-    const firstFact = drawer.getByText('已经核对商品资料已保存。').closest('li')
-    if (!firstFact) throw new Error('Missing commerce setting evidence')
-    fireEvent.click(within(firstFact).getByRole('button', { name: '定位原话' }))
-    expect(handlers.onOpenPair).toHaveBeenCalledWith(expect.objectContaining({ id: '24' }), 'message-platform')
+    expect(await drawer.findByText('代表问答')).toBeTruthy()
+    const exchange = drawer.getByText('客户问题原文').closest('article')!
+    expect(within(exchange).getByText(evidence.question)).toBeTruthy()
+    expect(within(exchange).getByText(evidence.answer)).toBeTruthy()
+    expect(drawer.queryByText('缺少处理结果或后续反馈 2 次咨询')).toBeNull()
+    expect(drawer.queryByText('已经核对商品资料已保存。')).toBeNull()
+    expect(drawer.queryByText('处理办法')).toBeNull()
+    const context = drawer.getByRole('button', { name: '查看会话上下文' })
+    expect(context.querySelector('svg')).toBeNull()
+    fireEvent.click(context)
+    expect(handlers.onOpenPair).toHaveBeenCalledWith(expect.objectContaining({ id: '24' }), 'message-start')
     fireEvent.click(drawer.getByRole('button', { name: '追问这个问题' }))
     expect(handlers.onOpenChat).toHaveBeenCalledWith(expect.objectContaining({ focus_topic: topic.id, days: 7 }))
-
-    const saved = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
-    try {
-      await act(async () => fireEvent.click(drawer.getByRole('button', { name: '复制疑似异常摘要' })))
-      expect(writeText).toHaveBeenCalledWith(expect.stringContaining(actual.quote))
-      await act(async () => fireEvent.click(drawer.getByRole('button', { name: '复制处理办法' })))
-      expect(writeText).toHaveBeenCalledWith(expect.stringContaining(reusable.scope))
-      fireEvent.click(drawer.getByRole('button', { name: /查看历史答复与参考步骤/ }))
-      expect(drawer.getByText(reference.question)).toBeTruthy()
-      expect(drawer.getByText(blocked.question)).toBeTruthy()
-      expect(drawer.getAllByRole('button', { name: '复制处理办法' })).toHaveLength(1)
-    } finally {
-      if (saved) Object.defineProperty(navigator, 'clipboard', saved)
-      else Reflect.deleteProperty(navigator, 'clipboard')
-    }
   })
 })

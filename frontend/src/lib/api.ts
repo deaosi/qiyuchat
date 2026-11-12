@@ -432,6 +432,9 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
       && isRecord(data.coverage) && hasCounts(data.coverage, ['source_events', 'matched_consultations', 'classified_consultations', 'needs_context']); break
     case 'voc2/playbooks': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(playbook)
       && (data.case_paths === undefined || Array.isArray(data.case_paths) && data.case_paths.every(casePath)); break
+    case 'voc2/complete-sops': valid = isCount(data.total) && data.case_paths === undefined && Array.isArray(data.items)
+      && data.items.every(item => playbook(item) && item.status === 'verified' && Array.isArray(item.branches)
+        && item.branches.length > 0 && item.branches.every((branch: unknown) => isRecord(branch) && branch.status === 'verified')); break
     case 'voc2/exceptions': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => isRecord(item)
       && ['id', 'kind', 'question', 'reason', 'created_at'].every(key => typeof item[key] === 'string')); break
     case 'voc2/topic': valid = (workbench ? enrichedTopic(data.topic) : topic(data.topic))
@@ -698,7 +701,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
     validateGetResponse(name, data, filters)
     validateVocResponse(name, data)
     validateVoc2Response(name, data, filters.workbench === 1)
-    if (filters.first_page && (name === 'voc2/issue-pilot' || name === 'voc2/playbooks')) {
+    if (filters.first_page && (name === 'voc2/issue-pilot' || name === 'voc2/playbooks' || name === 'voc2/complete-sops')) {
       const page = data as VocIssuePilot & Pick<VocPlaybookResultsData, 'case_paths'>
       const rows = page.items.length + (page.case_paths?.length ?? 0)
       const limit = name === 'voc2/issue-pilot' ? 6 : 8

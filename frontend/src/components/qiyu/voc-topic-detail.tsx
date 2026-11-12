@@ -6,7 +6,7 @@ import { DecisionCaseCard, DecisionCaseSection, TopicSummary } from './voc-detai
 import { Button } from '@/components/ui/button'
 import { SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import type { Evidence, Knowledge, KnowledgeReuse, Ref, TopicDetail } from './voc-next-workspace'
-import { diagnosisLabels, displayTime, EvidenceList, KnowledgeContent, knowledgeReuse, knowledgeReuseLevel, messageIdentifier, questionAnchor, type OpenTopicEvidence } from './voc-topic-evidence'
+import { diagnosisLabels, displayTime, EvidenceList, KnowledgeContent, knowledgeReuse, knowledgeReuseLevel, messageIdentifier, OriginalExchange, questionAnchor, type OpenTopicEvidence } from './voc-topic-evidence'
 
 export const trendLabels = { all: '全部', new: '新出现', rising: '明显上升', persistent: '持续高频' } as const
 export type TrendFilter = keyof typeof trendLabels
@@ -140,7 +140,6 @@ function DecisionCase({ item, title, onOpenEvidence, readOnly }: { item: Evidenc
   const diagnosis = status && confirmed.has(status) ? diagnosisLabels[status]
     : suspected ? '疑似异常 · 待技术确认'
       : domain?.primary_intent === 'configuration_guidance' ? '场景配置与使用指导' : '待补查或定位'
-  const reply = [...new Set(item.claims.filter(claim => claim.role === 'staff').map(claim => claim.quote.trim()).filter(Boolean))]
 
   function copyReport() {
     copyText([
@@ -152,9 +151,8 @@ function DecisionCase({ item, title, onOpenEvidence, readOnly }: { item: Evidenc
     ].filter(Boolean).join('\n'), '已复制疑似异常摘要。')
   }
 
-  return <DecisionCaseCard diagnosis={diagnosis}
+  return <DecisionCaseCard diagnosis={diagnosis} intro={<OriginalExchange item={item} />}
     metadata={[item.customer_name || '匿名商家', displayTime(item.asked_at)].filter(Boolean).join(' · ')}
-    question={item.question_quote || item.question}
     action={<>
         {item.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文<ArrowUpRight /></Button>}
         {suspected && !readOnly && <Button variant="outline" size="sm" onClick={copyReport}><Copy />复制疑似异常摘要</Button>}
@@ -165,9 +163,6 @@ function DecisionCase({ item, title, onOpenEvidence, readOnly }: { item: Evidenc
     }))}>
     {cause.length > 0 && <DecisionCaseSection title="诊断依据"><FactQuotes item={item} refs={cause} onOpenEvidence={onOpenEvidence} /></DecisionCaseSection>}
     {verifiedSteps.length > 0 && <DecisionCaseSection title="客服给出的处理步骤"><FactQuotes item={item} refs={verifiedSteps} onOpenEvidence={onOpenEvidence} /></DecisionCaseSection>}
-    {verifiedSteps.length === 0 && reply.length > 0 && <DecisionCaseSection title={item.staff_source_verified ? '客服原话' : '回复原话 · 来源未核验'}>
-      {reply.map(quote => <p key={quote} className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{quote}</p>)}
-    </DecisionCaseSection>}
   </DecisionCaseCard>
 }
 
@@ -192,9 +187,9 @@ function TopicKnowledge({ items, onOpenEvidence, readOnly }: { items: Knowledge[
   </section>
 }
 
-export function TopicDetailPanel({ standalone = false, children }: { standalone?: boolean; children: ReactNode }) {
+export function TopicDetailPanel({ standalone = false, exchangeOnly = false, children }: { standalone?: boolean; exchangeOnly?: boolean; children: ReactNode }) {
   const title = '问题与原句依据'
-  const description = '查看问题的处理判断、办法和会话依据。'
+  const description = exchangeOnly ? '查看客户问题、客服回复及会话上下文。' : '查看问题的处理判断、办法和会话依据。'
   return <>
     <SheetHeader className="shrink-0 border-b px-4 sm:px-6">
       {standalone ? <>
@@ -208,11 +203,12 @@ export function TopicDetailPanel({ standalone = false, children }: { standalone?
   </>
 }
 
-export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = false }: {
+export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = false, exchangeOnly = false }: {
   detail: TopicDetail
   onOpenEvidence: OpenTopicEvidence
   onAskTopic?: () => void
   readOnly?: boolean
+  exchangeOnly?: boolean
 }) {
   const { topic, events, workbench } = detail
   const [caseId, setCaseId] = useState<string | null>(null)
@@ -220,7 +216,8 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
   const caseHeading = useRef<HTMLHeadingElement>(null)
   const title = topic.theme.trim() || topic.question
   const trend = trendBadgeText(topic.trend)
-  const representative = events.find(item => item.workbench?.suspected_report_ready)
+  const representative = (exchangeOnly ? events.find(item => item.staff_source_verified && item.answer.trim()) : undefined)
+    ?? events.find(item => item.workbench?.suspected_report_ready)
     ?? events.find(item => item.staff_source_verified && confirmed.has(item.domain?.diagnosis.status ?? ''))
     ?? events.find(item => item.staff_source_verified)
     ?? events[0]
@@ -239,17 +236,20 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
       metadata={[topic.platforms?.join('、'), topic.last_seen && `最近发生 ${displayTime(topic.last_seen)}`, topic.unknown_merchant_sessions ? `${number(topic.unknown_merchant_sessions)} 个会话的商家身份待确认` : ''].filter(Boolean).join(' · ')} />
     {workbench && <TrendComparison comparison={workbench.comparison} currentConsultations={topic.consultation_count} trend={topic.trend} />}
     {workbench && activeCase && <section className="space-y-3">
-      <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">处理判断 · {caseId ? '当前案例' : '代表案例'}</h4>
-      <DecisionCase item={activeCase} title={title} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />
-      {gaps.length > 0 && <div className="space-y-2 rounded-lg border bg-muted/25 p-3">
+      <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">{exchangeOnly ? (caseId ? '当前问答' : '代表问答') : `处理判断 · ${caseId ? '当前案例' : '代表案例'}`}</h4>
+      {exchangeOnly ? <DecisionCaseCard metadata={[activeCase.customer_name || '匿名商家', displayTime(activeCase.asked_at)].filter(Boolean).join(' · ')}
+        intro={<OriginalExchange item={activeCase} />} facts={[]}
+        action={activeCase.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenEvidence(activeCase, questionAnchor(activeCase))}>查看会话上下文</Button>} />
+        : <DecisionCase item={activeCase} title={title} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />}
+      {!exchangeOnly && gaps.length > 0 && <div className="space-y-2 rounded-lg border bg-muted/25 p-3">
         <h5 className="text-xs font-medium">待补证据</h5>
         <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">{gaps.map(gap => <li key={gap.code}>{gapLabels[gap.code] ?? '其他证据缺口'} {number(gap.count)} 次咨询</li>)}</ul>
       </div>}
     </section>}
-    {workbench && <TopicKnowledge items={workbench.knowledge} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />}
+    {workbench && !exchangeOnly && <TopicKnowledge items={workbench.knowledge} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />}
     {(!workbench || otherCases.length > 0) && <section className="space-y-3" aria-label="会话依据">
-      <h4 className="font-medium">{workbench ? '其他会话依据' : '原句依据'}</h4>
-      <EvidenceList evidence={(workbench ? otherCases : events).slice(0, evidenceLimit)} onOpenEvidence={onOpenEvidence} readOnly={readOnly}
+      <h4 className="font-medium">{exchangeOnly ? (workbench ? '其他问答' : '问答记录') : workbench ? '其他会话依据' : '原句依据'}</h4>
+      <EvidenceList evidence={(workbench ? otherCases : events).slice(0, evidenceLimit)} onOpenEvidence={onOpenEvidence} readOnly={readOnly} exchangeOnly={exchangeOnly}
         onSelectCase={workbench ? id => { setCaseId(id); caseHeading.current?.focus(); caseHeading.current?.scrollIntoView?.({ block: 'start' }) } : undefined} />
       {(workbench ? otherCases : events).length > evidenceLimit && <Button variant="outline" size="sm" onClick={() => setEvidenceLimit(value => value + 8)}>显示更多会话依据</Button>}
     </section>}

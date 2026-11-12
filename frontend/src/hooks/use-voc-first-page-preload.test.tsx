@@ -28,7 +28,6 @@ it('waits for the current view and only warms first-page requests for the other 
     expect(vi.mocked(apiGet).mock.calls.map(([endpoint, params]) => [endpoint, params.offset, params.first_page]))
       .toEqual([
         ['voc2/topics', 0, undefined],
-        ['voc2/issue-pilot', undefined, 1],
         ['voc2/summary', undefined, undefined],
       ])
     expect(vi.mocked(apiGet).mock.calls.every(([, params, , activity]) =>

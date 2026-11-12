@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 import unittest
+from unittest.mock import patch
 
+from src import voc_engine
 from src.voc_playbooks import build
 from tests import test_voc_sops as sop_fixture
 
@@ -38,6 +40,29 @@ def issue(*cases, family="no_reply"):
 
 
 class TestPlaybooks(unittest.TestCase):
+    def test_knowledge_projection_only_includes_complete_verified_witnesses(self):
+        verified, unconfirmed, other_scope = case(1), case(2, result=False), case(3, condition="仅限主账号", result=False)
+        raw = build([issue(verified, unconfirmed, other_scope)], [verified, unconfirmed, other_scope])
+        raw["case_paths"] = [{"id": "partial"}]
+        scopes = {"days": 7}
+        with patch("src.voc_engine.playbooks", return_value=raw) as playbooks:
+            library = voc_engine.complete_sops(None, scopes)
+        playbooks.assert_called_once_with(None, scopes)
+        self.assertNotIn("case_paths", library)
+        [entry] = library["items"]
+        [branch] = entry["branches"]
+        self.assertEqual((library["total"], entry["status"], entry["checked_cases"], branch["case_count"]), (1, "verified", 1, 1))
+        self.assertEqual({ref["qa_id"] for refs in [branch["condition_evidence"], branch["retest_evidence"],
+                                                    branch["result_evidence"], *(step["evidence"] for step in branch["steps"])]
+                          for ref in refs}, {1})
+
+        # A retest instruction from another conversation cannot complete this case.
+        broken = deepcopy(raw)
+        broken_branch = broken["items"][0]["branches"][0]
+        broken_branch["retest_evidence"] = [ref for ref in broken_branch["retest_evidence"] if ref["qa_id"] == 2]
+        with patch("src.voc_engine.playbooks", return_value=broken):
+            self.assertEqual(voc_engine.complete_sops(None, scopes), {"items": [], "total": 0})
+
     def test_complete_evidence_keeps_chronology_and_combines_only_identical_scope(self):
         first, second, other_scope = case(1), case(2, result=False), case(3, condition="仅限主账号", result=False)
         items = build([issue(first, second, other_scope)], [first, second, other_scope])["items"]

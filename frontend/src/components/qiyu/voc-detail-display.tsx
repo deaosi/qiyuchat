@@ -32,11 +32,12 @@ export function TopicSummary({ title, badge, description, metrics, metadata, act
   </div>
 }
 
-export function DecisionCaseCard({ diagnosis, metadata, action, question, facts, children }: {
+export function DecisionCaseCard({ diagnosis, metadata, action, question, intro, facts, children }: {
   diagnosis?: string
   metadata?: string
   action?: ReactNode
   question?: string
+  intro?: ReactNode
   facts: { label: string; content: ReactNode }[]
   children?: ReactNode
 }) {
@@ -49,6 +50,7 @@ export function DecisionCaseCard({ diagnosis, metadata, action, question, facts,
       {action && <div className="flex flex-wrap gap-2">{action}</div>}
     </div>
     {question && <p className="whitespace-pre-wrap text-sm font-medium leading-6 [overflow-wrap:anywhere]">{question}</p>}
+    {intro}
     {facts.length > 0 && <dl className="grid gap-2 md:grid-cols-3">
       {facts.map(({ label, content }) => <div key={label} className="min-w-0 rounded-lg border bg-muted/25 p-3">
         <dt className="mb-2 text-xs font-medium">{label}</dt><dd>{content}</dd>

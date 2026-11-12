@@ -476,7 +476,7 @@ class Handler(BaseHTTPRequestHandler):
         if name.startswith("voc2/"):
             try:
                 paged = name == "voc2/topics" and ("limit" in qs or "offset" in qs)
-                preview = name in ("voc2/issue-pilot", "voc2/playbooks") and "first_page" in qs
+                preview = name in ("voc2/issue-pilot", "voc2/playbooks", "voc2/complete-sops") and "first_page" in qs
                 if preview and qs["first_page"] != ["1"]:
                     raise ValueError("首页参数无效。")
                 if paged:
@@ -500,6 +500,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = {**result, "items": result["items"][offset:offset + limit]}
                 elif preview and name == "voc2/issue-pilot":
                     result = {**result, "items": result["items"][:6], "first_page_total": result["total"]}
+                elif preview and name == "voc2/complete-sops":
+                    result = {**result, "items": result["items"][:8], "first_page_total": result["total"]}
                 elif preview:
                     paths = result.get("case_paths", [])
                     first_paths = paths[:8]

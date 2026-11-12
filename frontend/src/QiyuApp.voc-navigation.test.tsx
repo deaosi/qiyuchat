@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import QiyuApp from './QiyuApp'
-import type { Evidence, Knowledge } from '@/components/qiyu/voc-next-workspace'
-import { downloadExport, type VocConversationVerification } from '@/lib/api'
+import type { Evidence } from '@/components/qiyu/voc-next-workspace'
+import { downloadExport, type VocPlaybook } from '@/lib/api'
 import { readTopicLink, topicHref } from '@/lib/voc-topic-link'
 
 const query = vi.hoisted(() => vi.fn())
@@ -17,24 +17,20 @@ const evidence: Evidence = {
   id: 'event-1', event_id: 'event-1', qa_id: 24, question: '为什么保存后没有触发？', answer: '请打开场景开关后保存。',
   staff_source_verified: true, claims: [{ role: 'staff', quote: '请打开场景开关后保存。', start: 0, end: 11, source_refs: [] }],
 }
-const verified: VocConversationVerification = {
-  auto_reusable: true, status: 'accepted', acceptance: 'resolved', effect: 'customer_reported_success',
-  coverage: { complete_sources: 1, sources: 1, accepted_sources: 1, independent_weak_supports: 0, weak_threshold: 2 },
-  reason_codes: [], version: 'test', fingerprint: 'test', evidence: [{ role: 'merchant', quote: '现在触发了' }],
+const sopRef = (message_id: string, quote: string) => ({ qa_id: 24, message_id, quote, ts: 1794441600000 })
+const completeSop: VocPlaybook = {
+  id: 'playbook-1', issue_id: 'issue-1', title: '场景关闭导致咨询未触发', family: 'anomaly', platform: '拼多多', module: '场景配置',
+  condition: '', status: 'verified', checked_cases: 1, triage: [], missing: [], evidence: [],
+  branches: [{ id: 'branch-1', status: 'verified', condition: '对应场景开关处于关闭状态。',
+    condition_evidence: [sopRef('condition', '对应场景开关处于关闭状态。')],
+    steps: [{ text: evidence.answer, evidence: [sopRef('operation', evidence.answer)] }],
+    retest: '发送同一句咨询复测。', retest_evidence: [sopRef('retest', '发送同一句咨询复测。')],
+    result_evidence: [sopRef('result', '重新测试后，场景成功触发。')], escalation: '' }],
 }
-const reusable: Knowledge = {
-  id: 'knowledge-1', topic_id: topic.id, kind: 'configuration_guide', question: '怎样启用场景？',
-  answer: '请打开场景开关后保存。', scope: '适用于尚未启用的场景', steps: [], cautions: [], reply_patterns: [],
-  evidence_count: 1, status: 'ready', version: 1, updated_at: '2026-11-10', evidence: [evidence], conversation_verification: verified,
-}
-const sourceOnly: Knowledge = {
-  ...reusable, id: 'knowledge-2', question: '尚无闭环的知识',
-  conversation_verification: { ...verified, status: 'unknown', acceptance: 'continuing', effect: 'not_established', auto_reusable: false },
-}
-let knowledge: Knowledge[]
+let completeSops: VocPlaybook[]
 
 beforeEach(() => {
-  knowledge = [reusable, sourceOnly, { ...reusable, id: 'knowledge-3', question: '没有验证结果的知识', conversation_verification: undefined }]
+  completeSops = [completeSop]
   vi.stubGlobal('matchMedia', vi.fn(() => ({ addEventListener: vi.fn(), removeEventListener: vi.fn(), matches: false })))
   query.mockImplementation((endpoint: string, _filters: unknown, _key: number, enabled = true) => ({
     data: !enabled ? null : {
@@ -50,9 +46,7 @@ beforeEach(() => {
       'voc2/summary': { source_pairs: 6, total_events: 5, consultation_count: 3, topic_count: 1, coverage: { processed_pairs: 5, pending_pairs: 1 }, semantics: { ready: true }, latest_job: null },
       'voc2/topics': { items: [topic], total: 1 },
       'voc2/topic': { topic, events: [evidence] },
-      'voc2/knowledge': { items: knowledge, total: knowledge.length },
-      'voc2/sops': { items: [], total: 0 },
-      'voc2/playbooks': { items: [], total: 0 },
+      'voc2/complete-sops': { items: completeSops, total: completeSops.length, first_page_total: completeSops.length },
       'voc2/issue-pilot': { items: [], total: 0, coverage: { source_events: 0, matched_consultations: 0, classified_consultations: 0, needs_context: 0 } },
     }[endpoint] ?? null,
     loading: false, refreshing: false, error: null, retry: vi.fn(),
@@ -64,10 +58,6 @@ afterEach(() => {
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
 })
-
-function openReusableAnswers() {
-  fireEvent.mouseDown(screen.getByRole('tab', { name: '可复用答案' }), { button: 0 })
-}
 
 describe('VOC navigation', () => {
   it('opens a shared topic at the fixed dates and omits customer and staff identifiers from its link', () => {
@@ -93,7 +83,7 @@ describe('VOC navigation', () => {
 
     expect(screen.getByRole('heading', { name: 'VOC高频问题' })).toBeTruthy()
     expect(screen.getByText('咨询主题排行')).toBeTruthy()
-    expect(screen.queryByText(reusable.question)).toBeNull()
+    expect(screen.queryByText(completeSop.title)).toBeNull()
     expect(query.mock.calls.some(([endpoint]) => endpoint === 'voc2/knowledge')).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: /场景未触发.*3 次咨询/ }))
@@ -102,7 +92,7 @@ describe('VOC navigation', () => {
     expect(detail.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
   })
 
-  it('keeps all sidebar icons distinct and shows only explicitly successful legacy answers for reuse', () => {
+  it('opens a single verified SOP list from the knowledge sidebar', () => {
     window.history.replaceState(null, '', '#questions')
     const { container } = render(<QiyuApp />)
     const menuButtons = [...container.querySelectorAll('[data-sidebar="menu-button"]')]
@@ -114,81 +104,23 @@ describe('VOC navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
     expect(window.location.hash).toBe('#voc-next')
     expect(screen.getByRole('heading', { name: '沉淀知识库' })).toBeTruthy()
-    expect(screen.getByRole('tab', { name: '处理手册' }).getAttribute('aria-selected')).toBe('true')
-    openReusableAnswers()
-    expect(screen.getByText(reusable.question)).toBeTruthy()
-    expect(screen.getByText(/现在触发了.*客户反馈/)).toBeTruthy()
-    expect(screen.getByText(reusable.scope, { exact: false })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
-    expect(screen.queryByText(sourceOnly.question)).toBeNull()
-    expect(screen.queryByText('没有验证结果的知识')).toBeNull()
+    for (const tab of ['处理手册', '处理 SOP', '可复用答案']) expect(screen.queryByRole('tab', { name: tab })).toBeNull()
     expect(screen.queryByText('咨询主题排行')).toBeNull()
     expect(screen.queryByRole('button', { name: /整理当前范围|确认|审核/ })).toBeNull()
-  })
-
-  it('shows the verified operation feedback even when the general closure stays unknown', () => {
-    knowledge = [{
-      ...sourceOnly,
-      knowledge_reuse: { level: 'verified', reason_codes: [], evidence: [{ role: 'merchant', quote: '我重新保存以后，场景就触发了。', message_id: 51 }] },
-    }]
-    window.history.replaceState(null, '', '#voc-next')
-    render(<QiyuApp />)
-    openReusableAnswers()
-
-    expect(screen.getByText('操作效果已验证')).toBeTruthy()
-    expect(screen.getByText(/我重新保存以后，场景就触发了。.*客户反馈.*消息 51/)).toBeTruthy()
-    expect(screen.queryByText(/现在触发了.*客户反馈/)).toBeNull()
-  })
-
-  it('automatically shows qualified guidance and keeps reference records behind a disclosure', async () => {
-    const guidance: Knowledge = {
-      ...sourceOnly, id: 'guidance-1', question: '如何配置规则优先级？',
-      knowledge_reuse: { level: 'guidance', reason_codes: [] }, conversation_verification: undefined,
-    }
-    const advice: Knowledge = {
-      ...guidance, id: 'guidance-2', kind: 'troubleshooting_advice', question: '如何检查场景是否生效？',
-      conversation_verification: { ...verified, acceptance: 'understood', effect: 'not_established', evidence: [] },
-    }
-    const reference: Knowledge = {
-      ...reusable, id: 'reference-1', question: '历史会话中的说明', knowledge_reuse: { level: 'reference', reason_codes: [] },
-    }
-    const legacyAcknowledgement: Knowledge = { ...advice, id: 'legacy-2', question: '仅接受过解释', knowledge_reuse: undefined }
-    knowledge = [reusable, guidance, advice, reference, legacyAcknowledgement]
-    window.history.replaceState(null, '', '#voc-next')
-    render(<QiyuApp />)
-    openReusableAnswers()
-
-    expect(screen.getByText('操作效果已验证')).toBeTruthy()
-    const configurationCard = within(screen.getByRole('heading', { name: guidance.question }).closest('article')!)
-    expect(configurationCard.getByText('配置指引')).toBeTruthy()
-    expect(configurationCard.getByText('来源已核验')).toBeTruthy()
-    expect(configurationCard.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
-    const troubleshootingCard = within(screen.getByRole('heading', { name: advice.question }).closest('article')!)
-    expect(troubleshootingCard.getByText('排查建议')).toBeTruthy()
-    expect(troubleshootingCard.getByText(/操作效果待验证/)).toBeTruthy()
-    expect(troubleshootingCard.getByText('客户已接受解释。')).toBeTruthy()
-    expect(troubleshootingCard.queryByText('操作效果已验证')).toBeNull()
-    expect(screen.queryByText(legacyAcknowledgement.question)).toBeNull()
-    expect(screen.queryByText(reference.question)).toBeNull()
-
-    fireEvent.click(screen.getByText('来源记录（1）'))
-    const referenceHeading = await screen.findByRole('heading', { name: reference.question })
-    const referenceCard = within(referenceHeading.closest('article')!)
-    expect(referenceCard.getByText('保留此记录供查阅原始会话。')).toBeTruthy()
-    expect(referenceCard.getByRole('button', { name: '查看会话上下文' })).toBeTruthy()
-    expect(referenceCard.queryByText('操作效果已验证')).toBeNull()
-    expect(screen.queryByRole('button', { name: /确认|审核/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: `查看 SOP · ${completeSop.title}` }))
+    const detail = within(screen.getByRole('dialog', { name: completeSop.title }))
+    expect(detail.getByText('重新测试后，场景成功触发。')).toBeTruthy()
+    expect(detail.getAllByRole('button', { name: '查看原话' })).toHaveLength(4)
+    expect(query.mock.calls.some(([endpoint]) => ['voc2/playbooks', 'voc2/knowledge', 'voc2/sops'].includes(endpoint))).toBe(false)
   })
 
   it('shows an evidence-based empty state on the original knowledge route', () => {
-    knowledge = [sourceOnly]
+    completeSops = []
     window.history.replaceState(null, '', '#voc-next')
     render(<QiyuApp />)
-    openReusableAnswers()
-
     expect(screen.getByRole('heading', { name: '沉淀知识库' })).toBeTruthy()
-    expect(screen.getByText('当前范围暂无可复用答案')).toBeTruthy()
-    expect(screen.queryByText(sourceOnly.question)).toBeNull()
+    expect(screen.getByText('当前范围暂无已验证的完整 SOP')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^查看 SOP/ })).toBeNull()
     expect(query.mock.calls.some(([endpoint]) => endpoint === 'voc2/topics')).toBe(false)
   })
 
@@ -202,14 +134,8 @@ describe('VOC navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
     expect(screen.getByRole('combobox', { name: '客服筛选' })).toBe(staffFilter)
-    const playbookRequest = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/playbooks')
-    expect(playbookRequest?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
-    fireEvent.mouseDown(screen.getByRole('tab', { name: '处理 SOP' }), { button: 0 })
-    const sopRequest = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/sops')
-    expect(sopRequest?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
-    openReusableAnswers()
-    const request = query.mock.calls.find(([endpoint]) => endpoint === 'voc2/knowledge')
-    expect(request?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服' })
+    const request = query.mock.calls.find(([endpoint, , , enabled]) => endpoint === 'voc2/complete-sops' && enabled)
+    expect(request?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服', first_page: 1 })
     expect(request?.[1]).not.toHaveProperty('q')
     expect(request?.[1]).not.toHaveProperty('support_intent')
 

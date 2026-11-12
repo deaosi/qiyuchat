@@ -76,26 +76,40 @@ function DomainEvidence({ domain }: { domain?: Domain }) {
   </div>
 }
 
-export function EvidenceList({ evidence, onOpenEvidence, onSelectCase, readOnly = false }: {
+export function OriginalExchange({ item }: { item: Evidence }) {
+  const claims = [...new Set(item.claims.filter(claim => claim.role === 'staff').map(claim => claim.quote.trim()).filter(Boolean))]
+  const reply = item.staff_source_verified ? item.answer.trim() || claims.join('\n') : ''
+  const missing = item.answer.trim() || claims.length
+    ? '回复来源尚未核验，请查看会话上下文确认。'
+    : '当前问答片段未提取到客服回复，请查看会话上下文。'
+  return <div className="space-y-3 rounded-lg border bg-muted/20 p-4 text-sm">
+    <div className="space-y-1"><h5 className="font-medium">客户问题原文</h5>
+      <p className="whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]">{item.question || item.question_quote || '未记录咨询原文'}</p></div>
+    <div className="space-y-1"><h5 className="font-medium">客服回复原文</h5>
+      {reply && <p className="text-xs text-muted-foreground">同一问答中的原始回复，可能包含其他咨询内容。</p>}
+      <p className={`whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]${reply ? '' : ' text-muted-foreground'}`}>{reply || missing}</p></div>
+  </div>
+}
+
+export function EvidenceList({ evidence, onOpenEvidence, onSelectCase, readOnly = false, exchangeOnly = false }: {
   evidence: Evidence[]
   onOpenEvidence: OpenTopicEvidence
   onSelectCase?: (id: string) => void
   readOnly?: boolean
+  exchangeOnly?: boolean
 }) {
   if (!evidence.length) return <p className="text-sm text-muted-foreground">暂无可展示的原句依据。</p>
   return <div className="space-y-3">{evidence.map(item => {
-    const quotes = [...new Set(item.claims.filter(claim => claim.role === 'staff' && claim.quote.trim()).map(claim => claim.quote))]
     return <div key={item.id} className="rounded-lg border bg-muted/20 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>{!readOnly && item.qa_id ? `问答 ${item.qa_id} · ` : ''}{item.customer_name || '匿名商家'}{displayTime(item.asked_at) ? ` · ${displayTime(item.asked_at)}` : ''}</span>
         <div className="flex flex-wrap gap-1">
-          {onSelectCase && <Button variant="outline" size="xs" onClick={() => onSelectCase(item.id)}>查看处理判断</Button>}
-          {item.qa_id && <Button variant="ghost" size="xs" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文 <ArrowUpRight /></Button>}
+          {onSelectCase && <Button variant="outline" size="xs" onClick={() => onSelectCase(item.id)}>{exchangeOnly ? '查看问答' : '查看处理判断'}</Button>}
+          {item.qa_id && <Button variant="ghost" size="xs" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文 {!exchangeOnly && <ArrowUpRight />}</Button>}
         </div>
       </div>
-      <p className="mt-2 whitespace-pre-wrap break-words text-sm">{item.question_quote || item.question}</p>
-      <DomainEvidence domain={item.domain} />
-      <div className="mt-3 space-y-1.5 text-sm"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{quotes.length && item.staff_source_verified ? '本意图客服原句' : '本意图回复依据'}</span>{(!item.staff_source_verified || quotes.length > 0) && <Badge variant="outline" className="font-normal">{item.staff_source_verified ? '客服来源已核验' : '客服来源未核验'}</Badge>}</div>{quotes.length ? quotes.map((quote, index) => <p key={index} className="whitespace-pre-wrap break-words text-muted-foreground">{quote}</p>) : <p className="text-muted-foreground">暂无本意图的回复片段。</p>}</div>
+      <div className="mt-2"><OriginalExchange item={item} /></div>
+      {!exchangeOnly && <DomainEvidence domain={item.domain} />}
     </div>
   })}</div>
 }

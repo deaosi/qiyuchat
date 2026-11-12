@@ -10,10 +10,9 @@ export function useVocFirstPagePreload(view: string, filters: ApiFilters, refres
     if (paused) return
     const frequency = vocFrequencyScope(filters)
     const requests: { endpoint: string; params: ApiFilters }[] = []
-    if (view !== 'voc-next') requests.push({ endpoint: 'voc2/playbooks', params: { ...filters, first_page: 1 } })
+    if (view !== 'voc-next') requests.push({ endpoint: 'voc2/complete-sops', params: { ...filters, first_page: 1 } })
     if (view !== 'questions') requests.push(
       { endpoint: 'voc2/topics', params: vocTopicPageFilters(frequency, 'all', 0) },
-      { endpoint: 'voc2/issue-pilot', params: { ...filters, first_page: 1 } },
       { endpoint: 'voc2/summary', params: frequency },
     )
 

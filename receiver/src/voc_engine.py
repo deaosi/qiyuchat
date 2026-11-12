@@ -784,6 +784,41 @@ def playbooks(cfg: Settings, filters: dict) -> dict:
     return {**result, "case_paths": case_paths}
 
 
+def complete_sops(cfg: Settings, filters: dict) -> dict:
+    """Publish only procedures with all of their evidence in a completed case."""
+    items = []
+    for item in playbooks(cfg, filters)["items"]:
+        branches = []
+        for branch in item["branches"]:
+            if branch["status"] != "verified" or not branch["condition"] or not branch["steps"] or not branch["retest"]:
+                continue
+            witnesses = {ref["qa_id"] for ref in branch["result_evidence"]}
+            evidence_groups = [branch["condition_evidence"], branch["retest_evidence"],
+                               *(step["evidence"] for step in branch["steps"])]
+            for evidence in evidence_groups:
+                witnesses.intersection_update(ref["qa_id"] for ref in evidence)
+            if not witnesses:
+                continue
+
+            def sourced(evidence):
+                return [ref for ref in evidence if ref["qa_id"] in witnesses]
+
+            escalation = sourced(branch["escalation_evidence"])
+            branches.append({**branch, "case_count": len(witnesses),
+                             "condition_evidence": sourced(branch["condition_evidence"]),
+                             "steps": [{**step, "evidence": sourced(step["evidence"])} for step in branch["steps"]],
+                             "retest_evidence": sourced(branch["retest_evidence"]),
+                             "result_evidence": sourced(branch["result_evidence"]),
+                             "escalation": branch["escalation"] if escalation else "",
+                             "escalation_evidence": escalation})
+        if branches:
+            checked = {ref["qa_id"] for branch in branches for ref in branch["result_evidence"]}
+            items.append({key: item[key] for key in ("id", "issue_id", "title", "family", "platform", "module", "condition")}
+                         | {"status": "verified", "checked_cases": len(checked), "branches": branches,
+                            "triage": [], "missing": [], "evidence": []})
+    return {"items": items, "total": len(items)}
+
+
 def exceptions(cfg: Settings, filters: dict) -> dict:
     current = _sources(cfg, filters)
     rows = _events(cfg, filters, _current=current)

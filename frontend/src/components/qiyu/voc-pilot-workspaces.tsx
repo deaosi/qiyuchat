@@ -33,7 +33,7 @@ const playbookPageSize = 8
 type FullList = { total: number; request: () => void; error: string | null; retry: () => void }
 
 export function useVocFirstPageList<T extends { first_page_total?: number }>(
-  name: 'voc2/issue-pilot' | 'voc2/playbooks', filters: ApiFilters, refreshKey: number,
+  name: 'voc2/issue-pilot' | 'voc2/playbooks' | 'voc2/complete-sops', filters: ApiFilters, refreshKey: number,
   usePrefetch: boolean, linked = false,
 ) {
   const scope = JSON.stringify(filters)

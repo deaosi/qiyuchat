@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, CircleAlert, Copy, LoaderCircle, MessagesSquare, RefreshCw, Sparkles } from 'lucide-react'
+import { BookOpen, ChevronLeft, ChevronRight, CircleAlert, Copy, LoaderCircle, MessagesSquare, RefreshCw, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
-import { apiPost, normalizePair, type ApiFilters, type VocConversationVerification, type VocIssuePilot, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
+import { apiPost, normalizePair, type ApiFilters, type VocConversationVerification, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { vocTopicPageFilters, vocTopicPageSize as topicPageSize } from '@/lib/voc-first-page'
 import { Badge } from '@/components/ui/badge'
@@ -17,7 +17,6 @@ import { Progress } from '@/components/ui/progress'
 import { LoadingMark, LoadingState, LoadingValue } from './loading-state'
 import { diagnosisLabels, displayTime, intentLabels, KnowledgeContent, knowledgeReuseLevel, type OpenTopicEvidence } from './voc-topic-evidence'
 import { copyKnowledge, TopicDetailPanel, TopicWorkbench, TrendComparison, trendBadgeText, trendLabels, type TrendComparisonData, type TrendFilter, type TopicTrend } from './voc-topic-detail'
-import { useVocFirstPageList, VocIssuePilotResults } from './voc-pilot-workspaces'
 
 export type PrimaryIntent = 'configuration_guidance' | 'functional_anomaly' | 'unclear'
 export type DiagnosisStatus = 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
@@ -74,7 +73,6 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const key = refreshKey + revision
   const usePrefetch = revision === 0 && supportIntent === 'all' && diagnosisStatus === 'all'
   const summary = useApi<Summary>('voc2/summary', resultFilters, key, true, usePrefetch)
-  const pilot = useVocFirstPageList<VocIssuePilot>('voc2/issue-pilot', filters, key, usePrefetch)
   const topics = useApi<TopicList>('voc2/topics', vocTopicPageFilters(resultFilters, trend, offset), key, true,
     usePrefetch && trend === 'all' && offset === 0)
   const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, workbench: 1, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
@@ -83,7 +81,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const pageLoading = topics.loading || (lastPage !== null && page > lastPage)
   const job = summary.data?.latest_job
   const refreshResults = useCallback(() => setRevision(value => value + 1), [])
-  const fetching = summary.loading || summary.refreshing || topics.loading || topics.refreshing || pilot.fetching
+  const fetching = summary.loading || summary.refreshing || topics.loading || topics.refreshing
   useBackgroundRefresh(refreshResults, active(job), fetching, key)
   useEffect(() => {
     setRanking(current => current.scopeKey === scopeKey ? current : { scopeKey, page: 0, selectedId: null })
@@ -122,15 +120,6 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
         <Button onClick={() => setRunOpen(true)} disabled={active(job)}>{active(job) ? <LoadingMark /> : <Sparkles />}{active(job) ? '正在整理' : 'AI 整理当前范围'}</Button>
       </div>
     </div>
-    <Card className="gap-3" aria-labelledby="voc-issue-pilot-heading">
-      <CardHeader>
-        <CardTitle id="voc-issue-pilot-heading" role="heading" aria-level={2}>产品问题清单</CardTitle>
-        <CardDescription>按上方时间、客户群和客服筛选，查看影响范围、处理进度和会话依据。</CardDescription>
-      </CardHeader>
-      <CardContent><QueryPanel hasData={pilot.data !== null} loading={pilot.loading} error={pilot.error} retry={pilot.retry}>
-        {pilot.data && <VocIssuePilotResults key={JSON.stringify(filters)} data={pilot.data} onOpenPair={onOpenPair} fullList={pilot.fullList} />}
-      </QueryPanel></CardContent>
-    </Card>
     <div className="flex flex-wrap items-center gap-3">
       <Select value={supportIntent} onValueChange={value => setSupportIntent(value as NonNullable<ApiFilters['support_intent']>)}>
         <SelectTrigger className="w-full sm:w-[205px]" aria-label="支持类型"><SelectValue /></SelectTrigger>
@@ -188,7 +177,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
                   <span className="font-medium text-foreground">{count(item.consultation_count)} 次咨询</span>
                   <span className="flex flex-col items-end gap-x-1 sm:flex-row"><span>{count(item.session_count)} 个会话</span>{item.merchant_count !== undefined && <><span aria-hidden="true" className="hidden sm:inline">·</span><span>识别 {count(item.merchant_count)} 家商家</span></>}</span>
                 </span>
-                <ArrowUpRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+                <span className="shrink-0 rounded-md border px-2 py-1 text-xs font-medium">查看问答</span>
               </span>
             </button>
           })}</div> : <p role="status" className="py-10 text-center text-sm text-muted-foreground">{emptyTrendMessage(trend, comparison)}</p>}
@@ -209,9 +198,9 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
       if (initialTopic) onCloseLinkedTopic?.()
     }}>
       <SheetContent className="w-full gap-0 sm:max-w-3xl xl:max-w-4xl">
-        <TopicDetailPanel>
+        <TopicDetailPanel exchangeOnly>
           <QueryPanel hasData={detail.data !== null} loading={detail.loading} error={detail.error} retry={detail.retry}>{detail.data &&
-            <TopicWorkbench key={detail.data.topic.id} detail={detail.data} onOpenEvidence={(item, messageId) => onOpenPair(normalizePair(item), messageId)} onAskTopic={() => {
+            <TopicWorkbench key={detail.data.topic.id} detail={detail.data} exchangeOnly onOpenEvidence={(item, messageId) => onOpenPair(normalizePair(item), messageId)} onAskTopic={() => {
               const focusTopic = detail.data?.topic.id
               if (focusTopic) onOpenChat({ ...resultFilters, focus_topic: focusTopic })
             }} />

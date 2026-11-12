@@ -474,6 +474,7 @@ class TestVocHttp(LocalFixture):
         cases = [{"id": f"case-{index}"} for index in range(5)]
         with patch("src.web.server.voc_service.get") as get:
             for name, data, limit in (("issue-pilot", {"items": items, "total": len(items)}, 6),
+                                      ("complete-sops", {"items": items, "total": len(items)}, 8),
                                       ("playbooks", {"items": items, "case_paths": cases, "total": len(items)}, 8)):
                 get.return_value = data
                 path = "/api/voc2/" + name + "?source=local&days=7&first_page=1"
