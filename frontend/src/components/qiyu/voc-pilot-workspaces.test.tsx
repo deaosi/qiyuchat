@@ -116,9 +116,11 @@ it('shows the sourced operation ahead of pending consultations and keeps the act
 it('makes the model summary searchable and opens the exact evidence for a model-discovered operation', () => {
   const problem = { ...source, quote: '拼多多发出「稍等」以后没有待办。' }
   const action = { ...source, message_id: 'source-4', quote: '我这边配置为知识加入待办。', ts: source.ts + 1000 }
-  const followup = { ...source, message_id: 'source-5', quote: '我再发了一遍稍等，这次待办出来了。', ts: source.ts + 2000 }
+  const reported = { ...source, message_id: 'source-5', quote: '我也给通用知识打开了加入待办。', ts: source.ts + 2000 }
+  const followup = { ...source, message_id: 'source-6', quote: '我再发了一遍稍等，这次待办出来了。', ts: source.ts + 3000 }
   const path: VocCasePath = {
-    id: 'case-1', qa_id: source.qa_id, problem, platform: '拼多多', outcome: 'not_recorded', steps: [],
+    id: 'case-1', qa_id: source.qa_id, problem, platform: '拼多多', outcome: 'not_recorded',
+    steps: [action, reported].map(evidence => ({ actor: 'staff', state: 'reported', action: evidence.quote, evidence })),
     solution: { title: '拼多多回复后未生成待办', sections: [
       { kind: 'problem', text: '客户反馈回复「稍等」后没有待办。', evidence: [problem] },
       { kind: 'diagnosis', text: '问题发生在机器人回复后的待办生成环节。', evidence: [problem] },
@@ -127,7 +129,7 @@ it('makes the model summary searchable and opens the exact evidence for a model-
     ] },
   }
   const open = vi.fn()
-  render(<VocPlaybookResults items={[]} casePaths={[path]} onOpenPair={open} />)
+  const { rerender } = render(<VocPlaybookResults items={[]} casePaths={[path]} onOpenPair={open} />)
   fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理手册' }), { target: { value: '待办生成环节' } })
   fireEvent.click(screen.getByRole('button', { name: /拼多多回复后未生成待办/ }))
 
@@ -136,11 +138,19 @@ it('makes the model summary searchable and opens the exact evidence for a model-
   expect(within(operation).getByText('客服将当前知识配置为加入待办。')).toBeTruthy()
   fireEvent.click(within(operation).getByRole('button', { name: '定位原话' }))
   expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: '42', question: action.quote }), 'source-4')
+  const additional = within(detail.getByRole('heading', { name: '客服称已执行的操作' }).closest('section')!)
+  expect(additional.getByText(reported.quote)).toBeTruthy()
+  expect(additional.queryByText(action.quote)).toBeNull()
+  fireEvent.click(additional.getByRole('button', { name: '定位原话' }))
+  expect(open).toHaveBeenLastCalledWith(expect.objectContaining({ id: '42' }), 'source-5')
   expect(detail.getByText('本案例中，客户再次发送相同内容后看到了待办。')).toBeTruthy()
-  expect(detail.getByText('原始咨询').closest('details')?.open).toBe(false)
+  expect(detail.getByText('原始处理记录').closest('details')?.open).toBe(false)
   expect(detail.queryByText('未记录复测结果')).toBeNull()
   expect(detail.queryByText('效果已验证')).toBeNull()
   expect(detail.queryByRole('button', { name: '复制处理步骤' })).toBeNull()
+  const { solution } = path
+  rerender(<VocPlaybookResults items={[]} casePaths={[{ ...path, solution: { ...solution!, sections: solution!.sections.filter(section => section.kind !== 'verification') } }]} onOpenPair={open} />)
+  expect(detail.getByText('未记录复测结果')).toBeTruthy()
 })
 
 it('preserves the playbook deep link and copies only branches with sourced steps and retest', async () => {
