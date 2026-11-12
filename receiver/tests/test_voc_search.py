@@ -135,6 +135,14 @@ class MaterialRetrieval(unittest.TestCase):
         result = self.run_search(event_items=rows, require_staff=True)
         self.assertEqual(result['events'], [])
 
+    def test_verified_pair_fallback_must_match_question_without_ranking_the_full_reply(self):
+        verified = event('paired', staff=True)
+        verified.update(claims=[], source_kind='source-anchored', answer_message_ids=['staff:1'])
+        wrong = {**verified, 'id': 'other-intent', 'question': '安装底座如何操作', 'question_quote': '安装底座如何操作'}
+        unanchored = {**verified, 'id': 'unanchored', 'answer_message_ids': []}
+        result = self.run_search(event_items=[wrong, unanchored, verified], limit=1, require_staff=True)
+        self.assertEqual([item['id'] for item in result['events']], ['paired'])
+
     def test_items_outside_the_scoped_topic_set_do_not_enter_results(self):
         rows = [knowledge('foreign', '重新授权子账号权限。', topic_id='outside')]
         result = self.run_search(rows)

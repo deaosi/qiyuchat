@@ -40,11 +40,26 @@ def _quotes(value: object) -> list[str]:
     return []
 
 
+def staff_claims(item: dict) -> list[str]:
+    if item.get('staff_source_verified') is not True:
+        return []
+    return [claim['quote'] for claim in item.get('claims', [])
+            if isinstance(claim, dict) and claim.get('role') == 'staff'
+            and isinstance(claim.get('quote'), str) and claim['quote'].strip()]
+
+
+def verified_pair_reply(item: dict) -> str:
+    """Read the exact staff answer in a source-anchored pair without intent excerpts."""
+    answer, ids = item.get('answer'), item.get('answer_message_ids')
+    if (item.get('staff_source_verified') is True and item.get('source_kind') == 'source-anchored'
+            and not item.get('claims') and isinstance(answer, str) and isinstance(ids, list)
+            and ids and all(isinstance(mid, str) and mid.strip() for mid in ids)):
+        return answer.strip()
+    return ''
+
+
 def has_staff_reply(item: dict) -> bool:
-    return item.get('staff_source_verified') is True and any(
-        isinstance(claim, dict) and claim.get('role') == 'staff'
-        and isinstance(claim.get('quote'), str) and claim['quote'].strip()
-        for claim in item.get('claims', []))
+    return bool(staff_claims(item) or verified_pair_reply(item))
 
 
 def material_parts(item: dict, kind: str) -> list[str]:
@@ -57,10 +72,9 @@ def material_parts(item: dict, kind: str) -> list[str]:
                    *item.get('cautions', []), *item.get('reply_patterns', []),
                    *_quotes(item.get('applicability')), *_quotes(item.get('confirmed_cause'))]
     elif kind == 'event':
-        if has_staff_reply(item):
-            values += [claim['quote'] for claim in item['claims']
-                       if isinstance(claim, dict) and claim.get('role') == 'staff'
-                       and isinstance(claim.get('quote'), str)]
+        # The full paired reply may include other intents. It can be shown
+        # after matching the question, but its text cannot drive relevance.
+        values += staff_claims(item)
         domain = item.get('domain') or {}
         for key in ('platforms', 'modules', 'prerequisites', 'operation_path', 'merchant_goal', 'expected', 'actual'):
             values += _quotes(domain.get(key))

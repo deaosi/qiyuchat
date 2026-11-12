@@ -233,6 +233,25 @@ class TestVocAssistant(LocalFixture):
         self.assertEqual(result['citations'][0]['id'],'t1')
         self.assertEqual(result['model'],'arbitrary-family')
 
+    def test_current_range_ranking_bypasses_model_and_uses_current_page_filters(self):
+        self.engine.topics.return_value = {'items': [
+            {'id': 't1', 'question': '场景为什么未触发？', 'theme': '场景触发', 'consultation_count': 8,
+             'event_count': 9, 'customer_count': 3, 'session_count': 4},
+        ]}
+        with patch('src.voc_assistant.complete_json', side_effect=AssertionError('no model needed')) as model:
+            result = A.answer(self.domain_cfg(), {'days': 7, 'group': '本页客户群'}, {
+                'message': '当前范围的高频咨询有哪些？',
+                'context': {'query_filters': {'days': 30, 'group': '本页客户群', 'support_intent': 'functional_anomaly'},
+                            'citations': []},
+            })
+        self.assertEqual((result['answer_mode'], result['usage_tokens']), ('computed', 0))
+        self.assertIn('8 次咨询', result['answer'])
+        self.assertEqual(result['citations'][0]['id'], 't1')
+        self.assertEqual(result['scope']['query_filters']['group'], '本页客户群')
+        self.assertEqual(result['scope']['query_filters']['support_intent'], 'all')
+        self.assertIn('最近 7 天', result['scope']['label'])
+        model.assert_not_called()
+
     def test_only_ready_knowledge_and_whitelisted_ids_can_answer(self):
         row={'id':'k1','question':'怎么操作？','answer':'进入商品管理后选择目标店铺。','status':'ready','scope':'有目标店铺权限','steps':[],'cautions':[],'reply_patterns':[]}
         self.engine.search.return_value={'knowledge':[row],'topics':[],'events':[]}
@@ -270,6 +289,26 @@ class TestVocAssistant(LocalFixture):
         self.assertNotIn('未经核验的旧回答',result['answer'])
         self.assertNotIn('安装后保存',result['answer'])
         self.assertEqual([i['id'] for i in result['citations']],['ok'])
+
+    def test_reply_preset_retrieves_scenario_and_can_show_verified_paired_original(self):
+        anchored = {'id': 'ok', 'qa_id': 12, 'topic_id': 't1', 'source_kind': 'source-anchored',
+                    'question_quote': '退款场景没有触发', 'answer': '请发一下场景名称和订单时间。',
+                    'answer_message_ids': ['staff:12'], 'staff_source_verified': True, 'claims': []}
+        self.engine.search.return_value = {
+            'events': [anchored, {**anchored, 'id': 'duplicate'}, {**anchored, 'id': 'unverified',
+                       'qa_id': 13, 'staff_source_verified': False, 'answer': '未核验的客服回复'}],
+            'topics': [{'id': 't1', 'theme': '场景触发', 'question': '为什么没有触发？'}],
+            'knowledge': [],
+        }
+        with patch('src.voc_assistant.complete_json', side_effect=AssertionError('no model needed')) as model:
+            result = A.answer(self.domain_cfg(), {'days': 7}, {'message': '客服通常怎么回复场景未触发的问题？'})
+        self.assertEqual(self.engine.search.call_args.args[2], '场景未触发')
+        self.assertTrue(self.engine.search.call_args.kwargs['require_staff'])
+        self.assertEqual((result['answer_mode'], result['usage_tokens']), ('source_reference', 0))
+        self.assertIn('同一问答中的客服回复原话：' + anchored['answer'], result['answer'])
+        self.assertNotIn('未核验的客服回复', result['answer'])
+        self.assertEqual([ref['id'] for ref in result['citations']], ['ok'])
+        model.assert_not_called()
 
     def test_new_knowledge_uses_stored_versions_without_embedding_request(self):
         self.engine.knowledge.return_value={'items':[]}
