@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, Check, Copy, History, Square, SquarePen, Trash2 } f
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { type ApiFilters, type GatewayConfig } from '@/lib/api'
-import { chatScopeKey, chatScopeLabel, citationFilters, getVocChatStore, type ChatAnswerMode, type ChatCitation, type ChatMessage, type ChatThread, type VocChatStore } from '@/lib/voc-chat'
+import { chatScopeKey, chatScopeLabel, citationFilters, getVocChatStore, type ChatAnswerMode, type ChatCitation, type ChatExample, type ChatMessage, type ChatThread, type VocChatStore } from '@/lib/voc-chat'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
@@ -11,7 +11,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { VocSourceInspector } from './voc-source-inspector'
 import { LoadingMark, LoadingState } from './loading-state'
 
-type Selection = { threadId: string; citation: ChatCitation; message: ChatMessage; filters: ApiFilters }
+type Selection = { threadId: string; citation: ChatCitation; message: ChatMessage; filters: ApiFilters; showConversation: boolean }
 type Preset = { prompt: string; keywords: string[] }
 const draftLimit = 2000
 const presetRotationMs = 5000
@@ -77,6 +77,34 @@ function QueryDetails({ message, filters }: { message: ChatMessage; filters: Api
   </details>
 }
 
+function AnswerExamples({ examples, onOpen }: { examples: ChatExample[]; onOpen: (citation: ChatCitation) => void }) {
+  return <section className="space-y-2 pt-1" aria-label="实际案例">
+    <h4 className="text-sm font-medium">实际案例</h4>
+    <div className="divide-y rounded-lg border bg-muted/20">
+      {examples.map(example => <article key={example.citation.id} className="space-y-2 px-3.5 py-3 sm:px-4">
+        <dl className="space-y-2">
+          <div>
+            <dt className="text-xs text-muted-foreground">商家原话</dt>
+            <dd className="mt-0.5 whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{example.question}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">客服原话</dt>
+            <dd className="mt-0.5 whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{example.reply}</dd>
+          </div>
+          {example.outcome && <div>
+            <dt className="text-xs text-muted-foreground">复测反馈</dt>
+            <dd className="mt-0.5 whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{example.outcome}</dd>
+          </div>}
+        </dl>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {example.time && <time className="text-xs tabular-nums text-muted-foreground">{example.time}</time>}
+          <Button type="button" variant="ghost" size="xs" className="ml-auto" onClick={() => onOpen(example.citation)}>查看原会话</Button>
+        </div>
+      </article>)}
+    </div>
+  </section>
+}
+
 const timestamp = (value: number) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value)
 
 export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store = getVocChatStore() }: { filters: ApiFilters; refreshKey?: number; onScopeChange: (filters: ApiFilters) => void; store?: VocChatStore }) {
@@ -97,6 +125,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
   const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null), previousThread = useRef('')
   const nearBottom = useRef(true)
   const chosenPreset = useRef(false)
+  const sourceTrigger = useRef<HTMLElement | null>(null)
   const completionId = useId()
   const gateway = useApi<GatewayConfig>('gateway/config', { source: 'local' }, refreshKey)
   const focus = useApi<{ topic: { question: string } }>('voc2/topic', { ...filters, id: filters.focus_topic }, refreshKey, Boolean(filters.focus_topic))
@@ -159,12 +188,20 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
     store.setDraft(current.id, prompt)
     input.current?.focus()
   }
-  function openSource(citation: ChatCitation, message: ChatMessage) {
+  function openSource(citation: ChatCitation, message: ChatMessage, showConversation = false) {
     if (!current) return
-    setSelection({ threadId: current.id, citation, message, filters: citationFilters(current.filters, message.queryFilters) })
+    sourceTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setSelection({ threadId: current.id, citation, message, filters: citationFilters(current.filters, message.queryFilters), showConversation })
   }
   async function copy(message: ChatMessage) {
-    try { await navigator.clipboard.writeText(message.content); setCopied(message.id); window.setTimeout(() => setCopied(''), 1800) }
+    const examples = message.examples?.map(example => [
+      example.time,
+      `商家原话\n${example.question}`,
+      `客服原话\n${example.reply}`,
+      example.outcome && `复测反馈\n${example.outcome}`,
+    ].filter(Boolean).join('\n'))
+    const content = examples?.length ? [message.content, '实际案例', ...examples].join('\n\n') : message.content
+    try { await navigator.clipboard.writeText(content); setCopied(message.id); window.setTimeout(() => setCopied(''), 1800) }
     catch { toast.error('未能复制，请选中文字复制。') }
   }
   const history = <div className="flex min-h-0 flex-1 flex-col">
@@ -197,6 +234,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
           {current.messages.map(message => <article key={message.id} className={`voc-chat-message ${message.role === 'user' ? 'flex justify-end' : 'space-y-3'}`}>
             {message.role === 'user' ? <p className="max-w-[88%] whitespace-pre-wrap break-words rounded-lg bg-muted/70 px-4 py-3 text-sm leading-7">{message.content}</p> : <>
               <div className="whitespace-pre-wrap break-words text-sm leading-7 [overflow-wrap:anywhere]">{message.content}</div>
+              {!!message.examples?.length && <AnswerExamples examples={message.examples} onOpen={citation => openSource(citation, message, true)} />}
               {!!message.citations?.length && <details className="voc-chat-disclosure text-xs text-muted-foreground"><summary className="w-fit cursor-pointer list-none py-1 underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring">查看依据（{message.citations.length}）</summary><div className="space-y-1 pt-2">{message.citations.map((citation, index) => <button key={`${citation.kind}-${citation.id}`} onClick={() => openSource(citation, message)} className={`flex w-full items-start gap-2 py-1.5 text-left text-xs leading-5 underline-offset-4 transition-colors duration-150 hover:text-foreground hover:underline ${selection?.message.id === message.id && selection.citation.id === citation.id ? 'text-foreground underline' : 'text-muted-foreground'}`}><span className="shrink-0 tabular-nums">{index + 1}.</span><span className="min-w-0 flex-1 break-words">{citation.title || `来源 ${citation.id}`}</span></button>)}</div></details>}
               <div className="flex items-start justify-between gap-3">
                 <QueryDetails message={message} filters={current.filters} />
@@ -261,7 +299,16 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
 
       </div></div>
     <Sheet open={historyOpen} onOpenChange={setHistoryOpen}><SheetContent side="left" className="w-72 gap-0 p-0 data-[state=open]:duration-250 data-[state=closed]:duration-200" onCloseAutoFocus={event => { if (deleting) event.preventDefault() }}><SheetHeader className="border-b p-4"><SheetTitle>对话记录</SheetTitle><SheetDescription>本窗口保留的最近对话</SheetDescription></SheetHeader>{history}</SheetContent></Sheet>
-    <Sheet open={!!selection} onOpenChange={open => { if (!open) setSelection(null) }}><SheetContent className="w-full overflow-y-auto sm:max-w-3xl data-[state=open]:duration-250 data-[state=closed]:duration-200"><SheetHeader><SheetTitle>回答依据</SheetTitle><SheetDescription>查看来源案例及对应会话记录。</SheetDescription></SheetHeader><div className="px-4 pb-6">{selection && <VocSourceInspector citation={selection.citation} filters={selection.filters} />}</div></SheetContent></Sheet>
+    <Sheet open={!!selection} onOpenChange={open => { if (!open) setSelection(null) }}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-3xl data-[state=open]:duration-250 data-[state=closed]:duration-200" onCloseAutoFocus={event => {
+        if (!sourceTrigger.current?.isConnected) return
+        event.preventDefault()
+        sourceTrigger.current.focus({ preventScroll: true })
+      }}>
+        <SheetHeader><SheetTitle>回答依据</SheetTitle><SheetDescription>查看来源案例及对应会话记录。</SheetDescription></SheetHeader>
+        <div className="px-4 pb-6">{selection && <VocSourceInspector citation={selection.citation} filters={selection.filters} showConversation={selection.showConversation} />}</div>
+      </SheetContent>
+    </Sheet>
     <AlertDialog open={!!deleting} onOpenChange={open => { if (!open) setDeleting(null) }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>删除本窗口对话？</AlertDialogTitle><AlertDialogDescription>将删除本窗口保存的“{deleting?.title}”。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={() => { if (deleting) { const next = store.remove(deleting.id); onScopeChange(next.filters) } setDeleting(null) }}>删除对话</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </section>
 }

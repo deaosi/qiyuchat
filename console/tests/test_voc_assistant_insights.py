@@ -86,6 +86,74 @@ class TestAssistantInsights(unittest.TestCase):
         self.assertIn('多个相关主题', result['answer'])
         self.assertEqual([ref['id'] for ref in result['citations']], ['a', 'b'])
 
+    def test_follow_up_examples_uses_only_preceding_references_in_the_same_scope(self):
+        ref = {'kind': 'event', 'id': 'episode_1'}
+        row = {'id': ref['id'], 'question': '商家实际咨询'}
+        case = {'citation': {**ref, 'title': '商家实际咨询'}, 'question': '原话一', 'reply': '原话二'}
+        self.engine.event_detail.return_value = {'event': row}
+        with (
+            patch.object(assistant, '_plan') as planner,
+            patch.object(assistant, 'build_examples', return_value=[case]) as extract,
+        ):
+            result = assistant.answer(self.cfg, {'group': '甲群'}, {
+                'message': '给个真实案例',
+                'context': {'query_filters': {'group': '甲群', 'start': '2026-11-06', 'end': '2026-11-12'},
+                            'citations': [ref]},
+            })
+        self.assertEqual(result['examples'], [case])
+        self.assertEqual(result['citations'], [case['citation']])
+        self.assertEqual(result['answer_mode'], 'source_reference')
+        scoped = extract.call_args.args[2]
+        self.assertEqual((scoped['group'], scoped['start'], scoped['end']), ('甲群', '2026-11-06', '2026-11-12'))
+        self.assertEqual(extract.call_args.args[3], [(case['citation'], row)])
+        self.engine.search.assert_not_called()
+        planner.assert_not_called()
+
+    def test_example_does_not_use_a_source_omitted_from_the_grounded_answer(self):
+        event_one = {'id': 'episode_1', 'question_quote': '已选来源问题'}
+        event_two = {'id': 'episode_2', 'question_quote': '未选来源问题'}
+        events = {row['id']: row for row in (event_one, event_two)}
+        self.engine.search.return_value = {'events': [event_one, event_two]}
+        self.engine.event_detail.side_effect = lambda _, scoped, identity: {'event': events[identity]}
+        plan = {'intent': 'evidence', 'query': '场景配置', 'days': 7, 'limit': 3,
+                'support_intent': None, 'diagnosis_status': None}
+        citation = {'kind': 'event', 'id': 'episode_1', 'title': '会话依据'}
+        example = {'citation': citation, 'question': '已选来源问题', 'reply': '实际回复'}
+        with (
+            patch.object(assistant, '_plan', return_value=(plan, 0)),
+            patch.object(assistant.voc_answer, 'compose',
+                         return_value=({'answer': '已选依据。', 'used_ids': ['S1']}, 0, '')),
+            patch.object(assistant, 'build_examples', return_value=[example]) as extract,
+        ):
+            result = assistant.answer(self.cfg, {}, {'message': '场景配置会话里是怎么说的？'})
+        self.assertEqual(result['examples'], [example])
+        self.assertEqual(extract.call_args.args[3], [(citation, event_one)])
+
+    def test_knowledge_can_fall_back_to_a_scoped_staff_case_without_the_model_writer(self):
+        question = '退款场景配置好了，为什么订单没有命中？'
+        reply = '请先确认订单状态是否符合场景的触发条件。'
+        event = {'id': 'episode_exact', 'qa_id': 12, 'source_fingerprint': 'snapshot',
+                 'question': question, 'question_quote': question,
+                 'question_span': {'quote': question, 'start': 0, 'end': len(question), 'alignment': 'exact'},
+                 'answer': reply, 'answer_message_ids': ['staff-1'], 'staff_source_verified': True,
+                 'source_kind': 'source-anchored', 'claims': []}
+        self.engine.search.side_effect = [{'events': [], 'knowledge': []}, {'events': [event]}]
+        self.engine.event_detail.return_value = {'event': event}
+        plan = {'intent': 'knowledge', 'query': '退款场景未命中', 'days': 7, 'limit': 3,
+                'support_intent': None, 'diagnosis_status': None}
+        with (
+            patch.object(assistant, '_plan', return_value=(plan, 0)),
+            patch.object(assistant.voc_answer, 'compose', return_value=(None, 0, '模型暂不可用')),
+        ):
+            result = assistant.answer(self.cfg, {'group': '甲群'}, {'message': '退款场景未命中怎么排查？'})
+        targeted_search = self.engine.search.call_args
+        self.assertEqual(targeted_search.args[1]['group'], '甲群')
+        self.assertEqual(targeted_search.args[2], plan['query'])
+        self.assertTrue(targeted_search.kwargs['require_staff'])
+        self.assertEqual([(case['question'], case['reply']) for case in result['examples']], [(question, reply)])
+        self.assertNotIn('outcome', result['examples'][0])
+        self.assertEqual(result['answer_mode'], 'source_reference')
+
     def test_plan_rejects_unknown_tool_and_duplicate_tool(self):
         base = {'intent': 'insights', 'query': '', 'days': None, 'limit': 3,
                 'support_intent': None, 'diagnosis_status': None}

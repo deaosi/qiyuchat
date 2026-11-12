@@ -1,9 +1,16 @@
 import { apiPost, type ApiFilters, type VocQueryFilters } from '@/lib/api'
 
 export type ChatCitation = { kind: 'topic' | 'knowledge' | 'event'; id: string; title: string }
+export type ChatExample = {
+  citation: ChatCitation & { kind: 'event' }
+  question: string
+  reply: string
+  time?: string
+  outcome?: string
+}
 export type ChatAnswerMode = 'grounded_model' | 'computed' | 'source_reference' | 'insufficient'
-export type ChatAnswer = { answer: string; citations: ChatCitation[]; scope: { label: string; start?: string; end?: string; query_filters?: VocQueryFilters }; model: string; tools: { name: string; label: string }[]; answer_mode?: ChatAnswerMode; warnings?: string[] }
-export type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; citations?: ChatCitation[]; scope?: string; queryFilters?: VocQueryFilters; model?: string; tools?: { name: string; label: string }[]; answerMode?: ChatAnswerMode; warnings?: string[] }
+export type ChatAnswer = { answer: string; citations: ChatCitation[]; examples?: ChatExample[]; scope: { label: string; start?: string; end?: string; query_filters?: VocQueryFilters }; model: string; tools: { name: string; label: string }[]; answer_mode?: ChatAnswerMode; warnings?: string[] }
+export type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; citations?: ChatCitation[]; examples?: ChatExample[]; scope?: string; queryFilters?: VocQueryFilters; model?: string; tools?: { name: string; label: string }[]; answerMode?: ChatAnswerMode; warnings?: string[] }
 export type ChatThread = { id: string; title: string; filters: ApiFilters; messages: ChatMessage[]; draft: string; updatedAt: number; error?: string }
 export type ChatContext = { query_filters: VocQueryFilters; citations: Pick<ChatCitation, 'kind' | 'id'>[] }
 export type ChatRequest = { message: string; history: { role: 'user' | 'assistant'; content: string }[]; context?: ChatContext }
@@ -17,6 +24,29 @@ const diagnoses = ['all', 'reported', 'pending', 'config_cause_confirmed', 'plat
 const answerModes = ['grounded_model', 'computed', 'source_reference', 'insufficient'] as const
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown, maximum = 500) => typeof value === 'string' ? value.slice(0, maximum) : ''
+
+function readExamples(value: unknown): ChatExample[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const examples: ChatExample[] = []
+  const seen = new Set<string>()
+  for (const item of value.slice(0, 5)) {
+    if (!record(item) || !record(item.citation) || item.citation.kind !== 'event') continue
+    const { id } = item.citation
+    if (typeof id !== 'string' || id.length > 200 || !id.trim() || id.trim() !== id || /[\u0000-\u001f\u007f]/.test(id) || seen.has(id)) continue
+    const title = text(item.citation.title, 200).trim()
+    const question = text(item.question, 2000).trim()
+    const reply = text(item.reply, 2000).trim()
+    if (!title || !question || !reply) continue
+    const time = text(item.time, 80).trim()
+    const outcome = text(item.outcome, 2000).trim()
+    examples.push({
+      citation: { kind: 'event', id, title }, question, reply,
+      ...(time ? { time } : {}), ...(outcome ? { outcome } : {}),
+    })
+    seen.add(id)
+  }
+  return examples.length ? examples : undefined
+}
 
 export function normalizeChatFilters(value: unknown): ApiFilters {
   const raw = record(value) ? value : {}
@@ -97,6 +127,7 @@ function loadHistory(storage?: StorageLike): { threads: ChatThread[]; activeId: 
           if (record(ref) && ['topic', 'knowledge', 'event'].includes(String(ref.kind)) && typeof ref.id === 'string' && typeof ref.title === 'string') citations.push({ kind: ref.kind as ChatCitation['kind'], id: ref.id, title: ref.title })
         }
         messages.push({ id: msg.id, role: msg.role as ChatMessage['role'], content: msg.content, citations,
+          examples: msg.role === 'assistant' ? readExamples(msg.examples) : undefined,
           scope: text(msg.scope, 2000), model: text(msg.model), queryFilters: record(msg.queryFilters) ? readProjection(msg.queryFilters) : undefined,
           answerMode: answerModes.includes(msg.answerMode as ChatAnswerMode) ? msg.answerMode as ChatAnswerMode : undefined,
           warnings: Array.isArray(msg.warnings) && msg.warnings.every(item => typeof item === 'string') ? msg.warnings : undefined,
@@ -191,7 +222,10 @@ export function createChatStore(options: { storage?: StorageLike; transport?: Tr
         requests.delete(threadId)
         const queryFilters = { ...answer.scope.query_filters }
         if (answer.scope.start || answer.scope.end) Object.assign(queryFilters, { days: 0, start: answer.scope.start || '', end: answer.scope.end || '' })
-        update(threadId, t => ({ ...t, messages: [...t.messages, { id: id(), role: 'assistant', content: answer.answer, citations: answer.citations, scope: answer.scope.label, queryFilters, model: answer.model, tools: answer.tools, answerMode: answer.answer_mode, warnings: answer.warnings }], updatedAt: now() }), withoutPending(threadId))
+        update(threadId, t => ({ ...t, messages: [...t.messages, {
+          id: id(), role: 'assistant', content: answer.answer, citations: answer.citations, examples: readExamples(answer.examples),
+          scope: answer.scope.label, queryFilters, model: answer.model, tools: answer.tools, answerMode: answer.answer_mode, warnings: answer.warnings,
+        }], updatedAt: now() }), withoutPending(threadId))
       } catch (error) {
         if (requests.get(threadId) !== request) return
         requests.delete(threadId)

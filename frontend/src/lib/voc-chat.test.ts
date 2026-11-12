@@ -156,6 +156,30 @@ describe('conversation state and evidence', () => {
     expect(legacyTransport.mock.calls[0][1]).not.toHaveProperty('context')
   })
 
+  it('retains validated case examples without changing citation order or passing their text back as history', async () => {
+    const example = { citation: { kind: 'event' as const, id: 'e_actual', title: '对应权限排查' },
+      question: '子账号为什么没触发？', reply: '请打开商品权限。', outcome: '测试后已触发。' }
+    const response = thirtyDayAnswer()
+    const { store, storage } = factory(vi.fn().mockResolvedValue({ ...response, examples: [
+      example, example, { ...example, reply: '' },
+      { ...example, citation: { kind: 'topic', id: 't_wrong', title: '无原会话' } },
+    ] }))
+    const thread = store.ensureScope(a)
+    await store.send(thread.id, '给我具体案例')
+    expect(store.getSnapshot().threads[0].messages.at(-1)?.examples).toEqual([example])
+
+    const history = JSON.parse(storage.getItem(CHAT_STORAGE_KEY)!)
+    history.threads[0].messages.at(-1).examples.push({ ...example, citation: { ...example.citation, id: 'bad\u0000id' } })
+    storage.setItem(CHAT_STORAGE_KEY, JSON.stringify(history))
+    const transport = vi.fn().mockResolvedValue(answer())
+    const restored = createChatStore({ storage, transport })
+    const restoredThread = restored.ensureScope(a)
+    expect(restoredThread.messages.at(-1)?.examples).toEqual([example])
+    await restored.send(restoredThread.id, '继续上一条')
+    expect(transport.mock.calls[0][1].context.citations).toEqual([{ kind: 'event', id: 'event1' }])
+    expect(transport.mock.calls[0][1].history.at(-1)).toEqual({ role: 'assistant', content: response.answer })
+  })
+
   it('stores a response in its originating conversation after another one is selected', async () => {
     const pending = deferred<ChatAnswer>(), transport = vi.fn().mockReturnValue(pending.promise)
     const { store } = factory(transport)

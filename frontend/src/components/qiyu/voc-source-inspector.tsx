@@ -48,13 +48,20 @@ function distinctCases(evidence: Evidence[]): SourceCase[] {
   })
 }
 
-export function VocSourceInspector({ citation, filters }: { citation: ChatCitation; filters: ApiFilters }) {
+export function VocSourceInspector({ citation, filters, showConversation = false }: {
+  citation: ChatCitation
+  filters: ApiFilters
+  showConversation?: boolean
+}) {
   const scopeKey = JSON.stringify([citation.kind, citation.id, filters])
-  const [opened, setOpened] = useState<{ key: string; pair: QAPair } | null>(null)
-  const pair = opened?.key === scopeKey ? opened.pair : null
+  const [opened, setOpened] = useState<{ key: string; pair: QAPair | null } | null>(null)
   const topic = useApi<TopicDetail>('voc2/topic', { ...filters, id: citation.id }, 0, citation.kind === 'topic')
   const knowledge = useApi<{ item: Knowledge }>('voc2/knowledge', { ...filters, id: citation.id }, 0, citation.kind === 'knowledge')
   const event = useApi<{ event: Evidence }>('voc2/event', { ...filters, id: citation.id }, 0, citation.kind === 'event')
+  const source = showConversation && citation.kind === 'event' && !event.loading && !event.error ? event.data?.event : undefined
+  const sourceId = source ? qaIdentity(source) : null
+  const pair = opened?.key === scopeKey ? opened.pair
+    : source && sourceId !== null ? normalizePair({ ...source, qa_id: sourceId }) : null
   const query = citation.kind === 'topic' ? topic : citation.kind === 'knowledge' ? knowledge : event
   const evidence = citation.kind === 'topic' ? topic.data?.events || []
     : citation.kind === 'knowledge' ? knowledge.data?.item.evidence || []
@@ -62,9 +69,10 @@ export function VocSourceInspector({ citation, filters }: { citation: ChatCitati
   const cases = distinctCases(evidence)
   const hasReply = cases.some(item => item.reply)
 
+  const closeConversation = () => setOpened({ key: scopeKey, pair: null })
   if (pair) return <div className="qiyu-page-enter space-y-3">
-    <Button variant="ghost" size="sm" className="-ml-2" onClick={() => setOpened(null)}><ArrowLeft />返回示例案例</Button>
-    <QADetail pair={pair} source="local" embedded onClose={() => setOpened(null)} />
+    <Button variant="ghost" size="sm" className="-ml-2" onClick={closeConversation}><ArrowLeft />返回示例案例</Button>
+    <QADetail pair={pair} source="local" embedded onClose={closeConversation} />
   </div>
 
   return <div className="space-y-5">

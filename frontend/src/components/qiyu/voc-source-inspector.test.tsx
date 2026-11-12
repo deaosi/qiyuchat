@@ -99,6 +99,15 @@ describe('citation cases and full conversation', () => {
     expect(screen.getAllByRole('button', { name: '查看详情' })).toHaveLength(2)
   })
 
+  it('opens the scoped original conversation directly from an actual example', async () => {
+    render(<VocSourceInspector citation={{ kind: 'event', id: 'event-41', title: '权限排查' }} filters={filters} showConversation />)
+    expect(query).toHaveBeenCalledWith('voc2/event', { ...filters, id: 'event-41' }, 0, true)
+    expect(await screen.findByText('这段会话更早的客户消息')).toBeTruthy()
+    expect(apiGet).toHaveBeenCalledWith('detail', { source: 'local', id: '41' }, expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: '返回示例案例' }))
+    expect(screen.getByRole('button', { name: '查看详情' })).toBeTruthy()
+  })
+
   it('does not send an event hash or invalid QA identity to the detail endpoint', () => {
     items = [event(41, { qa_id: undefined }), event(42, { qa_id: true as unknown as number })]
     render(<VocSourceInspector citation={citation} filters={filters} />)

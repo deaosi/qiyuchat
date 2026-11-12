@@ -4,11 +4,10 @@ import type { ApiFilters } from '@/lib/api'
 import { createChatStore, type ChatAnswer } from '@/lib/voc-chat'
 import { VocChatWorkspace } from './voc-chat-workspace'
 
-vi.mock('@/hooks/use-api', () => ({
-  useApi: () => ({ data: null, loading: false, error: null }),
-}))
+const useApi = vi.hoisted(() => vi.fn(() => ({ data: null, loading: false, error: null })))
+vi.mock('@/hooks/use-api', () => ({ useApi }))
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); useApi.mockClear() })
 
 function setup(filters: ApiFilters, overrides: Partial<ChatAnswer> = {}) {
   const answer: ChatAnswer = { answer: '示例答复', citations: [], scope: { label: '近 7 天' }, model: 'test', tools: [], ...overrides }
@@ -136,4 +135,31 @@ it('offers analysis examples before and during a conversation and shows the actu
   fireEvent.click(examples.getByRole('button', { name: '按客服看接待分布' }))
   expect(input.value).toBe('按客服看接待分布')
   expect(transport).toHaveBeenCalledTimes(1)
+})
+
+it('shows the original question, reply and feedback with an event in the answer scope', async () => {
+  const { input } = setup({ source: 'local', days: 7, group: '当前群' }, {
+    citations: [{ kind: 'topic', id: 't_held', title: '保留主题依据' }],
+    examples: [{
+      citation: { kind: 'event', id: 'e_case', title: '商品权限排查' },
+      question: '为什么配置没有触发？', reply: '打开子账号商品权限后重新测试。',
+      time: '2026-11-10 13:24:55', outcome: '重新测试已经触发。',
+    }],
+    scope: { label: '案例查询范围', start: '2026-11-03', end: '2026-11-10', query_filters: { group: '案例群' } },
+  })
+  fireEvent.change(input, { target: { value: '给一个已核验案例' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  const example = within(await screen.findByRole('region', { name: '实际案例' }))
+  expect(example.getByText('商家原话')).toBeTruthy()
+  expect(example.getByText('为什么配置没有触发？')).toBeTruthy()
+  expect(example.getByText('客服原话')).toBeTruthy()
+  expect(example.getByText('打开子账号商品权限后重新测试。')).toBeTruthy()
+  expect(example.getByText('重新测试已经触发。')).toBeTruthy()
+  expect(example.getByText('2026-11-10 13:24:55')).toBeTruthy()
+  expect(screen.getByText('查看依据（1）')).toBeTruthy()
+  expect(screen.queryByRole('dialog', { name: '回答依据' })).toBeNull()
+  fireEvent.click(example.getByRole('button', { name: '查看原会话' }))
+  expect(screen.getByRole('dialog', { name: '回答依据' })).toBeTruthy()
+  expect(useApi).toHaveBeenCalledWith('voc2/event',
+    expect.objectContaining({ source: 'local', days: 0, start: '2026-11-03', end: '2026-11-10', group: '案例群', id: 'e_case' }), 0, true)
 })
