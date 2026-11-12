@@ -5,6 +5,7 @@ import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
 import { apiPost, normalizePair, type ApiFilters, type VocConversationVerification, type VocIssuePilot, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
+import { vocTopicPageFilters, vocTopicPageSize as topicPageSize } from '@/lib/voc-first-page'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -16,7 +17,7 @@ import { Progress } from '@/components/ui/progress'
 import { LoadingMark, LoadingState, LoadingValue } from './loading-state'
 import { diagnosisLabels, displayTime, intentLabels, KnowledgeContent, knowledgeReuseLevel, type OpenTopicEvidence } from './voc-topic-evidence'
 import { copyKnowledge, TopicDetailPanel, TopicWorkbench, TrendComparison, trendBadgeText, trendLabels, type TrendComparisonData, type TrendFilter, type TopicTrend } from './voc-topic-detail'
-import { VocIssuePilotResults } from './voc-pilot-workspaces'
+import { useVocFirstPageList, VocIssuePilotResults } from './voc-pilot-workspaces'
 
 export type PrimaryIntent = 'configuration_guidance' | 'functional_anomaly' | 'unclear'
 export type DiagnosisStatus = 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
@@ -34,7 +35,6 @@ type Summary = { source_pairs: number; total_events: number; consultation_count?
 export type OpenEvidencePair = (pair: QAPair, messageId?: string) => void
 type WorkspaceProps = { filters: ApiFilters; refreshKey?: number; onOpenPair: OpenEvidencePair }
 export type TopicDetail = { topic: Topic; events: Evidence[]; workbench?: { comparison: TrendComparisonData; knowledge: Knowledge[]; gaps: { code: string; count: number }[] } }
-const topicPageSize = 20
 const count = (n: number | undefined) => typeof n === 'number' ? n.toLocaleString('zh-CN') : '—'
 const active = (job: Job | null | undefined) => job?.status === 'queued' || job?.status === 'running'
 const labels: Record<string, string> = { queued: '排队中', running: '整理中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '已跳过' }
@@ -72,16 +72,18 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const { page, selectedId } = ranking.scopeKey === scopeKey ? ranking : { page: 0, selectedId: null }
   const offset = page * topicPageSize
   const key = refreshKey + revision
-  const summary = useApi<Summary>('voc2/summary', resultFilters, key)
-  const pilot = useApi<VocIssuePilot>('voc2/issue-pilot', filters, key)
-  const topics = useApi<TopicList>('voc2/topics', { ...resultFilters, workbench: 1, trend, limit: topicPageSize, offset }, key)
+  const usePrefetch = revision === 0 && supportIntent === 'all' && diagnosisStatus === 'all'
+  const summary = useApi<Summary>('voc2/summary', resultFilters, key, true, usePrefetch)
+  const pilot = useVocFirstPageList<VocIssuePilot>('voc2/issue-pilot', filters, key, usePrefetch)
+  const topics = useApi<TopicList>('voc2/topics', vocTopicPageFilters(resultFilters, trend, offset), key, true,
+    usePrefetch && trend === 'all' && offset === 0)
   const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, workbench: 1, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
   const comparison = topics.data?.comparison
   const lastPage = topics.data ? Math.max(0, Math.ceil(topics.data.total / topicPageSize) - 1) : null
   const pageLoading = topics.loading || (lastPage !== null && page > lastPage)
   const job = summary.data?.latest_job
   const refreshResults = useCallback(() => setRevision(value => value + 1), [])
-  const fetching = summary.loading || summary.refreshing || topics.loading || topics.refreshing
+  const fetching = summary.loading || summary.refreshing || topics.loading || topics.refreshing || pilot.fetching
   useBackgroundRefresh(refreshResults, active(job), fetching, key)
   useEffect(() => {
     setRanking(current => current.scopeKey === scopeKey ? current : { scopeKey, page: 0, selectedId: null })
@@ -126,7 +128,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
         <CardDescription>按上方时间、客户群和客服筛选，查看影响范围、处理进度和会话依据。</CardDescription>
       </CardHeader>
       <CardContent><QueryPanel hasData={pilot.data !== null} loading={pilot.loading} error={pilot.error} retry={pilot.retry}>
-        {pilot.data && <VocIssuePilotResults data={pilot.data} onOpenPair={onOpenPair} />}
+        {pilot.data && <VocIssuePilotResults key={JSON.stringify(filters)} data={pilot.data} onOpenPair={onOpenPair} fullList={pilot.fullList} />}
       </QueryPanel></CardContent>
     </Card>
     <div className="flex flex-wrap items-center gap-3">

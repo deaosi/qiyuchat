@@ -12,7 +12,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { QueryPanel, VocKnowledgeWorkspace, type OpenEvidencePair } from './voc-next-workspace'
 import { displayTime } from './voc-topic-evidence'
-import { VocPlaybookResults } from './voc-pilot-workspaces'
+import { linkedIssueFromHash, useVocFirstPageList, VocPlaybookResults } from './voc-pilot-workspaces'
 import { SopDetailHeader, SopDetailSection, SopTimeline, SopTimelineStep } from './voc-detail-display'
 
 type Props = { filters: ApiFilters; refreshKey?: number; onOpenPair: OpenEvidencePair }
@@ -237,13 +237,14 @@ export function VocKnowledgeLibrary(props: Props) {
 function VocPlaybookWorkspace({ filters, refreshKey = 0, onOpenPair }: Props) {
   const [revision, setRevision] = useState(0)
   const key = refreshKey + revision
-  const playbooks = useApi<VocPlaybookResultsData>('voc2/playbooks', filters, key)
+  const playbooks = useVocFirstPageList<VocPlaybookResultsData>('voc2/playbooks', filters, key, revision === 0, Boolean(linkedIssueFromHash()))
   const refresh = useCallback(() => setRevision(value => value + 1), [])
-  useBackgroundRefresh(refresh, false, playbooks.loading || playbooks.refreshing, key)
+  useBackgroundRefresh(refresh, false, playbooks.fetching, key)
   return <Card className="gap-3">
     <CardHeader><CardTitle>问题处理手册</CardTitle><CardDescription>从客户咨询查看问题线索，查阅有会话依据的处理流程。</CardDescription></CardHeader>
     <CardContent><QueryPanel hasData={playbooks.data !== null} loading={playbooks.loading} error={playbooks.error} retry={playbooks.retry}>
-      <VocPlaybookResults items={playbooks.data?.items ?? []} casePaths={playbooks.data?.case_paths} onOpenPair={onOpenPair} />
+      <VocPlaybookResults key={JSON.stringify(filters)} items={playbooks.data?.items ?? []} casePaths={playbooks.data?.case_paths}
+        onOpenPair={onOpenPair} fullList={playbooks.fullList} />
     </QueryPanel></CardContent>
   </Card>
 }

@@ -1,13 +1,15 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowUpRight, ChevronLeft, ChevronRight, Copy } from 'lucide-react'
 import { toast } from 'sonner'
-import { normalizePair, type VocCasePath, type VocCaseSolution, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
+import { useApi } from '@/hooks/use-api'
+import { normalizePair, type ApiFilters, type VocCasePath, type VocCaseSolution, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import type { OpenEvidencePair } from './voc-next-workspace'
 import { displayTime } from './voc-topic-evidence'
+import { LoadingState } from './loading-state'
 
 const families: Record<VocPilotFamily, string> = {
   no_reply: '机器人不回复', scenario_config: '场景配置', configuration: '配置与使用', anomaly: '功能异常',
@@ -27,6 +29,34 @@ const gapLabels: Record<string, string> = {
 const count = new Intl.NumberFormat('zh-CN').format
 const issuePageSize = 6
 const playbookPageSize = 8
+
+type FullList = { total: number; request: () => void; error: string | null; retry: () => void }
+
+export function useVocFirstPageList<T extends { first_page_total?: number }>(
+  name: 'voc2/issue-pilot' | 'voc2/playbooks', filters: ApiFilters, refreshKey: number,
+  usePrefetch: boolean, linked = false,
+) {
+  const scope = JSON.stringify(filters)
+  const [fullScope, setFullScope] = useState<string | null>(() => linked ? scope : null)
+  useEffect(() => {
+    setFullScope(previous => linked || previous === scope ? scope : null)
+  }, [scope, linked])
+  const full = useApi<T>(name, filters, refreshKey, linked || fullScope === scope)
+  const preview = useApi<T>(name, { ...filters, first_page: 1 }, refreshKey, !linked && full.data === null, usePrefetch)
+  const visible = linked || full.data !== null ? full : preview
+  const total = visible === preview ? preview.data?.first_page_total : undefined
+  const fullList: FullList | undefined = total === undefined ? undefined : {
+    total, request: () => setFullScope(scope), error: full.error, retry: full.retry,
+  }
+  return { ...visible, fullList, fetching: preview.loading || preview.refreshing || full.loading || full.refreshing }
+}
+
+function LoadingFullList({ error, retry }: Pick<FullList, 'error' | 'retry'>) {
+  if (!error) return <LoadingState />
+  return <div role="alert" className="flex flex-col items-center gap-2 py-5 text-center text-sm text-muted-foreground">
+    <p>{error}</p><Button type="button" variant="outline" size="sm" onClick={retry}>重试</Button>
+  </div>
+}
 
 function scopeText(item: { platform: string; module: string; condition: string }) {
   return [item.platform, item.module, item.condition].filter(Boolean).join(' · ')
@@ -114,15 +144,16 @@ function PageNav({ label, current, last, onChange }: { label: string; current: n
   </nav>
 }
 
-export function VocIssuePilotResults({ data, onOpenPair }: { data: VocIssuePilot; onOpenPair: OpenEvidencePair }) {
+export function VocIssuePilotResults({ data, onOpenPair, fullList }: { data: VocIssuePilot; onOpenPair: OpenEvidencePair; fullList?: FullList }) {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const opener = useRef<HTMLButtonElement | null>(null)
   const input = useRef<HTMLInputElement>(null)
   const matches = data.items.filter(item => matchSearch(search, [item.title, categoryText(item), ...caseSearchFields(item.cases)]))
-  const last = Math.max(0, Math.ceil(matches.length / issuePageSize) - 1)
+  const last = Math.max(0, Math.ceil((fullList?.total ?? matches.length) / issuePageSize) - 1)
   const current = Math.min(page, last)
+  const pending = fullList && (current > 0 || search.trim()) ? fullList : undefined
   const selected = data.items.find(item => item.id === selectedId)
   const coverage = data.coverage
   return <div className="space-y-3">
@@ -131,8 +162,12 @@ export function VocIssuePilotResults({ data, onOpenPair }: { data: VocIssuePilot
       <span>已归类 {count(coverage.classified_consultations)} 次</span><span>待补上下文 {count(coverage.needs_context)} 次</span>
     </p>
     {data.items.length > 0 && <Input ref={input} type="search" value={search} maxLength={200} aria-label="搜索产品问题" placeholder="搜索问题、平台或触发条件"
-      className="w-full sm:max-w-xs" onChange={event => { setSearch(event.target.value); setPage(0) }} />}
-    {matches.length ? <ul className="divide-y rounded-md border px-2 sm:px-3">{matches.slice(current * issuePageSize, (current + 1) * issuePageSize).map(item =>
+      className="w-full sm:max-w-xs" onChange={event => {
+        const value = event.target.value
+        setSearch(value); setPage(0)
+        if (value.trim()) fullList?.request()
+      }} />}
+    {pending ? <LoadingFullList error={pending.error} retry={pending.retry} /> : matches.length ? <ul className="divide-y rounded-md border px-2 sm:px-3">{matches.slice(current * issuePageSize, (current + 1) * issuePageSize).map(item =>
       <li key={item.id}>
         <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-1 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
           onClick={event => { opener.current = event.currentTarget; setSelectedId(item.id) }}>
@@ -145,7 +180,10 @@ export function VocIssuePilotResults({ data, onOpenPair }: { data: VocIssuePilot
           <span className="flex items-center gap-2 text-right text-xs tabular-nums"><span>{count(item.impact.consultations)} 次咨询</span><ChevronRight aria-hidden="true" className="size-4 text-muted-foreground" /></span>
         </button>
       </li>)}</ul> : <p className="py-5 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的产品问题' : '当前范围暂无可归类的产品问题'}</p>}
-    <PageNav label="产品问题分页" current={current} last={last} onChange={setPage} />
+    {!(pending && search.trim()) && <PageNav label="产品问题分页" current={current} last={last} onChange={next => {
+      setPage(next)
+      if (next > 0) fullList?.request()
+    }} />}
     <Sheet open={Boolean(selected)} onOpenChange={open => { if (!open) setSelectedId(null) }}>
       <SheetContent className="w-full gap-0 sm:max-w-2xl" onCloseAutoFocus={event => { event.preventDefault(); (opener.current?.isConnected ? opener.current : input.current)?.focus() }}>
         {selected && <>
@@ -230,7 +268,7 @@ function Branch({ item, branch, onOpenPair }: { item: VocPlaybook; branch: VocPl
   </section>
 }
 
-function linkedIssueFromHash() {
+export function linkedIssueFromHash() {
   const [route, query = ''] = window.location.hash.split('?')
   if (route !== '#voc-next') return null
   const issue = new URLSearchParams(query).get('issue')
@@ -322,7 +360,7 @@ function CasePathDetail({ item, onOpenPair }: { item: VocCasePath; onOpenPair: O
   </>
 }
 
-export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { items: VocPlaybook[]; casePaths?: VocCasePath[]; onOpenPair: OpenEvidencePair }) {
+export function VocPlaybookResults({ items, casePaths = [], onOpenPair, fullList }: { items: VocPlaybook[]; casePaths?: VocCasePath[]; onOpenPair: OpenEvidencePair; fullList?: FullList }) {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const [selection, setSelection] = useState<{ kind: 'issue' | 'case'; id: string } | null>(null)
@@ -335,8 +373,9 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { item
       branch.condition_evidence?.length ? branch.condition : '', branch.escalation_evidence?.length ? branch.escalation : ''])]))
   const matchingPaths = casePaths.filter(item => matchSearch(search, [item.platform, item.problem.quote, item.criterion?.quote ?? '',
     ...item.steps.map(step => step.evidence.quote), item.solution?.title ?? '', ...(item.solution?.sections.map(section => section.text) ?? [])]))
-  const last = Math.max(0, Math.ceil((matchingPaths.length + matches.length) / playbookPageSize) - 1)
+  const last = Math.max(0, Math.ceil((fullList?.total ?? (matchingPaths.length + matches.length)) / playbookPageSize) - 1)
   const current = Math.min(page, last)
+  const pending = fullList && (current > 0 || search.trim()) ? fullList : undefined
   const offset = current * playbookPageSize
   const pathsOnPage = matchingPaths.slice(offset, offset + playbookPageSize)
   const issueOffset = Math.max(0, offset - matchingPaths.length)
@@ -346,8 +385,13 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { item
   const selectedBranches = selected ? visibleBranches(selected) : []
   return <div className="space-y-3">
     {(items.length > 0 || casePaths.length > 0) && <Input ref={input} type="search" maxLength={200} value={search} aria-label="搜索处理手册" placeholder="搜索客户咨询、适用条件或步骤"
-      className="w-full sm:max-w-sm" onChange={event => { setSearch(event.target.value); setPage(0) }} />}
-    {pathsOnPage.length > 0 && <section className="space-y-2">
+      className="w-full sm:max-w-sm" onChange={event => {
+        const value = event.target.value
+        setSearch(value); setPage(0)
+        if (value.trim()) fullList?.request()
+      }} />}
+    {pending && <LoadingFullList error={pending.error} retry={pending.retry} />}
+    {!pending && pathsOnPage.length > 0 && <section className="space-y-2">
       <h3 className="text-sm font-medium">已有处理记录的案例</h3>
       <ul className="divide-y rounded-md border px-2 sm:px-3">{pathsOnPage.map(item => <li key={item.id}>
         <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
@@ -362,7 +406,7 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { item
         </button>
       </li>)}</ul>
     </section>}
-    {issuesOnPage.length > 0 && <section className="space-y-2">
+    {!pending && issuesOnPage.length > 0 && <section className="space-y-2">
       {matchingPaths.length > 0 && <h3 className="text-sm font-medium">问题汇总</h3>}
       <ul className="divide-y rounded-md border px-2 sm:px-3">{issuesOnPage.map(({ item, branches }) =>
       <li key={item.id}>
@@ -379,8 +423,11 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair }: { item
           <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
         </button>
     </li>)}</ul></section>}
-    {matchingPaths.length === 0 && matches.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的咨询或处理流程' : '当前范围暂无可查看的咨询线索'}</p>}
-    <PageNav label="处理手册分页" current={current} last={last} onChange={setPage} />
+    {!pending && matchingPaths.length === 0 && matches.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的咨询或处理流程' : '当前范围暂无可查看的咨询线索'}</p>}
+    {!(pending && search.trim()) && <PageNav label="处理手册分页" current={current} last={last} onChange={next => {
+      setPage(next)
+      if (next > 0) fullList?.request()
+    }} />}
     <Sheet open={Boolean(selected || selectedPath)} onOpenChange={open => {
       if (open) return
       setSelection(null)
