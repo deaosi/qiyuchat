@@ -8,6 +8,7 @@ export interface ApiFilters {
   end?: string
   group?: string
   staff?: string
+  kind?: FeishuKind
   cluster?: string | number
   customer?: string
   q?: string
@@ -29,6 +30,21 @@ export interface ApiFilters {
   support_intent?: 'all' | 'configuration_guidance' | 'functional_anomaly' | 'unclear'
   diagnosis_status?: 'all' | 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
 }
+
+export type FeishuKind = 'topics' | 'sops'
+export type FeishuPreview = {
+  title: string
+  count: number
+  total: number
+  items: { title: string; summary: string }[]
+  start: string
+  end: string
+  fingerprint: string
+  publish_configured: boolean
+  destination?: string
+  content?: string
+}
+export type FeishuPublication = { url: string; title: string; reused: boolean; count?: number }
 
 export type VocQueryFilters = {
   [K in 'days' | 'start' | 'end' | 'group' | 'staff' | 'customer' | 'q' | 'support_intent' | 'diagnosis_status' | 'replied' | 'cluster' | 'focus_topic']?: ApiFilters[K] | null
@@ -91,6 +107,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+export function httpsLink(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value) return undefined
+  try {
+    const url = new URL(value)
+    if (url.protocol === 'https:' && !url.username && !url.password) return url.href
+  } catch { /* A destination may be a label instead of a URL. */ }
+  return undefined
 }
 
 function hasCounts(value: Record<string, unknown>, keys: string[]): boolean {
@@ -263,6 +288,13 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
       && isRecord(item) && isRecord(item.domain) && isRecord(item.domain.diagnosis) && item.domain.diagnosis.status === 'defect_confirmed'); break
     case 'voc2/jobs': valid = Array.isArray(data.items) && data.items.every(job); break
     case 'voc2/run': valid = job(data.job); break
+    case 'voc2/feishu/preview': valid = ['title', 'start', 'end', 'fingerprint'].every(key => typeof data[key] === 'string')
+      && typeof data.publish_configured === 'boolean' && isCount(data.count) && isCount(data.total) && data.count <= data.total
+      && Array.isArray(data.items) && data.items.every(item => isRecord(item) && typeof item.title === 'string' && typeof item.summary === 'string')
+      && (data.destination === undefined || typeof data.destination === 'string')
+      && (data.content === undefined || typeof data.content === 'string'); break
+    case 'voc2/feishu/publish': valid = httpsLink(data.url) !== undefined && typeof data.title === 'string' && typeof data.reused === 'boolean'
+      && (data.count === undefined || isCount(data.count)); break
     case 'voc2/assistant': valid = typeof data.answer === 'string' && typeof data.model === 'string'
       && isRecord(data.scope) && typeof data.scope.label === 'string'
       && (data.answer_mode === undefined || typeof data.answer_mode === 'string' && ['grounded_model', 'computed', 'source_reference', 'insufficient'].includes(data.answer_mode))
@@ -509,7 +541,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
 
 export async function apiPost<T>(name: string, filters: ApiFilters, body?: BodyInit, headers?: HeadersInit, signal?: AbortSignal): Promise<T> {
   const replyLookup = name === 'detail/replies'
-  const label = replyLookup ? '正在查询七鱼客服回复…' : name === 'voc2/assistant' ? '正在查询会话数据…' : name === 'clean' ? '正在清洗会话…' : name.startsWith('import') ? '正在处理导入文件…' : name === 'gateway/models' ? '正在读取模型列表…' : name.includes('run') ? '正在提交整理任务…' : '正在保存…'
+  const label = replyLookup ? '正在查询七鱼客服回复…' : name === 'voc2/assistant' ? '正在查询会话数据…' : name === 'voc2/feishu/publish' ? '正在发布飞书成果…' : name === 'clean' ? '正在清洗会话…' : name.startsWith('import') ? '正在处理导入文件…' : name === 'gateway/models' ? '正在读取模型列表…' : name.includes('run') ? '正在提交整理任务…' : '正在保存…'
   return withRequestActivity(label, async () => {
     const requestHeaders = new Headers(headers)
     if (!requestHeaders.has('Content-Type')) requestHeaders.set('Content-Type', 'application/octet-stream')

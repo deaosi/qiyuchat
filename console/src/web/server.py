@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from ..config import Settings, settings
 from .. import voc, knowledge, gateway, voc_service, voc_assistant
+from .. import voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
@@ -318,8 +319,48 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             IMAGE_SLOTS.release()
 
+    def _feishu_export(self, cfg: Settings, qs: dict[str, list[str]], body: bytes | None = None) -> None:
+        try:
+            kind = _str(qs, "kind")
+            if len(qs.get("kind", [])) != 1:
+                raise ValueError("请选择高频问题或知识 SOP。")
+            filters = self._filters(qs)
+            if body is not None:
+                if not self._need_auth():
+                    raise voc_feishu_sync.SyncError("开启语海Voc管理员鉴权后才能发布飞书。", 403)
+                if len(body) > 1024 or not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+                    raise ValueError("发布请求格式无效。")
+                request = json.loads(body.decode("utf-8"))
+                if not isinstance(request, dict) or set(request) != {"fingerprint"}:
+                    raise ValueError("发布请求格式无效。")
+                fingerprint = request["fingerprint"]
+                if not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+                    raise ValueError("请先预览本期成果。")
+            target = voc_feishu_sync.configured_target()
+            destination = target.destination if target is not None else ""
+            document = voc_feishu_content.build_document(cfg, filters, kind, _str(qs, "id"))
+            snapshot = json.dumps([kind, destination, document], ensure_ascii=False, sort_keys=True)
+            digest = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+            if body is None:
+                self._json({**{key: value for key, value in document.items() if key != "records"},
+                            "fingerprint": digest, "publish_configured": target is not None,
+                            "destination": destination})
+                return
+            if not hmac.compare_digest(fingerprint, digest):
+                raise voc_feishu_sync.SyncError("成果或发布目标已变化，请刷新预览后再发布。", 409)
+            if not document["count"]:
+                raise ValueError("当前范围没有可发布的成果。")
+            self._json(voc_feishu_sync.publish(document, kind, filters, target=target))
+        except (voc.VocError, voc_feishu_sync.SyncError) as exc:
+            self._json({"error": str(exc)}, exc.status)
+        except (ValueError, RecursionError):
+            self._json({"error": "飞书成果请求格式无效，请检查统计日期和类型。"}, 400)
+
     def _api(self, name: str, qs: dict[str, list[str]]) -> None:
         cfg = self._cfg(qs)
+        if name == "voc2/feishu/preview":
+            self._feishu_export(cfg, qs)
+            return
         if name == "gateway/config":
             self._json(gateway.public_config(self.server.cfg))
             return
@@ -480,6 +521,8 @@ class Handler(BaseHTTPRequestHandler):
                         if api.case_reply_target(cfg, qa_id) != target:
                             result = {"status": "unavailable", "messages": []}
                 self._json(api.case_reply_response(result))
+            elif path == "/api/voc2/feishu/publish":
+                self._feishu_export(cfg, qs, data)
             elif path.startswith("/api/voc2/"):
                 try:
                     if not self.headers.get("Content-Type", "").lower().startswith("application/json") or len(data)>64*1024:

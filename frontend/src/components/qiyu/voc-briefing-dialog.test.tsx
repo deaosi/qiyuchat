@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiGet, apiPost, type ApiFilters } from '@/lib/api'
+import { apiGet, apiPost, type ApiFilters, type FeishuPublication } from '@/lib/api'
 import { VocBriefingDialog } from './voc-briefing-dialog'
 
 vi.mock('@/lib/api', async importOriginal => ({ ...await importOriginal<typeof import('@/lib/api')>(), apiGet: vi.fn(), apiPost: vi.fn() }))
@@ -103,6 +103,10 @@ describe('VOC Feishu briefing preview', () => {
     view.rerender(<VocBriefingDialog open onOpenChange={vi.fn()} filters={{ ...scope, start }} />)
     expect(apiGet).not.toHaveBeenCalled()
     expect((screen.getByRole('button', { name: '复制 Markdown 摘要' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.mouseDown(screen.getByRole('tab', { name: '发布到飞书' }), { button: 0 })
+    expect(screen.getByText(/发布需要明确的统计区间/)).toBeTruthy()
+    expect(apiGet).not.toHaveBeenCalled()
+    expect((screen.getByRole('button', { name: '发布到飞书' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('disables copying when a read fails and retries the failed source', async () => {
@@ -113,5 +117,58 @@ describe('VOC Feishu briefing preview', () => {
     fireEvent.click(screen.getByRole('button', { name: '重试' }))
     expect(await screen.findByText('升温主题')).toBeTruthy()
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('previews only on request, defaults to SOP, and keeps the receipt tied to its published scope', async () => {
+    const destination = 'https://example.feishu.cn/base/reports?table=cases'
+    const regularRead = vi.mocked(apiGet).getMockImplementation()!
+    vi.mocked(apiGet).mockImplementation((name, filters, ...rest) => name === 'voc2/feishu/preview' ? Promise.resolve({
+      title: filters.kind === 'sops' ? '本期操作知识' : '本期高频问题',
+      count: 1, total: 2, items: [{ title: filters.kind === 'sops' ? '触发排查步骤' : '为什么无法触发', summary: '脱敏摘要' }],
+      start, end, fingerprint: `approved-${filters.kind}`, publish_configured: true, destination,
+    }) : regularRead(name, filters, ...rest))
+    let complete!: (receipt: FeishuPublication) => void
+    vi.mocked(apiPost).mockReturnValueOnce(new Promise<FeishuPublication>(resolve => { complete = resolve }))
+    render(<VocBriefingDialog open onOpenChange={vi.fn()} filters={scope} defaultKind="sops" />)
+
+    await screen.findByText('已验证的处理办法')
+    expect(vi.mocked(apiGet).mock.calls.some(([name]) => name === 'voc2/feishu/preview')).toBe(false)
+    fireEvent.mouseDown(screen.getByRole('tab', { name: '发布到飞书' }), { button: 0 })
+    await screen.findByText('触发排查步骤')
+    expect(screen.getByRole('button', { name: '知识 SOP' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('link', { name: destination }).getAttribute('href')).toBe(destination)
+    expect(within(screen.getByRole('tabpanel', { name: '发布到飞书' })).getByText(`${start} 至 ${end}`)).toBeTruthy()
+    const publish = screen.getByRole('button', { name: '发布到飞书' })
+    fireEvent.click(publish)
+    fireEvent.click(publish)
+    expect(apiPost).toHaveBeenCalledExactlyOnceWith('voc2/feishu/publish', { ...scope, kind: 'sops', start: undefined, end: undefined },
+      JSON.stringify({ fingerprint: 'approved-sops' }), { 'Content-Type': 'application/json' })
+
+    fireEvent.click(screen.getByRole('button', { name: '高频问题报告' }))
+    await screen.findByText('为什么无法触发')
+    await act(async () => complete({ url: destination, title: '本期操作知识', reused: false, count: 1 }))
+    expect(screen.queryByRole('link', { name: '在飞书查看成果' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '知识 SOP' }))
+    expect((await screen.findByRole('link', { name: '在飞书查看成果' })).getAttribute('href')).toBe(destination)
+    expect((screen.getByRole('button', { name: '发布到飞书' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('keeps publishing unavailable when the environment is unconfigured or the preview is empty', async () => {
+    const regularRead = vi.mocked(apiGet).getMockImplementation()!
+    vi.mocked(apiGet).mockImplementation((name, filters, ...rest) => name === 'voc2/feishu/preview' ? Promise.resolve({
+      title: '飞书发布预览', start, end, fingerprint: `approved-${filters.kind}`,
+      ...(filters.kind === 'topics'
+        ? { count: 1, total: 1, items: [{ title: '待发布问题', summary: '摘要' }], publish_configured: false, content: '<root/>' }
+        : { count: 0, total: 0, items: [], publish_configured: true }),
+    }) : regularRead(name, filters, ...rest))
+    render(<VocBriefingDialog open onOpenChange={vi.fn()} filters={scope} />)
+    fireEvent.mouseDown(screen.getByRole('tab', { name: '发布到飞书' }), { button: 0 })
+    await screen.findByText('当前环境未配置飞书发布。')
+    expect((screen.getByRole('button', { name: '发布到飞书' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: '下载 XML' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '知识 SOP' }))
+    await screen.findByText('当前范围没有可发布的知识 SOP。')
+    expect((screen.getByRole('button', { name: '发布到飞书' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(apiPost).not.toHaveBeenCalled()
   })
 })

@@ -1,14 +1,16 @@
-import type { ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 import { ArrowUpRight, Copy, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useApi } from '@/hooks/use-api'
-import type { ApiFilters } from '@/lib/api'
+import type { ApiFilters, FeishuKind } from '@/lib/api'
 import { topicHref } from '@/lib/voc-topic-link'
 import { LoadingState } from './loading-state'
 import type { Knowledge, Topic } from './voc-next-workspace'
 import type { TrendComparisonData } from './voc-topic-detail'
+import { useFeishuPublication, VocFeishuPublish } from './voc-feishu-publish'
 
 type TopicList = { items: Topic[]; total: number; comparison: TrendComparisonData }
 type KnowledgeList = { items: Knowledge[] }
@@ -21,6 +23,10 @@ function validDay(day: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false
   const date = new Date(`${day}T00:00:00Z`)
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === day
+}
+
+function hasBriefingWindow({ start = '', end = '', days = 0 }: ApiFilters): boolean {
+  return start || end ? validDay(start) && validDay(end) && start <= end : Number.isInteger(days) && days > 0
 }
 
 function shanghaiDay(value: string): string {
@@ -91,12 +97,7 @@ function BriefingEntries({ section }: { section: BriefingSection }) {
 
 function BriefingContent({ filters }: { filters: ApiFilters }) {
   const scope = { source: filters.source, days: filters.days, start: filters.start, end: filters.end, group: filters.group, staff: filters.staff }
-  const requestedStart = scope.start || ''
-  const requestedEnd = scope.end || ''
-  const requestedWindow = requestedStart || requestedEnd
-    ? validDay(requestedStart) && validDay(requestedEnd) && requestedStart <= requestedEnd
-    : Number.isInteger(scope.days) && (scope.days ?? 0) > 0
-  const newTopics = useApi<TopicList>('voc2/topics', { ...scope, workbench: 1, trend: 'new', limit: previewLimit, offset: 0 }, 0, requestedWindow)
+  const newTopics = useApi<TopicList>('voc2/topics', { ...scope, workbench: 1, trend: 'new', limit: previewLimit, offset: 0 }, 0, hasBriefingWindow(filters))
   const comparison = newTopics.data?.comparison
   const start = comparison?.current.start ?? ''
   const end = comparison?.current.end ?? ''
@@ -164,12 +165,25 @@ function BriefingContent({ filters }: { filters: ApiFilters }) {
   </>
 }
 
-export function VocBriefingDialog({ open, onOpenChange, filters, trigger }: { open: boolean; onOpenChange: (open: boolean) => void; filters: ApiFilters; trigger?: ReactElement }) {
+function BriefingTabs({ filters, defaultKind, publication }: { filters: ApiFilters; defaultKind: FeishuKind; publication: ReturnType<typeof useFeishuPublication> }) {
+  const [tab, setTab] = useState('summary')
+  const panelClass = 'grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-4 data-[state=inactive]:hidden'
+  return <Tabs value={tab} onValueChange={setTab} activationMode="manual" className="min-h-0 gap-4">
+    <TabsList aria-label="飞书成果"><TabsTrigger value="summary">成果摘要</TabsTrigger><TabsTrigger value="publish">发布到飞书</TabsTrigger></TabsList>
+    <TabsContent forceMount value="summary" hidden={tab !== 'summary'} className={panelClass}><BriefingContent filters={filters} /></TabsContent>
+    <TabsContent forceMount value="publish" hidden={tab !== 'publish'} className={panelClass}>
+      <VocFeishuPublish active={tab === 'publish'} hasWindow={hasBriefingWindow(filters)} filters={filters} defaultKind={defaultKind} publication={publication} />
+    </TabsContent>
+  </Tabs>
+}
+
+export function VocBriefingDialog({ open, onOpenChange, filters, trigger, defaultKind = 'topics' }: { open: boolean; onOpenChange: (open: boolean) => void; filters: ApiFilters; trigger?: ReactElement; defaultKind?: FeishuKind }) {
+  const publication = useFeishuPublication()
   return <Dialog open={open} onOpenChange={onOpenChange}>
     {trigger && <DialogTrigger asChild>{trigger}</DialogTrigger>}
-    <DialogContent className="max-h-[min(86dvh,760px)] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-2xl">
-      <DialogHeader className="pr-7"><DialogTitle>飞书成果预览</DialogTitle><DialogDescription>查看当前统计区间的趋势和知识更新，复制摘要后可粘贴到飞书。</DialogDescription></DialogHeader>
-      <BriefingContent filters={filters} />
+    <DialogContent className="max-h-[min(86dvh,760px)] grid-rows-[auto_minmax(0,1fr)] sm:max-w-2xl">
+      <DialogHeader className="pr-7"><DialogTitle>飞书成果预览</DialogTitle><DialogDescription>预览本期成果，可复制摘要或将选定内容发布到飞书。</DialogDescription></DialogHeader>
+      <BriefingTabs key={defaultKind} filters={filters} defaultKind={defaultKind} publication={publication} />
     </DialogContent>
   </Dialog>
 }

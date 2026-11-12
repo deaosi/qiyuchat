@@ -11,6 +11,7 @@ from dataclasses import replace
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
@@ -58,6 +59,41 @@ class TestWeb(LocalFixture):
             self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         for path in ("/../config.py", "/%2e%2e/config.py", "/..%5cconfig.py"):
             self.assertEqual(self.call(path)[0], 404)
+
+    def test_feishu_publish_requires_a_current_preview_and_authenticated_same_origin(self):
+        self.server.admin_key = "fixture-admin"
+        scope = "?source=local&kind=topics&start=2026-11-01&end=2026-11-07"
+        preview_path = "/api/voc2/feishu/preview" + scope
+        publish_path = "/api/voc2/feishu/publish" + scope
+        auth = {"X-Admin-Key": "fixture-admin"}
+        write_headers = self.write_headers(**auth, **{"Content-Type": "application/json"})
+        destination = "https://example.feishu.cn/base/example?table=tblFixture"
+        document = {"title": "测试高频问题", "content": "<title>测试高频问题</title>", "count": 1,
+                    "total": 1, "start": "2026-11-01", "end": "2026-11-07",
+                    "items": [{"title": "测试问题", "summary": "3 次咨询"}],
+                    "records": [{"key": "topic-fixture", "title": "测试问题"}]}
+        receipt = {"url": destination, "title": document["title"], "count": 1, "reused": False}
+
+        target = SimpleNamespace(destination=destination)
+        with (
+            patch("src.voc_feishu_content.build_document", return_value=document),
+            patch("src.voc_feishu_sync.configured_target", return_value=target),
+            patch("src.voc_feishu_sync.publish", return_value=receipt) as publish,
+        ):
+            self.assertEqual(self.call(preview_path)[0], 401)
+            code, preview, _ = self.call(preview_path, headers=auth)
+            self.assertEqual(code, 200)
+            self.assertTrue(preview["publish_configured"])
+            self.assertNotIn("records", preview)
+            body = json.dumps({"fingerprint": preview["fingerprint"]}).encode()
+            self.assertEqual(self.call(publish_path, "POST", body, auth)[0], 403)
+            document["records"][0]["title"] = "更新的问题"
+            self.assertEqual(self.call(publish_path, "POST", body, write_headers)[0], 409)
+            publish.assert_not_called()
+            current = self.call(preview_path, headers=auth)[1]
+            body = json.dumps({"fingerprint": current["fingerprint"]}).encode()
+            self.assertEqual(self.call(publish_path, "POST", body, write_headers)[:2], (200, receipt))
+            publish.assert_called_once()
 
     def test_host_and_origin_protection(self):
         self.assertEqual(self.call("/api/meta", headers={"Host": "evil.example"})[0], 403)

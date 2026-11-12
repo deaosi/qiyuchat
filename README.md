@@ -76,6 +76,40 @@ sudo systemctl enable --now qiyu-voc-worker.service qiyu-hourly-analysis.timer
 
 worker 与 Web 服务均需使用已安装依赖的 Python 环境，并通过 `VOC_EMBED_MODEL_PATH` 指向已校验的本地模型。网关设置和原独立鉴权继续复用。领域提取使用 12,000 输出 token 上限，给网关计入的推理用量留出空间；本次部署将模型等待时间设为 180 秒，后续仍可从模型网关设置调整。新链路先在独立入口验收真实数据，默认旧入口在验收前保留；未启用飞书推送。
 
+## 飞书多维表格同步
+
+从「高频问题」或「知识沉淀」打开「飞书成果预览」，可按当前日期和筛选范围预览高频问题或知识 SOP。单次发布最多 20 项。SOP 仅包含有来源依据的处理流程，预览会区分已验证效果和效果待验证的指引。
+
+发布通过官方 `lark-cli` 以应用身份执行。先在飞书开放平台发布应用权限，覆盖表字段读取、记录查询、新增和更新，再在目标多维表格中添加该文档应用并授予对应表的读写权限。请将 CLI 应用凭证配置在实际运行服务或脚本的账户中。
+
+设置 `YUHAI_FEISHU_SYNC_CONFIG` 为以下 JSON 配置文件的路径。按实际表字段填写映射。编号、标题和正文是必需的文本字段，来源也可映射到超链接字段，咨询次数可映射到数字字段。使用专门的编号列保存语海Voc同步标识。
+
+```json
+{
+  "cli": "/usr/local/bin/lark-cli",
+  "base_token": "<多维表格 token>",
+  "table_id": "<数据表 ID>",
+  "destination": "https://<租户>.feishu.cn/base/<多维表格 token>?table=<数据表 ID>",
+  "fields": {
+    "key": "同步编号",
+    "title": "标题",
+    "detail": "正文",
+    "summary": "摘要",
+    "source": "来源",
+    "kind": "类型",
+    "period": "统计区间",
+    "consultations": "咨询次数"
+  }
+}
+```
+
+也可从 `console` 目录运行同一同步脚本，默认只计算预览。映射和权限核对通过后，可用 `--apply` 执行同步。定时执行沿用同一配置文件和编号规则，重复运行会按编号更新已有记录。当前接入按指定区间生成快照。
+
+```bash
+python -m src.voc_feishu_sync --kind topics --days 7
+python -m src.voc_feishu_sync --kind sops --days 7 --apply
+```
+
 ## 原 VOC 高频问题（兼容入口）
 
 “高频问题”工作台支持用大模型整理客户诉求、标准问法和业务主题，再由管理员复核。原有“问题簇”保留规则聚类，两个入口的数据含义不同。
