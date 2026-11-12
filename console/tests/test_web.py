@@ -273,6 +273,82 @@ class TestWeb(LocalFixture):
         self.assertNotIn("group_names", legacy["items"][0])
 
 
+    def seed_rule_clusters(self):
+        stamp = int(time.mktime(time.strptime("2026-11-01 10:00", "%Y-%m-%d %H:%M")) * 1000)
+        phone = "13812345678"
+        long_variant = "说明" * 120 + f" {phone} 合成尾词UniqueVariant"
+        rows = [
+            (12, "售前", "小林", stamp + n, question, "" if n == 0 else "按说明操作")
+            for n, question in enumerate([
+                "绑定店铺", "绑定店铺", "新增店铺", "添加店铺", "如何绑店", "店铺接入", long_variant,
+            ])
+        ]
+        rows.extend([
+            (21, "售前", "小林", stamp + 7, "如何设置", '{"type":"image","url":"https://example.com/image.jpg"}'),
+            (21, "售前", "小林", stamp + 8, "怎么设置", ""),
+            (25, "售前", "小林", stamp + 2, "如何退款", "按说明操作"),
+            (23, "售前", "小林", stamp + 86400000, "次日咨询", ""),
+            (24, "售后", "小林", stamp + 9, "不同客户群", ""),
+            (12, "售前", "小陈", stamp + 10, "不同接待客服", ""),
+            (0, "售前", "小林", stamp + 11, "未归簇的咨询", ""),
+        ])
+        with app.get_db(self.cfg).tx() as conn:
+            conn.executemany(
+                "INSERT INTO qa_pair(session_id,idx,cluster_id,group_name,staff_name,"
+                "asked_at,question,answer) VALUES (?,1,?,?,?,?,?,?)",
+                [(f"cluster-fixture-{index}", *row) for index, row in enumerate(rows)],
+            )
+        return "start=2026-11-01&end=2026-11-01&group=" + quote("售前") + "&staff=" + quote("小林")
+
+    def test_rule_cluster_directory_pages_sort_and_match_pairs(self):
+        scope = self.seed_rule_clusters()
+        path = "/api/clusters?" + scope
+        status, first, _ = self.call(path + "&limit=1&entity_sort=questions&cluster_members=repeated")
+        self.assertEqual(status, 200)
+        self.assertEqual((first["total"], first["offset"], first["limit"]), (2, 0, 1))
+        self.assertEqual(first["totals"], {"questions": 9, "unanswered": 3})
+        self.assertEqual(first["items"][0]["cluster_id"], 12)
+        self.assertEqual(first["items"][0]["share"], 63.6)
+        second = self.call(path + "&limit=1&offset=1&cluster_members=repeated")[1]
+        self.assertEqual(second["totals"], first["totals"])
+        self.assertEqual(second["items"][0]["cluster_id"], 21)
+        self.assertEqual(self.call(path + "&entity_sort=unanswered")[1]["items"][0]["cluster_id"], 21)
+        self.assertEqual(self.call(path + "&entity_sort=recent")[1]["items"][0]["cluster_id"], 21)
+        single = self.call(path + "&cluster_members=single")[1]
+        self.assertEqual(single["total"], 1)
+        self.assertEqual(single["items"][0]["cluster_id"], 25)
+        self.assertEqual(single["totals"], {"questions": 1, "unanswered": 0})
+        for item in [first["items"][0], second["items"][0], single["items"][0]]:
+            pairs_path = f"/api/pairs?{scope}&cluster={item['cluster_id']}"
+            self.assertEqual(self.call(pairs_path)[1]["total"], item["count"])
+            self.assertEqual(self.call(pairs_path + "&replied=unanswered")[1]["total"], item["unanswered"])
+        legacy = self.call(path + "&top=1")[1]
+        self.assertEqual(set(legacy), {"items"})
+        self.assertEqual([item["cluster_id"] for item in legacy["items"]], [12, 21, 25])
+        self.assertEqual(self.call(path + "&cluster_members=invalid")[0], 400)
+        self.assertEqual(self.call(path + "&entity_sort=invalid")[0], 400)
+
+    def test_rule_cluster_directory_searches_masked_variants_and_exact_ids(self):
+        scope = self.seed_rule_clusters()
+        path = "/api/clusters?" + scope + "&entity_q="
+        status, result, _ = self.call(path + "uniquevariant")
+        self.assertEqual(status, 200)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["totals"], {"questions": 7, "unanswered": 1})
+        item = result["items"][0]
+        self.assertEqual(item["question"], "绑定店铺")
+        self.assertEqual(item["variants"], 6)
+        self.assertTrue(all("UniqueVariant" not in sample for sample in item["samples"]))
+        self.assertIn("138****5678 合成尾词UniqueVariant", item["matched_sample"])
+        self.assertNotIn("13812345678", str(result))
+        for query in ("#12", "簇12", "问题簇 12"):
+            exact = self.call(path + quote(query))[1]
+            self.assertEqual([row["cluster_id"] for row in exact["items"]], [12])
+            self.assertNotIn("matched_sample", exact["items"][0])
+        for query in ("#1", "12", "13812345678"):
+            self.assertEqual(self.call(path + quote(query))[1]["total"], 0)
+
+
 class TestAdminKey(LocalFixture):
     """单管理员密钥：设了 ADMIN_KEY 之后，整站必须先过密钥。"""
 

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, FileText, History, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
+import { ArrowDownToLine, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, FileText, History, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,7 @@ import { QiyuAreaChart } from '@/components/qiyu/area-chart'
 import { QATable } from '@/components/qiyu/qa-table'
 import { QADetail } from '@/components/qiyu/qa-detail'
 import { AudienceWorkspace } from '@/components/qiyu/audience-workspace'
+import { RuleClusterWorkspace } from '@/components/qiyu/rule-cluster-workspace'
 import { VocFrequencyWorkspace, VocKnowledgeWorkspace } from '@/components/qiyu/voc-next-workspace'
 import { VocChatWorkspace } from '@/components/qiyu/voc-chat-workspace'
 import { VocBriefingDialog } from '@/components/qiyu/voc-briefing-dialog'
@@ -28,7 +29,7 @@ import { ImportDialog } from '@/components/qiyu/import-dialog'
 import { GatewaySettings } from '@/components/qiyu/gateway-settings'
 import { LoadingState, PageActivity, RefreshDataButton } from '@/components/qiyu/loading-state'
 import { useApi } from '@/hooks/use-api'
-import { apiPost, downloadExport, downloadTemplate, normalizePair, type ApiFilters, type ClusterItem, type LocalStatus, type MetaData, type SummaryData, type TrendData } from '@/lib/api'
+import { apiPost, downloadExport, downloadTemplate, normalizePair, type ApiFilters, type LocalStatus, type MetaData, type SummaryData, type TrendData } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { customerLabel } from '@/lib/utils'
 
@@ -117,7 +118,6 @@ function Workspace() {
   const meta = useApi<MetaData>('meta', { source }, refreshKey)
   const summary = useApi<SummaryData>('summary', sharedScope, refreshKey, view === 'overview')
   const trend = useApi<TrendData>('trend', sharedScope, refreshKey, view === 'overview')
-  const list = useApi<{ items: ClusterItem[] }>('clusters', { ...sharedScope, top: 100 }, refreshKey, view === 'clusters')
   const status = useApi<LocalStatus>('status', { source }, refreshKey, view === 'cleaning')
   const recent = useMemo(() => summary.data?.recent?.map(normalizePair) ?? [], [summary.data])
   const page = navigation.find(item => item.id === view)!
@@ -237,9 +237,9 @@ function Workspace() {
         {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace key={linkedTopic ?? 'ranking'} initialTopic={linkedTopic} onCloseLinkedTopic={clearLinkedTopic} filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} onOpenChat={openChat} /></div>}
         {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeWorkspace filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
-        {view === 'clusters' && <div className="px-4 lg:px-6"><QueryState loading={list.loading} error={list.error} retry={list.retry} empty={!list.data?.items.length}>
-          <div className="grid gap-4 lg:grid-cols-2">{list.data?.items.map(item => <Card key={item.cluster_id} className="min-w-0"><CardHeader className="min-w-0"><div className="mb-1 flex flex-wrap items-center justify-between gap-2"><Badge variant="outline">问题簇 {item.cluster_id}</Badge><span className="text-xs text-muted-foreground">{item.variants} 种问法</span></div><CardTitle className="min-w-0 whitespace-normal text-lg leading-relaxed [overflow-wrap:anywhere]">{item.question}</CardTitle><CardDescription>{item.count} 条问答 · {item.customers} 位客户 · {item.groups} 个客户群</CardDescription></CardHeader><CardContent className="min-w-0"><ul className="space-y-2 text-sm text-muted-foreground">{item.samples.map(sample => <li key={sample} className="flex min-w-0 gap-2"><MessageSquareText className="mt-0.5 size-4 shrink-0 opacity-50" /><span className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{sample}</span></li>)}</ul></CardContent><CardFooter className="flex-wrap justify-between gap-2"><Badge variant="secondary">{item.unanswered} 条未发现回复</Badge><Button variant="outline" size="sm" onClick={() => drill({ cluster: item.cluster_id })}>追溯问答<ArrowRight /></Button></CardFooter></Card>)}</div>
-        </QueryState></div>}
+        {view === 'clusters' && <div className="px-4 lg:px-6">
+          <RuleClusterWorkspace filters={sharedScope} refreshKey={refreshKey} onDrill={drill} />
+        </div>}
         {(view === 'groups' || view === 'customers') && <div className="px-4 lg:px-6">
           <AudienceWorkspace key={view} kind={view} filters={view === 'customers' ? audienceScope : sharedScope} refreshKey={refreshKey}
             scopedGroup={view === 'customers' ? customerGroup : undefined} onClearScopedGroup={() => changeGroup('all')}

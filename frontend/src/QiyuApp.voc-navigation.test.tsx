@@ -39,6 +39,9 @@ beforeEach(() => {
   query.mockImplementation((endpoint: string, _filters: unknown, _key: number, enabled = true) => ({
     data: !enabled ? null : {
       meta: { total: 3, groups: [], staff: [] },
+      clusters: { items: [{ cluster_id: 42, question: '怎么开启图片回复？', count: 3, variants: 2, customers: 2,
+        groups: 1, unanswered: 2, share: 100, first_seen: '2026-11-01', last_seen: '2026-11-07', samples: ['怎么开启图片回复？', '图片消息怎么触发？'] }],
+        total: 1, offset: 0, limit: 20, totals: { questions: 3, unanswered: 2 } },
       groups: { items: [{ group_name: '测试群', total_questions: 3, customer_count: 2, unanswered: 1, last_seen: '2026-11-10', top: [] }],
         total: 1, offset: 0, limit: 20, totals: { questions: 3, unanswered: 1 } },
       customers: { items: [{ customer_id: 'fixture-shop', customer_name: '测试商家', group_name: '测试群', group_names: ['测试群'], group_count: 1,
@@ -204,6 +207,24 @@ describe('VOC navigation', () => {
     fireEvent.mouseDown(screen.getByRole('tab', { name: '有回复' }), { button: 0 })
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '导出脱敏问答' })))
     expect(downloadExport).toHaveBeenCalledWith(expect.objectContaining({ days: 30, staff: '测试客服', q: '权限', replied: 'answered' }))
+  })
+
+  it('opens unanswered rule-cluster conversations within the same date, group, and staff scope', async () => {
+    const fetchPairs = vi.fn(async (_url: string) => Response.json({ items: [], total: 0 }))
+    vi.stubGlobal('fetch', fetchPairs)
+    const scope = { source: 'local' as const, start: '2026-11-01', end: '2026-11-07', group: '测试群', staff: '测试客服' }
+    window.history.replaceState(null, '', '#voc-chat?' + new URLSearchParams(scope))
+    render(<QiyuApp />)
+    fireEvent.click(screen.getByRole('button', { name: '规则问题簇' }))
+    expect(query).toHaveBeenCalledWith('clusters', expect.objectContaining({ ...scope, limit: 20 }), expect.any(Number))
+    fireEvent.click(screen.getByRole('button', { name: '簇 42，未发现回复 2 条' }))
+    expect(location.hash).toBe('#pairs')
+    expect(screen.getByText('问题簇 42')).toBeTruthy()
+    await screen.findByText(/共 0 条匹配记录/)
+    const pairRequest = fetchPairs.mock.calls.find(([url]) => url.startsWith('/api/pairs?'))
+    expect(pairRequest).toBeDefined()
+    const params = new URL(pairRequest![0], location.origin).searchParams
+    expect(Object.fromEntries(params)).toMatchObject({ ...scope, cluster: '42', replied: 'unanswered' })
   })
 
   it('keeps the selected group when drilling from a customer to their unanswered conversations', async () => {

@@ -105,30 +105,39 @@ def _rows(cfg: Settings, days: int = 0, group: str = "", staff: str = "",
     return rows
 
 
-def _cluster_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _cluster_buckets(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
     buckets: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         cid = int(r.get("cluster_id") or 0)
         if cid:
             buckets[cid].append(r)
-    out = []
-    for cid, members in buckets.items():
-        counter = Counter(r["question"] for r in members)
-        variants = sorted(counter, key=lambda text: (-counter[text], len(text), text))
-        stamps = [int(r.get("asked_at") or 0) for r in members if r.get("asked_at")]
-        # 代表句/样本截断：单条问题最长 5.7 KB，376 个簇全量回传会到 1 MB
-        rep = variants[0][:300]
-        out.append({
-            "cluster_id": cid, "question": rep, "rep": rep,
-            "size": len(members), "count": len(members), "variants": len(counter),
-            "customers": len({r["customer_id"] for r in members}),
-            "groups": len({r["group_name"] for r in members}),
-            "unanswered": sum(not r["replied"] for r in members),
-            "samples": [v[:200] for v in variants[:5]],
-            "share": round(len(members) / len(rows) * 100, 1) if rows else 0,
-            "first_seen": _day(min(stamps)) if stamps else "",
-            "last_seen": _day(max(stamps)) if stamps else "",
-        })
+    return buckets
+
+
+def _cluster_item(cid: int, members: list[dict[str, Any]], scope_total: int,
+                  *, compact: bool) -> dict[str, Any]:
+    counter = Counter(r["question"] for r in members)
+    variants = sorted(counter, key=lambda text: (-counter[text], len(text), text))
+    stamps = [int(r.get("asked_at") or 0) for r in members if r.get("asked_at")]
+    # Keep the list payload bounded even when a question includes a long transcript.
+    rep = variants[0][:300] if compact else variants[0]
+    samples = [variant[:200] for variant in variants[:5]] if compact else variants[:6]
+    return {
+        "cluster_id": cid, "question": rep, "rep": rep,
+        "size": len(members), "count": len(members), "variants": len(counter),
+        "customers": len({r["customer_id"] for r in members}),
+        "groups": len({r["group_name"] for r in members}),
+        "unanswered": sum(not r["replied"] for r in members),
+        "samples": samples,
+        "share": round(len(members) / scope_total * 100, 1) if scope_total else 0,
+        "first_seen": _day(min(stamps)) if stamps else "",
+        "last_seen": _day(max(stamps)) if stamps else "",
+    }
+
+
+def _cluster_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = [_cluster_item(cid, members, len(rows), compact=True)
+           for cid, members in _cluster_buckets(rows).items()]
     return sorted(out, key=lambda r: (-r["count"], r["question"]))
 
 
@@ -178,6 +187,78 @@ def questions(cfg: Settings | None = None, top: int = 20, **filters: Any) -> dic
 def clusters(cfg: Settings | None = None, **filters: Any) -> dict[str, Any]:
     rows = _rows(cfg or settings(), **filters)
     return {"items": _cluster_items(rows)}
+
+
+def _cluster_match_excerpt(question: str, query: str) -> str:
+    # Locate the match in original text even when casefold expands characters.
+    folded_offset = question.casefold().index(query)
+    match_at = 0
+    for character in question:
+        width = len(character.casefold())
+        if folded_offset < width:
+            break
+        folded_offset -= width
+        match_at += 1
+    start = max(0, match_at - min(32, max(0, 200 - len(query))))
+    end = start + 200
+    return ("…" if start else "") + question[start:end] + ("…" if end < len(question) else "")
+
+
+def cluster_directory(cfg: Settings, *, limit: int = 20, offset: int = 0, entity_q: str = "",
+                      entity_sort: str = "questions", cluster_members: str = "all",
+                      **filters: Any) -> dict[str, Any]:
+    sort_field = {"questions": "count", "unanswered": "unanswered", "recent": "last_seen"}.get(entity_sort)
+    if sort_field is None:
+        raise ValueError("未知列表排序")
+    if cluster_members not in ("all", "repeated", "single"):
+        raise ValueError("未知问题簇类型")
+
+    query = entity_q.strip().casefold()
+    cluster_id_query = None
+    for prefix in ("#", "问题簇", "簇"):
+        if query.startswith(prefix):
+            number = query.removeprefix(prefix).strip()
+            if number.isascii() and number.isdecimal():
+                cluster_id_query = number.lstrip("0")
+            break
+
+    rows = _rows(cfg, **filters)
+    buckets = _cluster_buckets(rows)
+    matches = []
+    for cid, members in buckets.items():
+        count = len(members)
+        if (cluster_members == "repeated" and count == 1
+                or cluster_members == "single" and count != 1):
+            continue
+        matched_question = None
+        if cluster_id_query is not None:
+            if str(cid) != cluster_id_query:
+                continue
+        elif query:
+            matched_question = next((row["question"] for row in members
+                                     if query in row["question"].casefold()), None)
+            if matched_question is None:
+                continue
+        matches.append({
+            "cluster_id": cid,
+            "count": count,
+            "unanswered": sum(not row["replied"] for row in members),
+            "last_seen": max(int(row.get("asked_at") or 0) for row in members),
+            "matched_question": matched_question,
+        })
+    matches.sort(key=lambda item: (-item[sort_field], -item["count"], item["cluster_id"]))
+    limit, offset = max(1, min(limit, 100)), max(0, offset)
+    items = []
+    for match in matches[offset:offset + limit]:
+        cid = match["cluster_id"]
+        item = _cluster_item(cid, buckets[cid], len(rows), compact=True)
+        question = match["matched_question"]
+        if question and not any(query in sample.casefold() for sample in [item["question"], *item["samples"]]):
+            item["matched_sample"] = _cluster_match_excerpt(question, query)
+        items.append(item)
+    return {"items": items, "total": len(matches), "offset": offset, "limit": limit,
+            "totals": {"questions": sum(item["count"] for item in matches),
+                       "unanswered": sum(item["unanswered"] for item in matches)}}
 
 
 def groups(cfg: Settings | None = None, top: int = 10, **filters: Any) -> dict[str, Any]:

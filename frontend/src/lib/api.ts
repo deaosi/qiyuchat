@@ -13,6 +13,7 @@ export interface ApiFilters {
   q?: string
   entity_q?: string
   entity_sort?: 'questions' | 'unanswered' | 'recent'
+  cluster_members?: 'repeated' | 'single'
   replied?: string
   limit?: number
   offset?: number
@@ -333,7 +334,7 @@ function validateVocResponse(name: string, data: unknown): void {
 }
 
 /** Reject an older/incompatible backend instead of rendering missing fields as zero. */
-function hasAudiencePage(data: Record<string, unknown>): boolean {
+function hasDirectoryPage(data: Record<string, unknown>): boolean {
   return hasCounts(data, ['total', 'offset', 'limit']) && isRecord(data.totals) && hasCounts(data.totals, ['questions', 'unanswered'])
 }
 
@@ -360,15 +361,22 @@ function validateGetResponse(name: string, data: unknown, filters: ApiFilters): 
         valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(isPair)
         break
       case 'questions':
-      case 'clusters':
         valid = Array.isArray(data.items) && data.items.every(isCluster)
         break
+      case 'clusters': {
+        const pagedClusters = paged || filters.cluster_members !== undefined
+        valid = Array.isArray(data.items) && data.items.every(item => isCluster(item)
+          && (!pagedClusters || (isRecord(item) && typeof item.first_seen === 'string' && typeof item.last_seen === 'string'
+            && (item.matched_sample === undefined || typeof item.matched_sample === 'string'))))
+          && (!pagedClusters || hasDirectoryPage(data))
+        break
+      }
       case 'groups':
         valid = Array.isArray(data.items) && data.items.every(item => isRecord(item)
           && typeof item.group_name === 'string' && (!paged || typeof item.last_seen === 'string') && hasCounts(item, ['total_questions', 'customer_count', 'unanswered'])
           && Array.isArray(item.top) && item.top.every(top => isRecord(top) && typeof top.question === 'string'
             && hasCounts(top, ['cluster_id', 'count'])))
-        valid &&= !paged || hasAudiencePage(data)
+        valid &&= !paged || hasDirectoryPage(data)
         break
       case 'customers':
         valid = Array.isArray(data.items) && data.items.every(item => isRecord(item)
@@ -376,7 +384,7 @@ function validateGetResponse(name: string, data: unknown, filters: ApiFilters): 
           && typeof item.last_seen === 'string'
           && (!paged || typeof item.customer_name === 'string' && isStringArray(item.group_names) && isCount(item.group_count))
           && hasCounts(item, ['total_questions', 'distinct_clusters', 'unanswered']))
-        valid &&= !paged || hasAudiencePage(data)
+        valid &&= !paged || hasDirectoryPage(data)
         break
       case 'detail':
         valid = isPair(data.pair) && typeof data.archived === 'boolean'
@@ -549,6 +557,7 @@ export interface ClusterItem {
   groups: number
   unanswered: number
   samples: string[]
+  matched_sample?: string
   share: number
   first_seen: string
   last_seen: string
