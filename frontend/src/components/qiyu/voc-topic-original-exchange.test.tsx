@@ -46,17 +46,39 @@ it('uses verified staff claims when the source answer is empty, excluding non-st
 })
 
 it('prefers a case with a verified nonempty reply in the frequency view', () => {
-  const empty: Evidence = { id: 'empty', event_id: 'empty', qa_id: 1, question: '较早问题', answer: '', staff_source_verified: true, claims: [] }
-  const answered: Evidence = { ...empty, id: 'answered', event_id: 'answered', qa_id: 2, question: '有回复的问题', answer: '真实客服回复' }
+  const empty: Evidence = { id: 'empty', event_id: 'empty', qa_id: 1, question: '较早问题', question_quote: '较早问题', answer: '', staff_source_verified: true, claims: [] }
+  const answered: Evidence = { ...empty, id: 'answered', event_id: 'answered', qa_id: 2, question: '有回复的问题', question_quote: '有回复的问题', source_kind: 'source-anchored', answer: '真实客服回复' }
+  const legacyAnswered: Evidence = { ...answered, id: 'legacy', event_id: 'legacy', qa_id: 3, source_kind: 'legacy-reference', question_quote: '未确认发言人的片段' }
   const detail: TopicDetail = {
     topic: { id: 'topic', theme: '主题', question: '问题', event_count: 2, customer_count: 1, session_count: 2, mention_count: 2, last_seen: '', samples: [] },
-    events: [empty, answered], workbench: { comparison: { current: { start: '', end: '' }, previous: null, comparable: false, note: '', last_synced_at: '' }, knowledge: [], gaps: [] },
+    events: [empty, legacyAnswered, answered], workbench: { comparison: { current: { start: '', end: '' }, previous: null, comparable: false, note: '', last_synced_at: '' }, knowledge: [], gaps: [] },
   }
   render(<TopicWorkbench detail={detail} onOpenEvidence={vi.fn()} exchangeOnly />)
   const representative = screen.getByText('有回复的问题').closest('article')!
   expect(within(representative).getByText('真实客服回复')).toBeTruthy()
   expect(screen.getByText('代表问答')).toBeTruthy()
   expect(screen.queryByText(/处理判断|待补证据/)).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: '查看问答' }))
+  fireEvent.click(screen.getAllByRole('button', { name: '查看问答' })[0])
   expect(screen.getByText('当前问答')).toBeTruthy()
+})
+
+it('deduplicates valid QA identities, prefers verified replies and avoids mixed-role full question text', () => {
+  const base: Evidence = { id: 'a', event_id: 'a', qa_id: 91, question: '客户：提问\n客服：请稍等\n客户：补充说明',
+    question_quote: '提问', answer: '来源未核验', staff_source_verified: false, claims: [] }
+  const duplicate: Evidence = { ...base, id: 'b', event_id: 'b', qa_id: '91', answer: '已核验的回复', staff_source_verified: true }
+  const duplicateAgain: Evidence = { ...base, id: 'c', event_id: 'c', qa_id: 91, question_quote: '补充说明' }
+  const noQuote: Evidence = { ...base, id: 'd', event_id: 'd', qa_id: 92, question_quote: '', answer: '' }
+  const detail: TopicDetail = { topic: { id: 'topic', theme: '主题', question: '归纳问题', event_count: 4, customer_count: 1, session_count: 2, mention_count: 4, last_seen: '', samples: [] },
+    events: [base, duplicate, duplicateAgain, noQuote], workbench: { comparison: { current: { start: '', end: '' }, previous: null, comparable: false, note: '', last_synced_at: '' }, knowledge: [], gaps: [] } }
+  const open = vi.fn()
+  render(<TopicWorkbench detail={detail} onOpenEvidence={open} exchangeOnly />)
+  const main = screen.getByText('提问').closest('article')!
+  expect(within(main).getByText('已核验的回复')).toBeTruthy()
+  expect(screen.queryByText(base.question)).toBeNull()
+  expect(screen.queryByText('补充说明')).toBeNull()
+  expect(within(main).getByText('会话片段（发言人待核对）')).toBeTruthy()
+  expect(screen.getByText('未提取到当前会话片段，请查看会话上下文。')).toBeTruthy()
+  expect(screen.getAllByRole('button', { name: '跳转到会话上下文' })).toHaveLength(2)
+  fireEvent.click(within(main).getByRole('button', { name: '跳转到会话上下文' }))
+  expect(open).toHaveBeenCalledWith(duplicate, undefined)
 })

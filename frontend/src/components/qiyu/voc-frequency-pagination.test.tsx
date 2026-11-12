@@ -161,7 +161,7 @@ describe('VOC frequency ranking pagination', () => {
     }
     const actual = fact('按相同条件复测仍未触发。', 'message-retest')
     const evidence: Evidence = {
-      id: 'event-1', event_id: 'event-1', qa_id: 24, question: topic.question, answer: actual.quote,
+      id: 'event-1', event_id: 'event-1', qa_id: 24, question: topic.question, question_quote: topic.question, source_kind: 'source-anchored', answer: actual.quote,
       staff_source_verified: true, claims: [], question_message_ids: ['message-start', 'message-follow-up'],
       domain: {
         primary_intent: 'functional_anomaly', fragment_role: 'request', platforms: [], modules: [], merchant_goal: null,
