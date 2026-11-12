@@ -14,7 +14,7 @@ from ..extract.text import clean_visible_text
 from ..push_sync import _expired, _numeric_identity, _project, _sender
 from ..qiyu.message import source_auto_reply, source_integer
 from ..qiyu.session import SessionExporter
-from . import case_media
+from . import case_media, case_senders
 
 
 _GATE = threading.Lock()
@@ -24,8 +24,11 @@ _COUNTS = ('staffMessageCount', 'userMessageCount')
 _IDENTITY_PREFIXES = ('qiyu-user:', 'qiyu-external:', 'qiyu-external-sha256:', 'qiyu-session:')
 
 
-def _result(status: str, messages: list[dict] | None = None) -> dict:
-    return {'status': status, 'messages': messages or []}
+def _result(status: str, messages: list[dict] | None = None, senders: list[dict] | None = None) -> dict:
+    result = {'status': status, 'messages': messages or []}
+    if senders:
+        result['senders'] = senders
+    return result
 
 
 def _count(value: object) -> bool:
@@ -135,6 +138,7 @@ def _lookup(cfg: Settings, pair: dict, retained: list[dict], sid: int, channel: 
     # session. Here the official metadata supplies the expected message counts.
     projected = _project(metadata, official, metadata, sid)
     rows = {f"source:{sid}:{row['id']}": row for row in official}
+    senders = case_senders.labels(cfg.runtime.state_dir, metadata, official, retained, legacy=True)
     for message in projected:
         if message['role'] == 'staff' and source_auto_reply(rows[message['source_message_id']]):
             message['role'] = 'bot'
@@ -146,10 +150,10 @@ def _lookup(cfg: Settings, pair: dict, retained: list[dict], sid: int, channel: 
         if content:
             staff[message['source_message_id']] = (content, images)
     if not staff:
-        return _result('no_reply')
+        return _result('no_reply', senders=senders)
     customer = _customer(pair, retained, projected, rows, metadata, sid)
     if not customer:
-        return _result('unmatched')
+        return _result('unmatched', senders=senders)
     recipients: dict[tuple[str, str], set[str]] = {}
     for row in official:
         if row['from'] == 1 and row['status'] == 1:
@@ -175,10 +179,12 @@ def _lookup(cfg: Settings, pair: dict, retained: list[dict], sid: int, channel: 
             continue
         content, images = staff[mid]
         supplement = {**message, 'content': content}
+        if name := case_senders.public_name(rows[mid].get('staffName')):
+            supplement['sender_name'] = name
         if images:
             supplement['images'] = images
         supplemental.append(supplement)
-    return _result('found', supplemental) if supplemental else _result('unmatched')
+    return _result('found' if supplemental else 'unmatched', supplemental, senders)
 
 
 def lookup(cfg: Settings, session: dict, pair: dict, retained: list[dict], *, exporter=None) -> dict:

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from src.config import RuntimeConfig, Settings
 from src.db import DB
 from src.extract.identity import SOURCE_IDENTITY_ROLE, encode_identity
 from src.web import api
@@ -19,7 +20,7 @@ class CaseContext(unittest.TestCase):
         self.addCleanup(self.db.close)
         active = patch.object(api, 'get_db', return_value=self.db)
         active.start(); self.addCleanup(active.stop)
-        self.cfg = object()
+        self.cfg = Settings(runtime=RuntimeConfig(state_dir=self.temp.name))
 
     def pair(self, sid='session-local', customer='legacy-customer', index=0):
         cursor = self.db._conn.execute("INSERT INTO qa_pair(session_id,idx,customer_id,customer_name,question,answer,asked_at) VALUES (?,?,?,?,?,?,?)",

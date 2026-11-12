@@ -172,7 +172,8 @@ class TestWeb(LocalFixture):
         write = self.write_headers(**auth)
         self.assertEqual(self.call(path, "POST", headers=self.write_headers())[0], 401)
         self.assertEqual(self.call(path, "POST", headers=auth)[0], 403)
-        self.assertTrue(self.call(f"/api/detail?id={qa_id}", headers=auth)[1]["can_lookup_replies"])
+        before_lookup = self.call(f"/api/detail?id={qa_id}", headers=auth)[1]
+        self.assertTrue(before_lookup["can_lookup_replies"])
         started, finish = threading.Event(), threading.Event()
         upstream = {"status": "found", "messages": [
             {"role": "staff", "content": "合成客服消息 13812345678", "ts": stamp + 1,
@@ -197,6 +198,7 @@ class TestWeb(LocalFixture):
             status, result, _ = response.result(timeout=3)
         self.assertEqual(status, 200)
         self.assertEqual(result["status"], "found")
+        self.assertEqual(result["context_revision"], before_lookup["context_revision"])
         self.assertNotIn("13812345678", str(result))
         self.assertEqual(result["messages"][0]["source_message_id"], f"source:{sid}:2")
         self.assertEqual(len(db.get_messages(str(sid))), 1)

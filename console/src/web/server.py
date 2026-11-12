@@ -560,6 +560,8 @@ class Handler(BaseHTTPRequestHandler):
                     with DB_LOCK:
                         if api.case_reply_target(cfg, qa_id) != target:
                             result = {"status": "unavailable", "messages": []}
+                        else:
+                            result["context_revision"] = api.case_context_revision(target[2])
                 self._json(api.case_reply_response(result))
             elif path == "/api/voc2/feishu/publish":
                 self._feishu_export(cfg, qs, data)

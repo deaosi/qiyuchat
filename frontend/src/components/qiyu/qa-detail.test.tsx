@@ -109,6 +109,109 @@ describe('embedded case conversation details', () => {
     expect(within(unknown).getByText('消息')).toBeTruthy()
   })
 
+  it.each([true, false])('identifies 福客 AI employees and preserves exact message senders (embedded=%s)', async embedded => {
+    const messages = [
+      { ...message(0, '客户原话'), sender_name: '客户联系人' },
+      { ...message(2, '福客员工消息'), sender_kind: 'fuke_staff', sender_name: '技术支持王小明', sender_account: 'fallback-id', is_question: true },
+      { ...message(4, '只有账号的员工消息'), sender_kind: 'fuke_staff', sender_account: 'support-user' },
+      { ...message(6, '未知身份的消息'), sender_kind: 'unidentified', sender_account: 'unknown-user', is_question: true },
+      { ...message(7, '七鱼客服原话'), sender_name: '坐席赵晓华' },
+      { ...message(8, '有昵称但未知身份的消息'), sender_kind: 'unidentified', sender_name: '来源昵称' },
+    ]
+    vi.mocked(apiGet).mockResolvedValue(response('21', messages, { availability: 'available' }))
+    render(<QADetail pair={pair()} embedded={embedded} onClose={vi.fn()} anchorMessageId="source-2" />)
+
+    const transcript = await screen.findByRole('list', { name: '会话消息' })
+    const rows = within(transcript).getAllByRole('listitem')
+    const [customer, employee, accountOnly, unknown, staff, unverifiedName] = rows
+    expect(rows.map(row => row.dataset.side)).toEqual(['left', 'right', 'right', 'center', 'right', 'center'])
+    expect(within(customer).getByText('客户 · 客户联系人')).toBeTruthy()
+    expect(within(employee).getByText('技术支持王小明')).toBeTruthy()
+    expect(within(employee).getByText('福客 AI · 七鱼未识别为客服')).toBeTruthy()
+    expect(employee.hasAttribute('data-evidence-anchor')).toBe(true)
+    expect(within(employee).queryByText('fallback-id')).toBeNull()
+    expect(within(accountOnly).getByText('support-user')).toBeTruthy()
+    expect(within(unknown).getByText('身份未确认 · unknown-user')).toBeTruthy()
+    expect(within(staff).getByText('客服 · 坐席赵晓华')).toBeTruthy()
+    expect(within(unverifiedName).getByText('身份未确认 · 来源昵称')).toBeTruthy()
+    expect(within(transcript).getAllByText('本次咨询')).toEqual([within(customer).getByText('本次咨询')])
+    expect(screen.getByText('咨询客户', { selector: 'dt' })).toBeTruthy()
+    expect(screen.queryByText('来源人员', { selector: 'dt' })).toBeNull()
+  })
+
+  it('uses a confirmed internal origin in the case metadata', async () => {
+    const messages = [{ ...message(0, '福客员工原话'), sender_kind: 'fuke_staff', sender_name: '技术支持王小明' }]
+    vi.mocked(apiGet).mockResolvedValue(response('21', messages))
+    render(<QADetail pair={pair()} embedded onClose={vi.fn()} />)
+
+    expect(await screen.findByText('来源人员', { selector: 'dt' })).toBeTruthy()
+    expect(screen.getByText('技术支持王小明', { selector: 'dd' })).toBeTruthy()
+    expect(screen.queryByText('咨询客户', { selector: 'dt' })).toBeNull()
+  })
+
+  it('distinguishes an employee bubble from a verified Qiyu staff reply', async () => {
+    const messages = [message(0), { ...message(2, '福客员工消息'), sender_kind: 'fuke_staff' }]
+    vi.mocked(apiGet).mockResolvedValue(response('21', messages, { availability: 'available' }))
+    render(<QADetail pair={pair()} embedded onClose={vi.fn()} />)
+
+    expect(await screen.findByText('福客 AI 员工')).toBeTruthy()
+    expect(screen.getByText('这段会话未保存七鱼识别的人工客服回复。')).toBeTruthy()
+    expect(screen.queryByText(noStaffNotice)).toBeNull()
+  })
+
+  it('identifies the saved senders by sequence even when Qiyu finds no staff replies', async () => {
+    const messages = [
+      { ...message(0, '较早的客户提问'), context_seq: 4, sender_kind: 'unidentified' },
+      { ...message(2, '后续的员工消息'), context_seq: 7, sender_kind: 'unidentified', is_question: true },
+    ]
+    const lookup = deferred<DetailRepliesResponse>()
+    vi.mocked(apiGet).mockResolvedValue(response('21', messages, { availability: 'available', can_lookup_replies: true, context_revision: 'same-context' }))
+    vi.mocked(apiPost).mockReturnValue(lookup.promise)
+    render(<QADetail pair={pair()} embedded onClose={vi.fn()} anchorMessageId="source-2" />)
+
+    const transcript = await screen.findByRole('list', { name: '会话消息' })
+    const [customer, employee] = within(transcript).getAllByRole('listitem')
+    expect(customer.dataset.side).toBe('center')
+    expect(employee.dataset.side).toBe('center')
+    await act(async () => {
+      lookup.resolve({ status: 'no_reply', messages: [], context_revision: 'same-context', senders: [
+        { context_seq: 7, sender_kind: 'fuke_staff', sender_name: '技术支持王小明' },
+        { context_seq: 4, sender_name: '客户联系人' },
+        { context_seq: 99, sender_name: '无对应记录' },
+      ] })
+    })
+
+    expect(within(transcript).getAllByRole('listitem')).toEqual([customer, employee])
+    expect(customer.dataset.side).toBe('left')
+    expect(within(customer).getByText('客户 · 客户联系人')).toBeTruthy()
+    expect(within(customer).getByText('本次咨询')).toBeTruthy()
+    expect(employee.dataset.side).toBe('right')
+    expect(employee.hasAttribute('data-evidence-anchor')).toBe(true)
+    expect(within(employee).getByText('技术支持王小明')).toBeTruthy()
+    expect(within(employee).queryByText('本次咨询')).toBeNull()
+    expect(screen.getByText('七鱼未返回该会话的人工客服回复。')).toBeTruthy()
+    expect(screen.queryByText('无对应记录')).toBeNull()
+  })
+
+  it.each([['older-context', 'newer-context'], [undefined, 'newer-context'], ['older-context', undefined]])(
+    'does not attach replies or sender labels to a different transcript revision (%s → %s)',
+    async (detailRevision, replyRevision) => {
+      const messages = [{ ...message(0, '旧记录客户原话'), context_seq: 7, sender_kind: 'unidentified' }]
+      vi.mocked(apiGet).mockResolvedValue(response('21', messages, { can_lookup_replies: true, context_revision: detailRevision }))
+      vi.mocked(apiPost).mockResolvedValue({ status: 'found', context_revision: replyRevision,
+        messages: [officialReply(1, '新记录客服原话')],
+        senders: [{ context_seq: 7, sender_kind: 'fuke_staff', sender_name: '另一段会话的员工' }],
+      })
+      render(<QADetail pair={pair()} embedded onClose={vi.fn()} />)
+
+      expect(await screen.findByText('会话记录已更新，请重新打开。')).toBeTruthy()
+      expect(screen.getByText('旧记录客户原话').closest('li')?.dataset.side).toBe('center')
+      expect(screen.queryByText('新记录客服原话')).toBeNull()
+      expect(screen.queryByText('另一段会话的员工')).toBeNull()
+      expect(apiGet).toHaveBeenCalledTimes(1)
+    },
+  )
+
   it('looks up eligible replies in the standard drawer only after the user requests them', async () => {
     const detail = response('21', [message(0, '客户原话')], { availability: 'available', can_lookup_replies: true })
     vi.mocked(apiGet).mockResolvedValueOnce({ ...detail, pair: { ...detail.pair, answer: '' } })
@@ -180,7 +283,7 @@ describe('embedded case conversation details', () => {
     expect(apiPost).toHaveBeenCalledWith('detail/replies', { source: 'local', id: '21' }, undefined, undefined, expect.any(AbortSignal))
     await act(async () => {
       lookup.resolve({ status: 'found', messages: [officialReply(2, '补取的同一时刻回复'), {
-        ...officialReply(1, '补取的第一条回复'), images: [{ url: 'https://ysf.nosdn.127.net/official-reply.png' }],
+        ...officialReply(1, '补取的第一条回复'), sender_name: '实际回复坐席', images: [{ url: 'https://ysf.nosdn.127.net/official-reply.png' }],
       }] })
     })
     expect(screen.getByText('已补充七鱼返回的人工客服回复。')).toBeTruthy()
@@ -190,7 +293,8 @@ describe('embedded case conversation details', () => {
     const bodies = rows.map(row => within(row).getByText(/^(已保存的|补取的)/).textContent)
     expect(bodies).toEqual([first.content, '补取的第一条回复', next.content, sameTime.content, '补取的同一时刻回复'])
     expect(rows.map(row => row.dataset.side)).toEqual(['left', 'right', 'left', 'left', 'right'])
-    expect(within(transcript).getAllByText('人工客服')).toHaveLength(2)
+    expect(within(transcript).getByText('人工客服')).toBeTruthy()
+    expect(within(rows[1]).getByText('人工客服 · 实际回复坐席')).toBeTruthy()
     expect(within(transcript).getByText('2026-11-11 09:00:01')).toBeTruthy()
     expect(within(transcript).getByAltText('会话图片').getAttribute('src')).toBe('https://ysf.nosdn.127.net/official-reply.png')
     expect(screen.queryByText(noStaffNotice)).toBeNull()

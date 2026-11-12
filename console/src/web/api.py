@@ -18,7 +18,7 @@ from ..extract.concepts import concept_signature
 from ..extract.identity import HIDDEN_ROLES, SOURCE_IDENTITY_ROLE, sender_context
 from ..extract.text import clean_visible_text
 from ..local import csv_bytes
-from . import case_media, case_replies
+from . import case_media, case_replies, case_senders
 
 try:
     _DETAIL_ZONE = ZoneInfo('Asia/Shanghai')
@@ -367,8 +367,7 @@ def _detail_content(value: Any) -> str:
     return mask_pii(content)
 
 
-def _detail_origin(db: Any, raw: dict[str, Any]) -> tuple[set[str], set[str], bool]:
-    tables = {row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+def _detail_origin(db: Any, raw: dict[str, Any], tables: set[str]) -> tuple[set[str], set[str], bool]:
     question_ids, answer_ids = set(), set()
     if 'qa_origin' in tables:
         origin = db._conn.execute('SELECT * FROM qa_origin WHERE qa_id=? AND active=1', (raw['qa_id'],)).fetchone()
@@ -384,6 +383,17 @@ def _detail_origin(db: Any, raw: dict[str, Any]) -> tuple[set[str], set[str], bo
         state = db._conn.execute('SELECT status,archive_reason FROM push_sync_state WHERE session_id=?', (raw['session_id'],)).fetchone()
         partial = bool(state and (state['archive_reason'] or state['status'] != 'completed'))
     return question_ids, answer_ids, partial
+
+
+def _case_messages(db: Any, sid: str) -> list[dict[str, Any]]:
+    return [dict(row) for row in db._conn.execute(
+        "SELECT seq AS context_seq,role,content,ts,source_message_id FROM raw_message "
+        "WHERE session_id=? ORDER BY seq", (sid,),
+    )]
+
+
+def case_context_revision(messages: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
 def _case_reply_session(db: Any, cfg: Settings, pair: dict) -> dict[str, Any] | None:
@@ -412,7 +422,7 @@ def case_reply_target(cfg: Settings, qa_id: int) -> tuple[dict, dict, list[dict]
     session = _case_reply_session(db, cfg, pair)
     if session is None:
         return None
-    visible = sender_context(db.get_messages(pair["session_id"]), pair["session_id"], str(pair.get("customer_id") or ""))
+    visible = sender_context(_case_messages(db, pair["session_id"]), pair["session_id"], str(pair.get("customer_id") or ""))
     if not any(m["role"] == "user" and _detail_content(m["content"]) for m in visible):
         return None
     if any(m["role"] == "staff" and _detail_content(m["content"]) for m in visible):
@@ -431,9 +441,16 @@ def case_reply_response(result: dict[str, Any]) -> dict[str, Any]:
             images = case_media.safe_images(message.get("images"))
             if images:
                 public["images"] = images
+            if name := case_senders.public_name(message.get("sender_name")):
+                public["sender_name"] = name
             messages.append(public)
     status = "unmatched" if result["status"] == "found" and not messages else result["status"]
-    return {"status": status, "messages": messages}
+    response = {"status": status, "messages": messages}
+    if result.get("senders"):
+        response["senders"] = result["senders"]
+    if result.get("context_revision"):
+        response["context_revision"] = result["context_revision"]
+    return response
 
 
 def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
@@ -445,10 +462,14 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
     if not pair["question"].strip():
         return None
     # Use the original session identity. The public pair's ID may be masked.
-    messages = db.get_messages(raw["session_id"])
-    question_ids, answer_ids, partial = _detail_origin(db, raw)
+    sid = raw["session_id"]
+    messages = _case_messages(db, sid)
+    scoped = sender_context(messages, sid, str(raw.get("customer_id") or ""))
+    tables = {row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    question_ids, answer_ids, partial = _detail_origin(db, raw, tables)
+    labels = case_senders.saved_labels(db._conn, cfg.runtime.state_dir, sid, scoped, tables)
     visible_messages = []
-    for message in sender_context(messages, raw["session_id"], str(raw.get("customer_id") or "")):
+    for message in scoped:
         if message['role'] in HIDDEN_ROLES:
             continue
         content, images = case_media.project(message['content'])
@@ -456,11 +477,12 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
             stamp, display_time = _detail_time(message.get('ts'))
             source_id = str(message.get('source_message_id') or '')
             public = {'role': message['role'], 'content': mask_pii(content), 'time': display_time,
-                      'ts': stamp, 'source_message_id': source_id,
+                      'ts': stamp, 'source_message_id': source_id, 'context_seq': message['context_seq'],
                       'is_question': message['role'] == 'user' and source_id in question_ids,
                       'is_answer': message['role'] == 'staff' and source_id in answer_ids}
             if images:
                 public['images'] = images
+            public.update(labels.get(message['context_seq'], {}))
             visible_messages.append(public)
     archived = not bool(messages)
     availability = 'archived' if archived else 'empty' if not visible_messages else 'partial' if partial else 'available'
@@ -469,7 +491,7 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
                   _case_reply_session(db, cfg, raw) is not None)
     return {'pair': pair, 'messages': visible_messages, 'archived': archived,
             'message_count': len(visible_messages), 'time_zone': 'Asia/Shanghai', 'availability': availability,
-            'can_lookup_replies': can_lookup,
+            'can_lookup_replies': can_lookup, 'context_revision': case_context_revision(scoped),
             'context_scope': 'session_customer' if any(m.get('role') == SOURCE_IDENTITY_ROLE for m in messages) else 'legacy_session'}
 
 

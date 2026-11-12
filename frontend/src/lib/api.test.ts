@@ -83,10 +83,16 @@ describe('official reply lookup transport', () => {
     }))
     const request = fetch.mock.calls[0][1]
     expect(new Headers(request.headers).get('X-Local-Request')).toBe('1')
-    const data = { status: 'found', messages: [staffMessage] }
+    const data = { status: 'found', messages: [{ ...staffMessage, sender_name: '客服联系人' }] }
     respond(json(data))
     await expect(result).resolves.toEqual(data)
     expect(requestActivity.getSnapshot()).toMatchObject({ foreground: 0, background: 0 })
+  })
+
+  it('accepts identified senders without any supplemental staff replies', async () => {
+    const data = { status: 'no_reply', context_revision: 'same-context', messages: [], senders: [{ context_seq: 7, sender_kind: 'fuke_staff', sender_name: '技术支持王小明' }] }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(data)))
+    await expect(apiPost('detail/replies', filters)).resolves.toEqual(data)
   })
 
   it.each([
@@ -96,9 +102,32 @@ describe('official reply lookup transport', () => {
     { status: 'found', messages: [{ ...staffMessage, role: 'user' }] },
     { status: 'found', messages: [{ ...staffMessage, ts: 0 }] },
     { status: 'found', messages: [{ ...staffMessage, is_answer: true }] },
+    { status: 'found', messages: [{ ...staffMessage, sender_name: 123 }] },
     { status: 'found', messages: [staffMessage, staffMessage] },
+    { status: 'no_reply', messages: [], senders: [{ context_seq: 7 }, { context_seq: 7 }] },
+    { status: 'no_reply', messages: [], senders: [{ context_seq: 0.5 }] },
+    { status: 'no_reply', messages: [], context_revision: 123 },
   ])('rejects inconsistent lookup payload %#', async data => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(data)))
     await expect(apiPost('detail/replies', filters)).rejects.toMatchObject({ status: 502 })
+  })
+})
+
+describe('retained transcript sender metadata', () => {
+  const visitorMessage = { ...staffMessage, role: 'user' }
+  const detail = { pair: { qa_id: 21, question: '案例问题', answer: '' }, archived: false }
+
+  it('accepts old and individually labeled messages in the same transcript', async () => {
+    const data = { ...detail, messages: [visitorMessage,
+      { ...visitorMessage, context_seq: 1, sender_kind: 'fuke_staff', sender_name: '技术支持王小明' },
+      { ...visitorMessage, sender_kind: 'unidentified', sender_account: 'unknown-user' },
+    ] }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(data)))
+    await expect(apiGet('detail', filters)).resolves.toEqual(data)
+  })
+
+  it.each([{ sender_kind: 'staff' }, { sender_name: [] }, { sender_account: 123 }])('rejects malformed sender metadata %#', async metadata => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ ...detail, messages: [{ ...visitorMessage, ...metadata }] })))
+    await expect(apiGet('detail', filters)).rejects.toMatchObject({ status: 502 })
   })
 })

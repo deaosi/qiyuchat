@@ -51,11 +51,21 @@ export type VocQueryFilters = {
 }
 
 const detailRepliesStatuses = ['found', 'no_reply', 'unmatched', 'unavailable', 'busy'] as const
+const detailSenderKinds = ['fuke_staff', 'unidentified'] as const
+export type DetailSenderKind = typeof detailSenderKinds[number]
+export interface DetailSenderMetadata {
+  sender_name?: string
+  sender_kind?: DetailSenderKind
+  sender_account?: string
+}
 export type DetailMessageImage = { url: string }
 export interface DetailRepliesResponse {
   status: typeof detailRepliesStatuses[number]
+  context_revision?: string
+  senders?: (DetailSenderMetadata & { context_seq: number })[]
   messages: {
     role: 'staff'
+    sender_name?: string
     content: string
     ts: number
     time: string
@@ -107,6 +117,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function validSenderMetadata(message: Record<string, unknown>): boolean {
+  return (message.sender_name === undefined || typeof message.sender_name === 'string')
+    && (message.sender_account === undefined || typeof message.sender_account === 'string')
+    && (message.sender_kind === undefined || detailSenderKinds.some(kind => kind === message.sender_kind))
+}
+
+function validContextSequence(value: unknown): value is number {
+  return isCount(value) && Number.isSafeInteger(value)
+}
+
+function validContextRevision(value: unknown): boolean {
+  return value === undefined || typeof value === 'string' && Boolean(value.trim())
 }
 
 export function httpsLink(value: unknown): string | undefined {
@@ -538,12 +562,15 @@ function validateGetResponse(name: string, data: unknown, filters: ApiFilters): 
         break
       case 'detail':
         valid = isPair(data.pair) && typeof data.archived === 'boolean'
+          && validContextRevision(data.context_revision)
           && Array.isArray(data.messages) && data.messages.every(message => isRecord(message)
             && typeof message.role === 'string' && typeof message.content === 'string' && typeof message.time === 'string'
             && (message.ts === undefined || isCount(message.ts))
             && (message.source_message_id === undefined || message.source_message_id === null || typeof message.source_message_id === 'string' || typeof message.source_message_id === 'number')
             && (message.is_question === undefined || typeof message.is_question === 'boolean')
             && (message.is_answer === undefined || typeof message.is_answer === 'boolean')
+            && (message.context_seq === undefined || validContextSequence(message.context_seq))
+            && validSenderMetadata(message)
             && validDetailImages(message.images))
           && (data.message_count === undefined || isCount(data.message_count) && data.message_count === (data.messages as unknown[]).length)
           && (data.availability === undefined || ['available', 'partial', 'archived', 'empty'].includes(String(data.availability)))
@@ -562,8 +589,10 @@ function validateGetResponse(name: string, data: unknown, filters: ApiFilters): 
 
 function validateDetailRepliesResponse(data: unknown): void {
   const valid = isRecord(data) && detailRepliesStatuses.some(status => status === data.status)
+    && validContextRevision(data.context_revision)
     && Array.isArray(data.messages) && (data.status === 'found' ? data.messages.length > 0 : data.messages.length === 0)
     && data.messages.every(message => isRecord(message) && message.role === 'staff'
+      && (message.sender_name === undefined || typeof message.sender_name === 'string')
       && typeof message.content === 'string' && Boolean(message.content.trim())
       && isCount(message.ts) && message.ts > 0
       && typeof message.time === 'string' && Boolean(message.time.trim())
@@ -571,6 +600,9 @@ function validateDetailRepliesResponse(data: unknown): void {
       && message.is_question === false && message.is_answer === false
       && validDetailImages(message.images))
     && new Set(data.messages.map(message => message.source_message_id)).size === data.messages.length
+    && (data.senders === undefined || Array.isArray(data.senders)
+      && data.senders.every(sender => isRecord(sender) && validContextSequence(sender.context_seq) && validSenderMetadata(sender))
+      && new Set(data.senders.map(sender => sender.context_seq)).size === data.senders.length)
   if (!valid) throw new ApiError('七鱼回复接口返回的数据格式不完整，请稍后重试。', 502)
 }
 
