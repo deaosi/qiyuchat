@@ -1,8 +1,10 @@
 import { ArrowUpRight } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { normalizePair, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
-import type { DiagnosisStatus, Domain, Evidence, Knowledge, KnowledgeReuse, OpenEvidencePair, PrimaryIntent, Ref } from './voc-next-workspace'
+import type { VocKnowledgeKind, VocKnowledgeReuse } from '@/lib/api'
+import type { DiagnosisStatus, Domain, Evidence, Knowledge, KnowledgeReuse, PrimaryIntent, Ref } from './voc-next-workspace'
+
+export type OpenTopicEvidence = (item: Evidence, messageId?: string) => void
 
 export function messageIdentifier(value: unknown) {
   if (typeof value === 'string') return value.trim() || undefined
@@ -52,7 +54,7 @@ export function displayTime(input?: string | number): string {
 function SourceQuotes({ label, refs }: { label: string; refs: (Ref | null | undefined)[] }) {
   const present = refs.filter((ref): ref is Ref => Boolean(ref?.quote))
   if (!present.length) return null
-  return <div className="space-y-1"><div className="text-xs font-medium text-foreground">{label}</div>{present.map((ref, index) => <p key={index} className="whitespace-pre-wrap break-words text-sm text-muted-foreground">“{ref.quote}” <span className="text-xs">· {ref.source === 'question' ? '商家原话' : '回复原话'}</span></p>)}</div>
+  return <div className="space-y-1"><div className="text-xs font-medium text-foreground">{label}</div>{present.map((ref, index) => <p key={index} className="whitespace-pre-wrap break-words text-sm text-muted-foreground">“{ref.quote}” <span className="text-xs">· {ref.role === 'unknown' ? '会话依据' : ref.source === 'question' ? '商家原话' : '回复原话'}</span></p>)}</div>
 }
 
 function DomainEvidence({ domain }: { domain?: Domain }) {
@@ -74,16 +76,21 @@ function DomainEvidence({ domain }: { domain?: Domain }) {
   </div>
 }
 
-export function EvidenceList({ evidence, onOpenPair, onSelectCase }: { evidence: Evidence[]; onOpenPair: OpenEvidencePair; onSelectCase?: (id: string) => void }) {
+export function EvidenceList({ evidence, onOpenEvidence, onSelectCase, readOnly = false }: {
+  evidence: Evidence[]
+  onOpenEvidence: OpenTopicEvidence
+  onSelectCase?: (id: string) => void
+  readOnly?: boolean
+}) {
   if (!evidence.length) return <p className="text-sm text-muted-foreground">暂无可展示的原句依据。</p>
   return <div className="space-y-3">{evidence.map(item => {
     const quotes = [...new Set(item.claims.filter(claim => claim.role === 'staff' && claim.quote.trim()).map(claim => claim.quote))]
     return <div key={item.id} className="rounded-lg border bg-muted/20 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>{item.qa_id ? `问答 ${item.qa_id} · ` : ''}{item.customer_name || '匿名商家'}{displayTime(item.asked_at) ? ` · ${displayTime(item.asked_at)}` : ''}</span>
+        <span>{!readOnly && item.qa_id ? `问答 ${item.qa_id} · ` : ''}{item.customer_name || '匿名商家'}{displayTime(item.asked_at) ? ` · ${displayTime(item.asked_at)}` : ''}</span>
         <div className="flex flex-wrap gap-1">
           {onSelectCase && <Button variant="outline" size="xs" onClick={() => onSelectCase(item.id)}>查看处理判断</Button>}
-          {item.qa_id && <Button variant="ghost" size="xs" onClick={() => onOpenPair(normalizePair(item), questionAnchor(item))}>查看会话上下文 <ArrowUpRight /></Button>}
+          {item.qa_id && <Button variant="ghost" size="xs" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文 <ArrowUpRight /></Button>}
         </div>
       </div>
       <p className="mt-2 whitespace-pre-wrap break-words text-sm">{item.question_quote || item.question}</p>
@@ -93,7 +100,11 @@ export function EvidenceList({ evidence, onOpenPair, onSelectCase }: { evidence:
   })}</div>
 }
 
-export function KnowledgeContent({ item, onOpenPair }: { item: Knowledge; onOpenPair: OpenEvidencePair }) {
+export function KnowledgeContent({ item, onOpenEvidence, readOnly = false }: {
+  item: Knowledge
+  onOpenEvidence: OpenTopicEvidence
+  readOnly?: boolean
+}) {
   const kind = item.kind ? knowledgeLabels[item.kind] : '类型待识别'
   const confirmed = item.diagnosis_status && ['config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed'].includes(item.diagnosis_status)
   const closure = item.conversation_verification
@@ -114,8 +125,8 @@ export function KnowledgeContent({ item, onOpenPair }: { item: Knowledge; onOpen
         const qaId = 'qa_id' in ref ? messageIdentifier(ref.qa_id) : undefined
         const source = qaId ? item.evidence.find(evidence => String(evidence.qa_id) === qaId) : undefined
         return <p key={index} className="mt-2 whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">
-          “{ref.quote}” · {ref.role === 'user' || ref.role === 'merchant' ? '客户反馈' : '会话证据'}{ref.ts ? ` · ${displayTime(ref.ts)}` : ''}{anchor ? ` · 消息 ${anchor}` : ''}
-          {source && anchor && <Button variant="ghost" size="xs" onClick={() => onOpenPair(normalizePair(source), anchor)}>定位原话<ArrowUpRight /></Button>}
+          “{ref.quote}” · {ref.role === 'user' || ref.role === 'merchant' ? '客户反馈' : '会话证据'}{ref.ts ? ` · ${displayTime(ref.ts)}` : ''}{!readOnly && anchor ? ` · 消息 ${anchor}` : ''}
+          {source && anchor && <Button variant="ghost" size="xs" onClick={() => onOpenEvidence(source, anchor)}>定位原话<ArrowUpRight /></Button>}
         </p>
       })}
     </div>
@@ -126,6 +137,6 @@ export function KnowledgeContent({ item, onOpenPair }: { item: Knowledge; onOpen
     {confirmed && <SourceQuotes label="已确认原因依据" refs={[item.confirmed_cause]} />}
     {item.reply_patterns.length > 0 && <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">日常话术：{item.reply_patterns.join('；')}</p>}
     {item.cautions.length > 0 && <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">注意事项：{item.cautions.join('；')}</p>}
-    <div><h4 className="mb-2 text-sm font-medium">来源依据</h4><EvidenceList evidence={item.evidence} onOpenPair={onOpenPair} /></div>
+    <div><h4 className="mb-2 text-sm font-medium">来源依据</h4><EvidenceList evidence={item.evidence} onOpenEvidence={onOpenEvidence} readOnly={readOnly} /></div>
   </div>
 }

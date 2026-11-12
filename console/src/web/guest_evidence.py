@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import closing
-from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -18,7 +17,7 @@ from ..clean.rules import mask_pii
 from ..config import Settings
 from ..extract.identity import SOURCE_IDENTITY_ROLE, decode_identity
 from ..voc_assets import connection
-from . import case_media, guest_evidence_view
+from . import case_media, guest_evidence_view, guest_topic
 
 TOKEN_PATTERN = r"[A-Za-z0-9_-]{43}"
 PUBLIC_PATH = "/guest/evidence/"
@@ -36,6 +35,7 @@ _TOKEN = re.compile(TOKEN_PATTERN)
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
 _URL = re.compile(r"""(?:[a-z][a-z0-9+.-]*://|www\.|(?<![\w@])(?:[a-z0-9-]+\.)+(?:cn|com|net|org|io|ai|top|cc)\b)[^\s，。；！？、<>'"]*""", re.I)
 _SOURCE_ID = re.compile(r"\bqiyu-(?:external(?:-sha256)?|user|session):[^\s，。；！？、]+", re.I)
+_PROJECTION_ID = re.compile(r"\b(?:(?:t_|sop_|episode_)[a-f0-9]{24}|source:[a-z0-9_.-]+:[a-z0-9_.-]+)\b", re.I)
 _PRIVATE_VALUE = re.compile(
     r"((?:会话|客户|客服|店铺|商家|商品|账号|订单|消息|工单|运单)\s*(?:ID|编号|号)|"
     r"密码|口令|密钥|验证码|微信号|token|api[_ -]?key)\s*[:：=]?\s*([a-z0-9_.-]{4,})", re.I
@@ -313,8 +313,30 @@ def _view(value, names) -> dict:
     return {"taxonomy": taxonomy, "metrics": metrics, "sections": _sections(value.get("sections"), names)}
 
 
+def _clean_projection(value, names=None) -> str:
+    return _PROJECTION_ID.sub("[标识已隐藏]", _clean(value, names))
+
+
+def sanitize_topic_workspace(value, names=None) -> dict:
+    return guest_topic.workspace(value, lambda text: _clean_projection(text, names))
+
+
+def sanitize_topic_evidence(value, names=None) -> dict:
+    return guest_topic.evidence(value, lambda text: _clean_projection(text, names))
+
+
+def _pinned_anchor(value) -> str:
+    return _digest(value) if isinstance(value, str) and 0 < len(value) <= 1024 else ""
+
+
+def _workspace_for_bindings(workspace: dict, bindings: list[dict]) -> dict:
+    keys = {(binding["qa"], binding["anchor"]) for binding in bindings}
+    return {**workspace, "knowledge": [item for item in workspace["knowledge"]
+                                       if all(tuple(key) in keys for key in item["keys"])]}
+
+
 def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
-    anchor = _digest(anchor_id) if isinstance(anchor_id, str) and 0 < len(anchor_id) <= 1024 else ""
+    anchor = _pinned_anchor(anchor_id)
     primary = _case(cfg, qa_id, anchor) if qa_id is not None else None
     if qa_id is not None and primary is None:
         return None
@@ -338,21 +360,65 @@ def _make_payload(cfg: Settings, qa_id, anchor_id, entry, view) -> dict | None:
         source = candidate.get("qa_id")
         if type(source) is not int or source <= 0 or source in seen:
             continue
-        raw_anchor = candidate.get("anchor_id")
-        pinned = _digest(raw_anchor) if isinstance(raw_anchor, str) and 0 < len(raw_anchor) <= 1024 else ""
+        pinned = _pinned_anchor(candidate.get("anchor_id"))
         evidence = _case(cfg, source, pinned, full=True)
         if evidence is None:
             continue
         seen.add(source)
         case_names = evidence[3]
-        cases.append({"qa": source, "anchor": pinned, "fingerprint": evidence[0],
-                      "title": _clean(candidate.get("title"), case_names)[:450],
-                      "category": _clean(candidate.get("category"), case_names)[:200],
-                      "time": _clean(candidate.get("time"), case_names)[:45],
-                      "sections": _sections(candidate.get("sections"), case_names)})
+        binding = {"qa": source, "anchor": pinned, "fingerprint": evidence[0],
+                   "title": _clean(candidate.get("title"), case_names)[:450],
+                   "category": _clean(candidate.get("category"), case_names)[:200],
+                   "time": _clean(candidate.get("time"), case_names)[:45],
+                   "sections": _sections(candidate.get("sections"), case_names)}
+        if safe["kind"] == "topics" and (detail := sanitize_topic_evidence(candidate.get("topic_evidence"), case_names)):
+            binding["topic_evidence"] = detail
+        cases.append(binding)
     total = view.get("total_cases", len(cases)) if isinstance(view, dict) else len(cases)
     total = max(total, len(cases)) if type(total) is int and total >= 0 else len(cases)
-    return {"v": 2, "entry": safe, "cases": cases, "total_cases": total}
+    payload = {"v": 2, "entry": safe, "cases": cases, "total_cases": total}
+    if safe["kind"] == "topics" and isinstance(view, dict):
+        workspace = sanitize_topic_workspace(view.get("topic_workspace"), names)
+        if workspace:
+            payload["topic_workspace"] = _workspace_for_bindings(workspace, cases)
+    return payload
+
+
+def build_topic_workspace_upgrade(cfg: Settings, old_payload: dict, *, entry: dict, view: dict) -> dict | None:
+    """Prepare an upgrade of one published topic without changing its authorized bindings."""
+    if not isinstance(old_payload, dict) or old_payload.get("v") != 2 or not isinstance(view, dict):
+        return None
+    old_entry, expected = _entry(old_payload.get("entry"), None), _entry(entry, None)
+    if old_entry is None or old_entry != expected or old_entry["kind"] != "topics":
+        return None
+    bindings = old_payload.get("cases")
+    workspace = sanitize_topic_workspace(view.get("topic_workspace"))
+    if not isinstance(bindings, list) or not workspace:
+        return None
+    current = workspace["comparison"]["current"]
+    if not current or (current["start"], current["end"]) != (old_entry["start"], old_entry["end"]):
+        return None
+    old_workspace = old_payload.get("topic_workspace")
+    if isinstance(old_workspace, dict) and old_workspace.get("topic_id") != workspace["topic_id"]:
+        return None
+    candidates = view.get("cases")
+    candidates = candidates if isinstance(candidates, list) else []
+    details = {(item["qa_id"], _pinned_anchor(item.get("anchor_id"))): item.get("topic_evidence")
+               for item in candidates[:_MAX_CASES]
+               if isinstance(item, dict) and type(item.get("qa_id")) is int}
+    updated = []
+    for binding in bindings:
+        if not isinstance(binding, dict) or type(binding.get("qa")) is not int or not isinstance(binding.get("anchor"), str):
+            return None
+        qa_id, anchor = binding["qa"], binding["anchor"]
+        detail = details.get((qa_id, anchor))
+        if detail is not None and (evidence := _case(cfg, qa_id, anchor, full=True)):
+            if secrets.compare_digest(evidence[0], str(binding.get("fingerprint", ""))):
+                safe_detail = sanitize_topic_evidence(detail, evidence[3])
+                if safe_detail:
+                    binding = {**binding, "topic_evidence": safe_detail}
+        updated.append(binding)
+    return {**old_payload, "topic_workspace": _workspace_for_bindings(workspace, updated), "cases": updated}
 
 
 def _save(cfg: Settings, value: dict, replace_token: str = "") -> str:
@@ -454,16 +520,30 @@ def resolve_payload(cfg: Settings, token: str) -> dict | None:
             total = value.get("total_cases", len(bindings))
             if type(total) is not int or total < len(bindings):
                 return None
-        cases = [case for binding in bindings[:_MAX_CASES]
-                 if (case := _render_case(cfg, binding, full=value["v"] == 2)) is not None]
-        return {"entry": entry, "cases": cases, "total_cases": total}
+        cases, case_details, case_keys = [], [], []
+        for binding in bindings[:_MAX_CASES]:
+            case = _render_case(cfg, binding, full=value["v"] == 2)
+            if case is None:
+                continue
+            cases.append(case)
+            if entry["kind"] == "topics":
+                for index, message in enumerate(case["messages"]):
+                    message["id"] = f"guest-message-{index}"
+                    message["text"] = _clean_projection(message["text"])
+                case_details.append(binding.get("topic_evidence"))
+                case_keys.append((binding["qa"], binding["anchor"]))
+        payload = {"entry": entry, "cases": cases, "total_cases": total}
+        if entry["kind"] == "topics":
+            payload["topic_detail"] = guest_topic.resolve(entry, cases, total, value.get("topic_workspace"),
+                                                         case_details, case_keys, _clean_projection)
+        return payload
     except (sqlite3.Error, OSError, ValueError, RecursionError):
         return None
 
 
 def render_payload(payload: dict) -> bytes:
     """Render the scoped projection without a second registry read."""
-    return guest_evidence_view.render_page(**payload)
+    return guest_evidence_view.render_page(payload["entry"], payload["cases"], total_cases=payload["total_cases"])
 
 
 def resolve(cfg: Settings, token: str) -> bytes | None:

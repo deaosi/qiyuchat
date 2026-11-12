@@ -3,9 +3,8 @@ import { Badge } from '@/components/ui/badge'
 
 type DetailMetric = { label: string; value: ReactNode }
 
-export function TopicSummary({ title, titleAs: Title = 'h3', badge, description, metrics, metadata, action }: {
+export function TopicSummary({ title, badge, description, metrics, metadata, action }: {
   title: string
-  titleAs?: 'h1' | 'h3'
   badge?: string
   description?: string
   metrics: DetailMetric[]
@@ -16,7 +15,7 @@ export function TopicSummary({ title, titleAs: Title = 'h3', badge, description,
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
-          <Title className="text-lg font-semibold tracking-tight [overflow-wrap:anywhere]">{title}</Title>
+          <h3 className="text-lg font-semibold tracking-tight [overflow-wrap:anywhere]">{title}</h3>
           {badge && <Badge variant="outline">{badge}</Badge>}
         </div>
         {description && <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{description}</p>}

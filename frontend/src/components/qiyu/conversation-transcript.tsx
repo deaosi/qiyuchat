@@ -1,6 +1,7 @@
 import type { ComponentProps, ReactNode } from 'react'
 import { MessagesSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
 const messageLayout = {
   left: { row: 'justify-start', group: 'items-start', bubble: 'rounded-tl-sm border-border/80 bg-background' },
@@ -51,4 +52,21 @@ export function ConversationSection({ children, title = '聊天记录', count }:
     </h3>
     {children}
   </section>
+}
+
+export function ConversationSheet({ open, onOpenChange, onCloseAutoFocus, children }: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCloseAutoFocus?: (event: Event) => void
+  children: ReactNode
+}) {
+  return <Sheet open={open} onOpenChange={onOpenChange}>
+    <SheetContent onCloseAutoFocus={onCloseAutoFocus} className="w-full gap-0 sm:max-w-[560px] data-[state=open]:duration-250 data-[state=closed]:duration-200">
+      <SheetHeader className="shrink-0 border-b p-6 pr-12">
+        <SheetTitle className="text-lg">问答与相关会话上下文</SheetTitle>
+        <SheetDescription>查看与当前客户相关的会话片段，核对原话、客服回复与咨询背景。</SheetDescription>
+      </SheetHeader>
+      {children}
+    </SheetContent>
+  </Sheet>
 }

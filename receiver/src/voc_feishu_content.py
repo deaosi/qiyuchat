@@ -127,6 +127,47 @@ def _quotes(refs: list) -> list[object]:
     return [ref.get("quote") for ref in refs if isinstance(ref, dict)]
 
 
+def _workbench_evidence(row: dict, facts: dict) -> dict:
+    data, source = row["data"], row["source"]
+    domain = data.get("domain", {})
+    diagnosis = domain.get("diagnosis", {})
+
+    verified = source.get("_staff_verified") is True
+
+    def role_bound(ref):
+        return {**ref, "role": "unknown"} if ref and ref["source"] == "answer" and not verified else ref
+
+    def exact(ref):
+        return role_bound(voc_topic_insights._exact_ref(row, ref))
+
+    def exact_list(refs):
+        return [checked for ref in refs if (checked := exact(ref))]
+
+    claims = []
+    answer = source.get("answer", "")
+    for claim in data.get("claims", []):
+        start, end, quote = claim.get("start"), claim.get("end"), claim.get("quote")
+        if type(start) is int and type(end) is int and 0 <= start < end <= len(answer) and answer[start:end] == quote:
+            claims.append(quote)
+    return {
+        "domain": {
+            "primary_intent": domain.get("primary_intent"), "fragment_role": domain.get("fragment_role"),
+            **{key: exact_list(domain.get(key, []))
+               for key in ("platforms", "modules", "reproduction_context", "prerequisites", "operation_path")},
+            **{key: exact(domain.get(key)) for key in ("merchant_goal", "expected", "actual")},
+            "diagnosis": {"status": diagnosis.get("status"), "cause": exact(diagnosis.get("cause")),
+                          "evidence": exact_list(diagnosis.get("evidence", []))},
+            "actions": [{"instruction": exact(action.get("instruction")), "effect_status": action.get("effect_status"),
+                         "verification": exact(action.get("verification"))} for action in domain.get("actions", [])],
+        },
+        "workbench": {key: [role_bound(ref) for ref in facts[key]]
+                      for key in ("commerce_settings", "scenario_conditions", "actual")}
+                     | {"suspected_report_ready": facts["suspected_report_ready"]},
+        "claims": claims,
+        "staff_source_verified": verified,
+    }
+
+
 def _case_projection(row: dict, names: re.Pattern[str] | None) -> dict:
     source, data = row["source"], row["data"]
     domain = data.get("domain", {})
@@ -169,10 +210,12 @@ def _case_projection(row: dict, names: re.Pattern[str] | None) -> dict:
                   and reply[claim["start"]:claim["end"]] == claim.get("quote")]
         if claims:
             sections.append(_section("客服原话" if verified else "回复原话 · 来源未核验", claims, names))
+    detail = guest_evidence.sanitize_topic_evidence(_workbench_evidence(row, facts), names)
     return {"qa_id": source["qa_id"], "anchor_id": facts.get("question_message_id", ""),
             "title": _public_text(data["question_span"].get("quote"), names) or "会话依据",
             "category": label, "time": _public_text(source.get("asked_at_text"), names),
-            "sections": [section for section in sections if section["lines"]]}
+            "sections": [section for section in sections if section["lines"]],
+            "topic_evidence": detail}
 
 
 def _topic_guest_view(topic: dict, rows: list[dict], comparison: dict, names: re.Pattern[str] | None) -> dict:
@@ -215,9 +258,58 @@ def _topic_guest_view(topic: dict, rows: list[dict], comparison: dict, names: re
     for row in candidates:
         by_consultation.setdefault(voc_variants.consultation_key(row), row)
     cases = [_case_projection(row, names) for row in list(by_consultation.values())[:_CASE_LIMIT]]
+    workspace = guest_evidence.sanitize_topic_workspace(
+        {"topic_id": topic.get("id"), "topic": topic, "comparison": comparison, "gaps": gaps}, names)
     return {"taxonomy": _topic_taxonomy(topic, rows, names), "metrics": metrics,
             "sections": [section for section in sections if section["lines"]],
-            "cases": cases, "total_cases": len(by_consultation)}
+            "cases": cases, "total_cases": len(by_consultation), "topic_workspace": workspace}
+
+
+def _attach_guest_knowledge(cfg: Settings, ranked: dict, views: dict, names: re.Pattern[str] | None) -> None:
+    store = voc_engine.path(cfg)
+    if not store.is_file() or not any(view["cases"] for view in views.values()):
+        return
+    with voc_assets.connection(store) as db:
+        if "v2_asset" not in voc_engine._tables(db) or not db.execute("SELECT 1 FROM v2_asset LIMIT 1").fetchone():
+            return
+    current = voc_engine._sources(cfg, {})
+    all_events = voc_engine._events(cfg, {}, _current=current)
+    for topic_id, view in views.items():
+        workspace = view["topic_workspace"]
+        if not workspace or not view["cases"]:
+            continue
+        keys = {case["qa_id"]: case["anchor_id"] for case in view["cases"]}
+        rows = [row for row in ranked.get("guest_rows", {}).get(topic_id, [])
+                if row["source"]["qa_id"] in keys
+                and voc_topic_insights.case_details(row).get("question_message_id", "") == keys[row["source"]["qa_id"]]]
+        original = voc_engine._original_topic_events(rows, all_events)
+        original = [row for row in original if row["source"]["qa_id"] in keys]
+        if not original:
+            continue
+        candidates = voc_engine._topic_knowledge_assets(cfg, current, all_events, original)
+        items = voc_engine._knowledge_for_events(cfg, candidates, original, all_events)
+        permitted = {(row["id"], row["source"]["qa_id"]) for row in original}
+        projected = []
+        for item in items:
+            citations = item["evidence"]
+            if not citations or any((ref.get("event_id"), ref.get("qa_id")) not in permitted
+                                    or ref.get("staff_source_verified") is not True for ref in citations):
+                continue
+            reuse = item["knowledge_reuse"]
+            level = reuse["level"] if reuse["level"] in ("verified", "guidance") else voc_topic_insights.reuse_level(item)
+            used = list(dict.fromkeys(ref["qa_id"] for ref in citations))
+            feedback = reuse.get("evidence", []) if level == "verified" else []
+            if any(ref.get("role") != "merchant" or ref.get("qa_id") not in used for ref in feedback):
+                continue
+            projected.append({
+                "keys": [[qa, guest_evidence._pinned_anchor(keys[qa])] for qa in used],
+                "level": level, "kind": item.get("kind"),
+                "question": item.get("question"), "answer": item.get("answer"), "scope": item.get("scope"),
+                "steps": item.get("steps"), "applicability": item.get("applicability"),
+                "feedback": [{"qa": ref["qa_id"], "quote": ref["quote"]} for ref in feedback],
+            })
+        workspace["knowledge"] = projected
+        view["topic_workspace"] = guest_evidence.sanitize_topic_workspace(workspace, names)
 
 
 def topic_guest_views(cfg: Settings, pinned_scope: dict, topic_ids: set[str]) -> dict[str, dict]:
@@ -228,9 +320,11 @@ def topic_guest_views(cfg: Settings, pinned_scope: dict, topic_ids: set[str]) ->
     scope = _pinned_scope(pinned_scope)
     names = _private_names(cfg, scope)
     ranked = voc_engine.feishu_topics(cfg, scope, topic_ids=selected)
-    return {topic["id"]: _topic_guest_view(ranked["guest_topics"].get(topic["id"], topic),
-                                          ranked["guest_rows"].get(topic["id"], []), ranked["comparison"], names)
-            for topic in ranked["items"] if topic["id"] in selected}
+    views = {topic["id"]: _topic_guest_view(ranked["guest_topics"].get(topic["id"], topic),
+                                           ranked["guest_rows"].get(topic["id"], []), ranked["comparison"], names)
+             for topic in ranked["items"] if topic["id"] in selected}
+    _attach_guest_knowledge(cfg, ranked, views, names)
+    return views
 
 
 def _sop_guest_view(item: dict, topic: dict, category: str, names: re.Pattern[str] | None,
@@ -297,6 +391,7 @@ def _topic_records(cfg: Settings, scope: dict, names: re.Pattern[str] | None) ->
                                                       ranked.get("guest_rows", {}).get(key, []),
                                                       ranked["comparison"], names)
         records.append(record)
+    _attach_guest_knowledge(cfg, ranked, {row["key"]: row["_guest_view"] for row in records[:_LIMIT]}, names)
     return records, coverage_text
 
 

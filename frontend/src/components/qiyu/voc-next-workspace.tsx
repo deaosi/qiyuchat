@@ -3,7 +3,7 @@ import { ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, CircleAlert, Copy, L
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
-import { apiPost, type ApiFilters, type VocConversationVerification, type VocIssuePilot, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
+import { apiPost, normalizePair, type ApiFilters, type VocConversationVerification, type VocIssuePilot, type VocKnowledgeKind, type VocKnowledgeReuse } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,11 +11,11 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { Sheet, SheetContent } from '@/components/ui/sheet'
 import { Progress } from '@/components/ui/progress'
 import { LoadingMark, LoadingState, LoadingValue } from './loading-state'
-import { diagnosisLabels, displayTime, intentLabels, KnowledgeContent, knowledgeReuseLevel } from './voc-topic-evidence'
-import { copyKnowledge, TopicWorkbench, TrendComparison, trendBadgeText, trendLabels, type TrendComparisonData, type TrendFilter, type TopicTrend } from './voc-topic-detail'
+import { diagnosisLabels, displayTime, intentLabels, KnowledgeContent, knowledgeReuseLevel, type OpenTopicEvidence } from './voc-topic-evidence'
+import { copyKnowledge, TopicDetailPanel, TopicWorkbench, TrendComparison, trendBadgeText, trendLabels, type TrendComparisonData, type TrendFilter, type TopicTrend } from './voc-topic-detail'
 import { VocIssuePilotResults } from './voc-pilot-workspaces'
 
 export type PrimaryIntent = 'configuration_guidance' | 'functional_anomaly' | 'unclear'
@@ -207,15 +207,14 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
       if (initialTopic) onCloseLinkedTopic?.()
     }}>
       <SheetContent className="w-full gap-0 sm:max-w-3xl xl:max-w-4xl">
-        <SheetHeader className="shrink-0 border-b px-4 sm:px-6"><SheetTitle>问题与原句依据</SheetTitle><SheetDescription className="sr-only">查看问题的处理判断、办法和会话依据。</SheetDescription></SheetHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <TopicDetailPanel>
           <QueryPanel hasData={detail.data !== null} loading={detail.loading} error={detail.error} retry={detail.retry}>{detail.data &&
-            <TopicWorkbench key={detail.data.topic.id} detail={detail.data} onOpenPair={onOpenPair} onAskTopic={() => {
+            <TopicWorkbench key={detail.data.topic.id} detail={detail.data} onOpenEvidence={(item, messageId) => onOpenPair(normalizePair(item), messageId)} onAskTopic={() => {
               const focusTopic = detail.data?.topic.id
               if (focusTopic) onOpenChat({ ...resultFilters, focus_topic: focusTopic })
             }} />
           }</QueryPanel>
-        </div>
+        </TopicDetailPanel>
       </SheetContent>
     </Sheet>
     <Dialog open={runOpen} onOpenChange={setRunOpen}>
@@ -229,6 +228,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
 }
 
 export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: WorkspaceProps) {
+  const onOpenEvidence: OpenTopicEvidence = (item, messageId) => onOpenPair(normalizePair(item), messageId)
   const levels = [
     { value: 'all', label: '全部' },
     { value: 'verified', label: '效果已验证' },
@@ -257,7 +257,7 @@ export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: W
   const reusableItems = matches.filter(item => knowledgeReuseLevel(item) !== 'reference')
   const referenceItems = matches.filter(item => item.knowledge_reuse?.level === 'reference')
   const referenceCards = <div className="mt-4 grid gap-4 lg:grid-cols-2">{referenceItems.map(item =>
-    <article key={item.id} className="min-w-0 rounded-lg border p-4"><KnowledgeContent item={item} onOpenPair={onOpenPair} /></article>
+    <article key={item.id} className="min-w-0 rounded-lg border p-4"><KnowledgeContent item={item} onOpenEvidence={onOpenEvidence} /></article>
   )}</div>
 
   return <Card>
@@ -286,7 +286,7 @@ export function VocKnowledgeWorkspace({ filters, refreshKey = 0, onOpenPair }: W
         {reusableItems.length ? <div className="grid gap-4 lg:grid-cols-2">{reusableItems.map(item =>
           <article key={item.id} className="min-w-0 space-y-3 rounded-lg border p-4">
             <div className="flex justify-end"><Button variant="outline" size="sm" onClick={() => copyKnowledge(item)}><Copy />{knowledgeReuseLevel(item) === 'guidance' ? '复制指引' : '复制处理办法'}</Button></div>
-            <KnowledgeContent item={item} onOpenPair={onOpenPair} />
+            <KnowledgeContent item={item} onOpenEvidence={onOpenEvidence} />
           </article>
         )}</div> : !filtered && <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground">
           <BookOpen aria-hidden="true" className="mb-1 size-5" />

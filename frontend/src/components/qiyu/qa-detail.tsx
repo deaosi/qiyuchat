@@ -7,9 +7,8 @@ import { customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { ConversationImage } from './conversation-image'
-import { ConversationBubble, ConversationSection, ConversationTranscript } from './conversation-transcript'
+import { ConversationBubble, ConversationSection, ConversationSheet, ConversationTranscript } from './conversation-transcript'
 
 export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean; anchorMessageId?: string; onCloseAutoFocus?: (event: Event) => void }
 
@@ -266,15 +265,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
         </div>
 
   if (embedded) return content
-  return (
-    <Sheet open={Boolean(pair)} onOpenChange={open => { if (!open) onClose() }}>
-      <SheetContent onCloseAutoFocus={onCloseAutoFocus} className="w-full gap-0 sm:max-w-[560px] data-[state=open]:duration-250 data-[state=closed]:duration-200">
-        <SheetHeader className="shrink-0 border-b p-6 pr-12">
-          <SheetTitle className="text-lg">问答与相关会话上下文</SheetTitle>
-          <SheetDescription>查看与当前客户相关的会话片段，核对原话、客服回复与咨询背景。</SheetDescription>
-        </SheetHeader>
-        {content}
-      </SheetContent>
-    </Sheet>
-  )
+  return <ConversationSheet open={Boolean(pair)} onOpenChange={open => { if (!open) onClose() }} onCloseAutoFocus={onCloseAutoFocus}>
+    {content}
+  </ConversationSheet>
 }

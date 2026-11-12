@@ -138,14 +138,17 @@ class TestGuestEvidence(LocalFixture):
         self.assertEqual(guest.upgrade_url(self.cfg, token, entry={**self.entry, "title": "另一个成果"}, view=view), "")
         self.assertEqual(self._token(guest.upgrade_url(self.cfg, token, entry=self.entry, view=view)), token)
         payload = guest.resolve_payload(self.cfg, token)
-        self.assertEqual(set(payload), {"entry", "cases", "total_cases"})
+        self.assertEqual(set(payload), {"entry", "cases", "total_cases", "topic_detail"})
         self.assertEqual(payload["total_cases"], 1)
         case, = payload["cases"]
         self.assertEqual(set(case), {"title", "category", "time", "sections", "messages", "scope"})
         self.assertEqual(case["scope"], "context")
         question, = [message for message in case["messages"] if message.get("anchor")]
         self.assertEqual(question, {"role": "user", "time": "2026-11-12 10:00:04",
-                                    "text": "这一条如何处理？", "anchor": True})
+                                    "text": "这一条如何处理？", "anchor": True, "id": "guest-message-1"})
+        event, = payload["topic_detail"]["events"]
+        self.assertEqual(event["id"], "guest-case-0")
+        self.assertEqual(event["workbench"]["question_message_id"], question["id"])
         projection = json.dumps(payload, ensure_ascii=False)
         for private in (token, self.customer, self.visitor, self.source, "own-question", "own-answer"):
             self.assertNotIn(private, projection)
@@ -158,6 +161,68 @@ class TestGuestEvidence(LocalFixture):
         self.assertNotIn("另一位访客的私人回复", page)
         self.assertNotIn("href=", page)
         self.assertNotIn(token, page)
+
+    def test_workspace_upgrade_only_enriches_existing_bound_cases(self):
+        qa = self._seed_case(controlled=True)
+        url = guest.issue_url(self.cfg, qa, "own-question", entry=self.entry)
+        token = self._token(url)
+        registry = guest._registry(self.cfg)
+        with closing(guest.sqlite3.connect(registry)) as db, db:
+            saved = db.execute("SELECT payload FROM guest_evidence WHERE token=?", (token,)).fetchone()[0]
+            old = json.loads(saved)
+            period = {"start": self.entry["start"], "end": self.entry["end"], "source_pairs": 9, "processed_pairs": 8}
+            previous = {"start": "2026-10-30", "end": "2026-11-05", "source_pairs": 9, "processed_pairs": 6}
+            fact = {"source": "question", "role": "merchant", "quote": "这一条如何处理？", "alignment": "exact",
+                    "source_refs": [{"message_id": "own-question"}]}
+            topic_id = "t_" + "1" * 24
+            proof = {"keys": [[qa, guest._pinned_anchor("own-question")]], "level": "history",
+                     "kind": "configuration_guide", "question": "操作确认", "answer": "请看", "scope": fact["quote"],
+                     "steps": ["请看"], "applicability": [fact]}
+            view = {
+                "topic_workspace": {
+                    "topic_id": topic_id,
+                    "topic": {"question": self.entry["title"], "theme": f"已发布主题 {topic_id}", "consultation_count": 6,
+                              "trend": {"status": "rising", "previous_consultation_count": 3, "delta": 3}},
+                    "comparison": {"current": period, "previous": previous, "comparable": True,
+                                   "episode": {"consultations": 3, "sessions": 2}},
+                    "knowledge": [proof, {**proof, "question": "无依据不得公开", "answer": "其他范围的回复"},
+                                  {**proof, "question": "未授权案例不得公开", "keys": [[qa + 1, ""]]}],
+                },
+                "cases": [
+                    {"qa_id": qa, "anchor_id": "own-question",
+                     "topic_evidence": {"workbench": {"commerce_settings": [fact, {**fact, "alignment": "unverified",
+                                                                                    "quote": "未经校验不得呈现"},
+                                                                            {**fact, "quote": "其他案例不得呈现"}]}}},
+                    {"qa_id": qa + 1, "anchor_id": "unpublished", "topic_evidence": {"claims": ["不可公开的条目"]}},
+                ],
+            }
+            self.assertIsNone(guest.build_topic_workspace_upgrade(self.cfg, old, entry={**self.entry, "title": "其他主题"}, view=view))
+            upgraded = guest.build_topic_workspace_upgrade(self.cfg, old, entry=self.entry, view=view)
+            self.assertEqual(upgraded["entry"], old["entry"])
+            only_case, = upgraded["cases"]
+            self.assertEqual({key: value for key, value in only_case.items() if key != "topic_evidence"}, old["cases"][0])
+            db.execute("UPDATE guest_evidence SET payload=? WHERE token=?", (json.dumps(upgraded), token))
+        payload = guest.resolve_payload(self.cfg, token)
+        detail = payload["topic_detail"]
+        self.assertEqual(detail["topic"]["trend"]["delta"], 3)
+        self.assertEqual(detail["workbench"]["comparison"]["previous"], previous)
+        self.assertEqual(detail["workbench"]["comparison"]["episode"], {"consultations": 3, "sessions": 2})
+        event, = detail["events"]
+        ref, = event["workbench"]["commerce_settings"]
+        self.assertEqual(ref["source_refs"][0]["message_id"], "guest-message-1")
+        knowledge, = detail["workbench"]["knowledge"]
+        self.assertEqual(knowledge["reuse_level"], "history")
+        self.assertEqual(knowledge["evidence"][0]["id"], event["id"])
+        serialized = json.dumps(payload, ensure_ascii=False)
+        for private in ("own-question", topic_id, "不可公开的条目", "未经校验不得呈现", "其他案例不得呈现",
+                        "无依据不得公开", "未授权案例不得公开"):
+            self.assertNotIn(private, serialized)
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("UPDATE qa_pair SET answer=? WHERE qa_id=?", ("改变来源证据", qa))
+        stale = guest.resolve_payload(self.cfg, token)
+        self.assertEqual(stale["cases"], [])
+        self.assertEqual(stale["topic_detail"]["events"], [])
+        self.assertEqual(stale["topic_detail"]["workbench"]["knowledge"], [])
 
     def test_legacy_only_shows_exact_pair_and_archived_source_is_unavailable(self):
         qa = self._seed_case(controlled=False)

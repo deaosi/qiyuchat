@@ -6,11 +6,14 @@ import { Card } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { ConversationBubble, ConversationSection, ConversationTranscript } from './conversation-transcript'
-import { DecisionCaseCard, DecisionCaseSection, EvidenceCaseCard, SopDetailHeader, SopDetailSection, SopTimeline, SopTimelineStep, TopicSummary } from './voc-detail-display'
+import { ConversationBubble, ConversationSection, ConversationSheet, ConversationTranscript } from './conversation-transcript'
+import { DecisionCaseCard, DecisionCaseSection, EvidenceCaseCard, SopDetailHeader, SopDetailSection, SopTimeline, SopTimelineStep } from './voc-detail-display'
+import type { TopicDetail } from './voc-next-workspace'
+import { TopicDetailPanel, TopicWorkbench } from './voc-topic-detail'
+import type { OpenTopicEvidence } from './voc-topic-evidence'
 
 type GuestSection = { title: string; lines: string[] }
-type GuestMessage = { role: string; time: string; text: string; anchor?: boolean }
+type GuestMessage = { role: string; time: string; text: string; anchor?: boolean; id?: string }
 type GuestCase = {
   title: string
   category: string
@@ -27,10 +30,9 @@ type GuestEntry = {
   start: string
   end: string
   taxonomy?: { primary: string; secondary: string; count?: number }[]
-  metrics?: { label: string; value: string | number }[]
   sections?: GuestSection[]
 }
-export type GuestPayload = { entry: GuestEntry; cases: GuestCase[]; total_cases: number }
+export type GuestPayload = { entry: GuestEntry; cases: GuestCase[]; total_cases: number; topic_detail?: TopicDetail }
 type GuestDetailProps = GuestPayload & { period: string; onOpen: (index: number, locate?: boolean) => void }
 
 const facts = new Set(['电商后台设置', '知汇鸽场景条件', '实际触发结果'])
@@ -90,10 +92,8 @@ function Taxonomy({ rows }: { rows: NonNullable<GuestEntry['taxonomy']> }) {
   </section>
 }
 
-function GuestDecisionCase({ item, question, open }: { item: GuestCase; question?: string; open?: () => void }) {
+function GuestDecisionCase({ item }: { item: GuestCase }) {
   return <DecisionCaseCard diagnosis={item.category} metadata={item.time}
-    question={question}
-    action={open && <Button variant="outline" size="sm" onClick={open}>查看会话上下文<ArrowUpRight /></Button>}
     facts={item.sections.filter(section => facts.has(section.title)).map(section => ({
       label: section.title, content: <GuestQuotes lines={section.lines} compact={section.lines.every(line => line.startsWith('待补查'))} />,
     }))}>
@@ -102,51 +102,23 @@ function GuestDecisionCase({ item, question, open }: { item: GuestCase; question
   </DecisionCaseCard>
 }
 
-function GuestCases({ cases, total, first, onOpen }: {
+function GuestCases({ cases, total, onOpen }: {
   cases: GuestCase[]
   total: number
-  first: number
   onOpen: (index: number) => void
 }) {
-  if (first && cases.length <= first) return null
   return <section className="space-y-3" aria-labelledby="guest-cases">
     <div className="flex items-center justify-between gap-3">
-      <h2 id="guest-cases" className="font-medium">{first ? '其他会话依据' : '示例案例'}</h2>
+      <h2 id="guest-cases" className="font-medium">示例案例</h2>
       {cases.length > 0 && <span className="text-xs tabular-nums text-muted-foreground">
-        {total > cases.length ? `可查看 ${count(cases.length)} / ${count(total)} 条` : `${count(cases.length - first)} 条`}
+        {total > cases.length ? `可查看 ${count(cases.length)} / ${count(total)} 条` : `${count(cases.length)} 条`}
       </span>}
     </div>
-    {cases.length ? cases.slice(first).map((item, index) => {
-      const caseIndex = index + first
-      return <EvidenceCaseCard key={caseIndex} label={item.category} time={item.time} question={item.title || `会话 ${caseIndex + 1}`}
-        footer={<Button className="ml-auto" variant="outline" size="sm" onClick={() => onOpen(caseIndex)}>查看详情<ArrowUpRight /></Button>} />
-    }) : <p className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">当前条目暂无可公开查看的会话上下文。</p>}
+    {cases.length ? cases.map((item, index) =>
+      <EvidenceCaseCard key={index} label={item.category} time={item.time} question={item.title || `会话 ${index + 1}`}
+        footer={<Button className="ml-auto" variant="outline" size="sm" onClick={() => onOpen(index)}>查看详情<ArrowUpRight /></Button>} />
+    ) : <p className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">当前条目暂无可公开查看的会话上下文。</p>}
   </section>
-}
-
-function GuestTopic({ entry, cases, total_cases: total, period, onOpen }: GuestDetailProps) {
-  const representative = cases[0]
-  return <div className="space-y-6 p-4 sm:p-6">
-    <TopicSummary title={entry.title} titleAs="h1" description={entry.metrics?.length ? undefined : entry.summary}
-      metrics={(entry.metrics ?? []).map(metric => ({
-        label: metric.label,
-        value: typeof metric.value === 'number' || /^\d+$/.test(metric.value)
-          ? `${count(Number(metric.value))}${metric.label === '咨询次数' ? ' 次' : metric.label === '独立会话' ? ' 个' : metric.label === '可识别商家' ? ' 家' : ''}`
-          : metric.value,
-      }))} metadata={period} />
-    {!!entry.taxonomy?.length && <Taxonomy rows={entry.taxonomy} />}
-    {sectionsOf(entry).map(section => <SopDetailSection key={section.title} title={section.title} layout={sopLayouts.get(section.title)}>
-      <GuestQuotes lines={section.lines} compact={section.title === '待补证据'} />
-    </SopDetailSection>)}
-    {representative && <section className="space-y-3" aria-label="代表案例">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-medium">处理判断 · 代表案例</h2>
-        {total > cases.length && cases.length === 1 && <span className="text-xs tabular-nums text-muted-foreground">可查看 1 / {count(total)} 条</span>}
-      </div>
-      <GuestDecisionCase item={representative} question={representative.title || '会话 1'} open={() => onOpen(0)} />
-    </section>}
-    <GuestCases cases={cases} total={total} first={representative ? 1 : 0} onOpen={onOpen} />
-  </div>
 }
 
 function GuestSopSteps({ lines }: { lines: string[] }) {
@@ -189,7 +161,7 @@ function GuestSop({ entry, cases, total_cases: total, period, onOpen }: GuestDet
             : <GuestQuotes lines={section.lines} compact={section.title === '待补证据'} />}
         </SopDetailSection>
       })}
-      <GuestCases cases={cases} total={total} first={0} onOpen={onOpen} />
+      <GuestCases cases={cases} total={total} onOpen={onOpen} />
     </div>
   </>
 }
@@ -202,7 +174,7 @@ const chatRoles = {
   system: { side: 'center', label: '系统' },
 } as const
 
-function GuestTranscript({ item, locate }: { item: GuestCase; locate: boolean }) {
+function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boolean | string; title?: string }) {
   const transcript = useRef<HTMLOListElement>(null)
   useEffect(() => {
     if (!locate) return
@@ -215,14 +187,15 @@ function GuestTranscript({ item, locate }: { item: GuestCase; locate: boolean })
   const note = item.scope === 'pair' ? '以下为该条目关联的脱敏问答。'
     : item.scope === 'limited' ? '会话较长，当前展示与本次咨询相关的片段。'
       : '已脱敏 · 北京时间'
-  return <ConversationSection count={item.messages.length}>
+  return <ConversationSection title={title} count={item.messages.length}>
     {item.messages.length ? <>
       <p className="mb-4 text-sm leading-6 text-muted-foreground">{note}</p>
       <ConversationTranscript ref={transcript}>
         {item.messages.map((message, index) => {
           const role = Object.hasOwn(chatRoles, message.role)
             ? chatRoles[message.role as keyof typeof chatRoles] : { side: 'center', label: '消息' } as const
-          return <ConversationBubble key={index} side={role.side} sender={role.label} time={message.time} question={message.anchor} anchored={message.anchor}>
+          const anchored = typeof locate === 'string' ? message.id === locate : message.anchor
+          return <ConversationBubble key={index} side={role.side} sender={role.label} time={message.time} question={message.anchor} anchored={anchored}>
             <p>{message.text}</p>
           </ConversationBubble>
         })}
@@ -231,50 +204,75 @@ function GuestTranscript({ item, locate }: { item: GuestCase; locate: boolean })
   </ConversationSection>
 }
 
-export function VocGuestPage({ entry, cases, total_cases }: GuestPayload) {
-  const [selection, setSelection] = useState<{ index: number; open: boolean; locate: boolean } | null>(null)
+export function VocGuestPage({ entry, cases, total_cases, topic_detail }: GuestPayload) {
+  const [selection, setSelection] = useState<{ index: number; open: boolean; locate: boolean | string } | null>(null)
   const trigger = useRef<HTMLElement | null>(null)
   const item = selection && cases[selection.index]
   const caseTime = item?.time || item?.messages.find(message => message.anchor)?.time
   const isSop = entry.kind === 'sops'
-  const typeLabel = isSop ? '处理 SOP' : 'VOC高频问题'
   const period = entry.start && entry.end
     ? `统计区间 ${entry.start === entry.end ? entry.start : `${entry.start} 至 ${entry.end}`}` : ''
-  const open = (index: number, locate = false) => {
+  const open = (index: number, locate: boolean | string = false) => {
     trigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setSelection({ index, open: true, locate })
   }
-  const detailProps = { entry, cases, total_cases, period, onOpen: open }
+  const openTopicEvidence: OpenTopicEvidence = (evidence, messageId) => {
+    const match = /^guest-case-(\d+)$/.exec(evidence.id)
+    if (!match) return
+    const index = Number(match[1])
+    if (cases[index]) open(index, messageId)
+  }
+  const sheetProps = {
+    open: selection?.open === true,
+    onOpenChange: (next: boolean) => setSelection(current => current && { ...current, open: next }),
+    onCloseAutoFocus: (event: Event) => { event.preventDefault(); trigger.current?.focus() },
+  }
+  const conversation = item && selection && <>
+    {(item.category || caseTime) && <div className="flex flex-wrap items-center gap-2 border-b pb-4 text-xs text-muted-foreground">
+      {item.category && <Badge variant="secondary" className="font-normal">{item.category}</Badge>}
+      {caseTime && <time className="tabular-nums">{caseTime}</time>}
+    </div>}
+    <GuestTranscript item={item} locate={selection.locate} title={isSop ? undefined : '相关会话上下文'} />
+  </>
+
+  if (!isSop) return <div className="min-h-screen bg-muted/30">
+    <main className="mx-auto flex min-h-screen w-full flex-col bg-background sm:max-w-3xl xl:max-w-4xl">
+      <TopicDetailPanel standalone>
+        {topic_detail ? <TopicWorkbench detail={topic_detail} onOpenEvidence={openTopicEvidence} readOnly />
+          : <p className="py-8 text-center text-sm text-muted-foreground">当前链接暂无可展示的主题详情。</p>}
+      </TopicDetailPanel>
+    </main>
+    <ConversationSheet {...sheetProps}>
+      {conversation && <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pt-6 pb-8 [overflow-wrap:anywhere]">{conversation}</div>}
+    </ConversationSheet>
+  </div>
+
   return <div className="min-h-screen bg-linear-to-b from-muted/50 via-background to-background">
     <header className="border-b bg-background">
       <div className="mx-auto flex min-h-14 max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
         <div className="flex min-w-0 items-center gap-3 text-sm">
           <span className="shrink-0 font-semibold">语海Voc</span>
           <Separator orientation="vertical" className="h-4 self-center" />
-          <span className="truncate text-muted-foreground">{typeLabel}</span>
+          <span className="truncate text-muted-foreground">处理 SOP</span>
         </div>
         <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">访客阅览</Badge>
       </div>
     </header>
     <main className="qiyu-page-enter mx-auto w-full max-w-5xl px-4 pt-5 pb-10 sm:px-6 sm:pt-8 sm:pb-14">
       <Card className="overflow-hidden py-0">
-        {isSop ? <GuestSop {...detailProps} /> : <GuestTopic {...detailProps} />}
+        <GuestSop entry={entry} cases={cases} total_cases={total_cases} period={period} onOpen={open} />
       </Card>
     </main>
-    <Sheet open={selection?.open === true} onOpenChange={next => setSelection(current => current && { ...current, open: next })}>
+    <Sheet open={sheetProps.open} onOpenChange={sheetProps.onOpenChange}>
       <SheetContent className="w-full gap-0 sm:max-w-3xl data-[state=open]:duration-250 data-[state=closed]:duration-200"
-        onCloseAutoFocus={event => { event.preventDefault(); trigger.current?.focus() }}>
+        onCloseAutoFocus={sheetProps.onCloseAutoFocus}>
         <SheetHeader className="shrink-0 border-b px-4 pr-12 sm:px-6">
           <SheetTitle>会话上下文</SheetTitle>
           <SheetDescription>查看本次咨询的脱敏会话记录。</SheetDescription>
         </SheetHeader>
-        {item && selection && <div className="qiyu-page-enter min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6">
-          {(item.category || caseTime) && <div className="flex flex-wrap items-center gap-2 border-b pb-4 text-xs text-muted-foreground">
-              {item.category && <Badge variant="secondary" className="font-normal">{item.category}</Badge>}
-              {caseTime && <time className="tabular-nums">{caseTime}</time>}
-          </div>}
-          <GuestTranscript item={item} locate={selection.locate} />
-          {(isSop || selection.index > 0) && item.sections.length > 0 && <section className="mt-6 space-y-3" aria-label="处理判断">
+        {item && <div className="qiyu-page-enter min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6">
+          {conversation}
+          {item.sections.length > 0 && <section className="mt-6 space-y-3" aria-label="处理判断">
             <h3 className="text-sm font-medium">处理判断</h3>
             <GuestDecisionCase item={item} />
           </section>}

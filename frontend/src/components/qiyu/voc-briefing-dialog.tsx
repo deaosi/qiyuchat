@@ -152,7 +152,8 @@ function BriefingContent({ filters }: { filters: ApiFilters }) {
         <div className="rounded-xl border bg-linear-to-br from-background to-muted/50 p-3.5">
           <p className="text-sm font-medium tabular-nums">{period}</p>
           <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">{[scope.group || '全部客户群', scope.staff || '全部客服'].join(' · ')}</p>
-          {comparison && <p className="mt-1 text-xs tabular-nums text-muted-foreground">已整理 {formatCount(comparison.current.processed_pairs)} / {formatCount(comparison.current.source_pairs)} 条问答</p>}
+          {comparison?.current.processed_pairs !== undefined && comparison.current.source_pairs !== undefined &&
+            <p className="mt-1 text-xs tabular-nums text-muted-foreground">已整理 {formatCount(comparison.current.processed_pairs)} / {formatCount(comparison.current.source_pairs)} 条问答</p>}
         </div>
         {!trendAvailable && <p className="rounded-lg border bg-muted/25 p-3 text-sm leading-6 text-muted-foreground"><span className="font-medium text-foreground">趋势暂不可判断。</span>{trendNote}</p>}
         {sections.map(section => <BriefingEntries key={section.title} section={section} />)}

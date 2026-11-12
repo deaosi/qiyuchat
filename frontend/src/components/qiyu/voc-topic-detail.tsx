@@ -1,17 +1,17 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { ArrowUpRight, Copy, MessagesSquare } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { DecisionCaseCard, DecisionCaseSection, TopicSummary } from './voc-detail-display'
 import { Button } from '@/components/ui/button'
-import { normalizePair } from '@/lib/api'
-import type { Evidence, Knowledge, KnowledgeReuse, OpenEvidencePair, Ref, TopicDetail } from './voc-next-workspace'
-import { diagnosisLabels, displayTime, EvidenceList, KnowledgeContent, knowledgeReuse, knowledgeReuseLevel, messageIdentifier, questionAnchor } from './voc-topic-evidence'
+import { SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import type { Evidence, Knowledge, KnowledgeReuse, Ref, TopicDetail } from './voc-next-workspace'
+import { diagnosisLabels, displayTime, EvidenceList, KnowledgeContent, knowledgeReuse, knowledgeReuseLevel, messageIdentifier, questionAnchor, type OpenTopicEvidence } from './voc-topic-evidence'
 
 export const trendLabels = { all: '全部', new: '新出现', rising: '明显上升', persistent: '持续高频' } as const
 export type TrendFilter = keyof typeof trendLabels
 export type TopicTrend = { status: Exclude<TrendFilter, 'all'> | 'stable' | 'unknown'; previous_consultation_count: number | null; delta: number | null }
-type Period = { start: string; end: string; source_pairs: number; processed_pairs: number }
+type Period = { start: string; end: string; source_pairs?: number; processed_pairs?: number }
 export type TrendComparisonData = { current: Period; previous: Period | null; comparable: boolean; note: string; last_synced_at: string; episode?: { consultations: number; sessions: number } }
 
 const number = (value?: number) => value === undefined ? '—' : value.toLocaleString('zh-CN')
@@ -41,10 +41,15 @@ export function TrendComparison({ comparison, currentConsultations, trend }: { c
   if (comparison.previous) periods.push({ label: '上期', period: comparison.previous, consultations: trend?.previous_consultation_count ?? undefined })
   return <div className="rounded-xl border bg-muted/25 px-3.5 py-3 text-xs leading-5 sm:px-4" aria-label="数据覆盖与对比">
     <dl className="flex flex-wrap gap-x-7 gap-y-2">
-      {periods.map(({ label, period, consultations }) => <div key={label}>
-        <dt className="font-medium">{label} <span className="ml-1 font-normal text-muted-foreground">{periodLabel(period)}</span></dt>
-        <dd className="tabular-nums text-muted-foreground">{consultations !== undefined && `${number(consultations)} 次咨询 · `}已整理 {number(period.processed_pairs)} / {number(period.source_pairs)} 条问答</dd>
-      </div>)}
+      {periods.map(({ label, period, consultations }) => {
+        const coverage = period.processed_pairs !== undefined && period.source_pairs !== undefined
+          ? `已整理 ${number(period.processed_pairs)} / ${number(period.source_pairs)} 条问答` : ''
+        const summary = [consultations !== undefined && `${number(consultations)} 次咨询`, coverage].filter(Boolean).join(' · ')
+        return <div key={label}>
+          <dt className="font-medium">{label} <span className="ml-1 font-normal text-muted-foreground">{periodLabel(period)}</span></dt>
+          <dd className="tabular-nums text-muted-foreground">{summary || '覆盖数据暂无记录'}</dd>
+        </div>
+      })}
       {comparison.episode && comparison.episode.consultations > 0 && <div>
         <dt className="font-medium">会话归并</dt>
         <dd className="tabular-nums text-muted-foreground">{number(comparison.episode.consultations)} 次咨询 · {number(comparison.episode.sessions)} 个会话</dd>
@@ -88,15 +93,16 @@ function refAnchor(item: Evidence, ref: Ref) {
   return ids.length === 1 ? ids[0] : undefined
 }
 
-function FactQuotes({ item, refs, onOpenPair }: { item: Evidence; refs: Ref[]; onOpenPair: OpenEvidencePair }) {
+function FactQuotes({ item, refs, onOpenEvidence }: { item: Evidence; refs: Ref[]; onOpenEvidence: OpenTopicEvidence }) {
   return <ul className="space-y-2">{refs.map(ref => {
     const anchor = refAnchor(item, ref)
-    const source = ref.source === 'question' ? '商家原话' : item.staff_source_verified ? '已核验客服原话' : '回复原话 · 来源未核验'
+    const source = ref.role === 'unknown' ? '会话依据'
+      : ref.source === 'question' ? '商家原话' : item.staff_source_verified ? '已核验客服原话' : '回复原话 · 来源未核验'
     return <li key={`${ref.source}-${ref.start}-${ref.end}`} className="min-w-0 space-y-1">
       <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{ref.quote}</p>
       <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
         <span>{source}</span>
-        {item.qa_id && anchor && <button type="button" className="inline-flex min-h-6 items-center gap-1 text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground focus-visible:outline-2" onClick={() => onOpenPair(normalizePair(item), anchor)}>定位原话<ArrowUpRight aria-hidden="true" className="size-3" /></button>}
+        {item.qa_id && anchor && <button type="button" className="inline-flex min-h-6 items-center gap-1 text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground focus-visible:outline-2" onClick={() => onOpenEvidence(item, anchor)}>定位原话<ArrowUpRight aria-hidden="true" className="size-3" /></button>}
       </div>
     </li>
   })}</ul>
@@ -122,7 +128,7 @@ export function copyKnowledge(item: Knowledge) {
   ].filter(Boolean).join('\n'), '已复制处理办法。')
 }
 
-function DecisionCase({ item, title, onOpenPair }: { item: Evidence; title: string; onOpenPair: OpenEvidencePair }) {
+function DecisionCase({ item, title, onOpenEvidence, readOnly }: { item: Evidence; title: string; onOpenEvidence: OpenTopicEvidence; readOnly: boolean }) {
   const domain = item.domain
   const status = domain?.diagnosis?.status
   const facts = caseFacts(item)
@@ -150,22 +156,22 @@ function DecisionCase({ item, title, onOpenPair }: { item: Evidence; title: stri
     metadata={[item.customer_name || '匿名商家', displayTime(item.asked_at)].filter(Boolean).join(' · ')}
     question={item.question_quote || item.question}
     action={<>
-        {item.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenPair(normalizePair(item), questionAnchor(item))}>查看会话上下文<ArrowUpRight /></Button>}
-        {suspected && <Button variant="outline" size="sm" onClick={copyReport}><Copy />复制疑似异常摘要</Button>}
+        {item.qa_id && <Button variant="outline" size="sm" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>查看会话上下文<ArrowUpRight /></Button>}
+        {suspected && !readOnly && <Button variant="outline" size="sm" onClick={copyReport}><Copy />复制疑似异常摘要</Button>}
     </>}
     facts={facts.map(({ label, refs, missing }) => ({
       label,
-      content: refs.length ? <FactQuotes item={item} refs={refs} onOpenPair={onOpenPair} /> : <p className="text-xs leading-5 text-muted-foreground">{missing}</p>,
+      content: refs.length ? <FactQuotes item={item} refs={refs} onOpenEvidence={onOpenEvidence} /> : <p className="text-xs leading-5 text-muted-foreground">{missing}</p>,
     }))}>
-    {cause.length > 0 && <DecisionCaseSection title="诊断依据"><FactQuotes item={item} refs={cause} onOpenPair={onOpenPair} /></DecisionCaseSection>}
-    {verifiedSteps.length > 0 && <DecisionCaseSection title="客服给出的处理步骤"><FactQuotes item={item} refs={verifiedSteps} onOpenPair={onOpenPair} /></DecisionCaseSection>}
+    {cause.length > 0 && <DecisionCaseSection title="诊断依据"><FactQuotes item={item} refs={cause} onOpenEvidence={onOpenEvidence} /></DecisionCaseSection>}
+    {verifiedSteps.length > 0 && <DecisionCaseSection title="客服给出的处理步骤"><FactQuotes item={item} refs={verifiedSteps} onOpenEvidence={onOpenEvidence} /></DecisionCaseSection>}
     {verifiedSteps.length === 0 && reply.length > 0 && <DecisionCaseSection title={item.staff_source_verified ? '客服原话' : '回复原话 · 来源未核验'}>
       {reply.map(quote => <p key={quote} className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{quote}</p>)}
     </DecisionCaseSection>}
   </DecisionCaseCard>
 }
 
-function TopicKnowledge({ items, onOpenPair }: { items: Knowledge[]; onOpenPair: OpenEvidencePair }) {
+function TopicKnowledge({ items, onOpenEvidence, readOnly }: { items: Knowledge[]; onOpenEvidence: OpenTopicEvidence; readOnly: boolean }) {
   const [showHistory, setShowHistory] = useState(false)
   const evaluated = items.filter(item => item.status === 'ready').map(item => ({ item, level: knowledgeReuse(item) }))
   const direct = evaluated.filter(entry => entry.level === 'direct')
@@ -173,20 +179,41 @@ function TopicKnowledge({ items, onOpenPair }: { items: Knowledge[]; onOpenPair:
   return <section className="space-y-3" aria-label="处理办法">
     <h4 className="font-medium">处理办法</h4>
     {direct.length > 0 ? direct.map(({ item }) => <article key={item.id} className="space-y-3 rounded-xl border bg-muted/15 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2"><Badge>{knowledgeReuseLevel(item) === 'guidance' ? '可用指引' : '可直接复用'}</Badge><Button variant="outline" size="sm" onClick={() => copyKnowledge(item)}><Copy />{knowledgeReuseLevel(item) === 'guidance' ? '复制指引' : '复制处理办法'}</Button></div>
-      <KnowledgeContent item={item} onOpenPair={onOpenPair} />
+      <div className="flex flex-wrap items-center justify-between gap-2"><Badge>{knowledgeReuseLevel(item) === 'guidance' ? '可用指引' : '可直接复用'}</Badge>{!readOnly && <Button variant="outline" size="sm" onClick={() => copyKnowledge(item)}><Copy />{knowledgeReuseLevel(item) === 'guidance' ? '复制指引' : '复制处理办法'}</Button>}</div>
+      <KnowledgeContent item={item} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />
     </article>) : <p className="rounded-lg border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">当前没有证据充分的可复用办法。</p>}
     {history.length > 0 && <>
       <Button variant="outline" size="sm" aria-expanded={showHistory} onClick={() => setShowHistory(value => !value)}>{showHistory ? '收起历史答复' : `查看历史答复与参考步骤（${history.length}）`}</Button>
       {showHistory && history.map(({ item, level }) => <article key={item.id} className="space-y-3 rounded-xl border p-4">
         <Badge variant="outline" className="font-normal">{reuseLabels[level]}</Badge>
-        <KnowledgeContent item={item} onOpenPair={onOpenPair} />
+        <KnowledgeContent item={item} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />
       </article>)}
     </>}
   </section>
 }
 
-export function TopicWorkbench({ detail, onOpenPair, onAskTopic }: { detail: TopicDetail; onOpenPair: OpenEvidencePair; onAskTopic: () => void }) {
+export function TopicDetailPanel({ standalone = false, children }: { standalone?: boolean; children: ReactNode }) {
+  const title = '问题与原句依据'
+  const description = '查看问题的处理判断、办法和会话依据。'
+  return <>
+    <SheetHeader className="shrink-0 border-b px-4 sm:px-6">
+      {standalone ? <>
+        <h1 data-slot="sheet-title" className="font-semibold text-foreground">{title}</h1>
+        <p className="sr-only">{description}</p>
+      </> : <>
+        <SheetTitle>{title}</SheetTitle><SheetDescription className="sr-only">{description}</SheetDescription>
+      </>}
+    </SheetHeader>
+    <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">{children}</div>
+  </>
+}
+
+export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = false }: {
+  detail: TopicDetail
+  onOpenEvidence: OpenTopicEvidence
+  onAskTopic?: () => void
+  readOnly?: boolean
+}) {
   const { topic, events, workbench } = detail
   const [caseId, setCaseId] = useState<string | null>(null)
   const [evidenceLimit, setEvidenceLimit] = useState(8)
@@ -203,7 +230,7 @@ export function TopicWorkbench({ detail, onOpenPair, onAskTopic }: { detail: Top
 
   return <div className="qiyu-page-enter space-y-6">
     <TopicSummary title={title} badge={trend} description={topic.theme.trim() && topic.theme.trim() !== topic.question.trim() ? topic.question : undefined}
-      action={<Button variant="outline" size="sm" onClick={onAskTopic}><MessagesSquare />追问这个问题</Button>}
+      action={!readOnly && onAskTopic && <Button variant="outline" size="sm" onClick={onAskTopic}><MessagesSquare />追问这个问题</Button>}
       metrics={[
         { label: '咨询', value: `${number(topic.consultation_count)} 次` },
         { label: '独立会话', value: `${number(topic.session_count)} 个` },
@@ -213,16 +240,16 @@ export function TopicWorkbench({ detail, onOpenPair, onAskTopic }: { detail: Top
     {workbench && <TrendComparison comparison={workbench.comparison} currentConsultations={topic.consultation_count} trend={topic.trend} />}
     {workbench && activeCase && <section className="space-y-3">
       <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">处理判断 · {caseId ? '当前案例' : '代表案例'}</h4>
-      <DecisionCase item={activeCase} title={title} onOpenPair={onOpenPair} />
+      <DecisionCase item={activeCase} title={title} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />
       {gaps.length > 0 && <div className="space-y-2 rounded-lg border bg-muted/25 p-3">
         <h5 className="text-xs font-medium">待补证据</h5>
         <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">{gaps.map(gap => <li key={gap.code}>{gapLabels[gap.code] ?? '其他证据缺口'} {number(gap.count)} 次咨询</li>)}</ul>
       </div>}
     </section>}
-    {workbench && <TopicKnowledge items={workbench.knowledge} onOpenPair={onOpenPair} />}
+    {workbench && <TopicKnowledge items={workbench.knowledge} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />}
     {(!workbench || otherCases.length > 0) && <section className="space-y-3" aria-label="会话依据">
       <h4 className="font-medium">{workbench ? '其他会话依据' : '原句依据'}</h4>
-      <EvidenceList evidence={(workbench ? otherCases : events).slice(0, evidenceLimit)} onOpenPair={onOpenPair}
+      <EvidenceList evidence={(workbench ? otherCases : events).slice(0, evidenceLimit)} onOpenEvidence={onOpenEvidence} readOnly={readOnly}
         onSelectCase={workbench ? id => { setCaseId(id); caseHeading.current?.focus(); caseHeading.current?.scrollIntoView?.({ block: 'start' }) } : undefined} />
       {(workbench ? otherCases : events).length > evidenceLimit && <Button variant="outline" size="sm" onClick={() => setEvidenceLimit(value => value + 8)}>显示更多会话依据</Button>}
     </section>}
