@@ -8,6 +8,7 @@ import re
 
 _KINDS = {"topics": "高频问题", "sops": "处理 SOP"}
 _ROLES = {
+    "unidentified": ("身份未确认", "neutral"),
     "user": ("客户", "customer"),
     "customer": ("客户", "customer"),
     "staff": ("客服", "staff"),

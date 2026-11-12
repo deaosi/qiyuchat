@@ -17,8 +17,9 @@ import time
 from ..clean.rules import mask_pii
 from ..config import Settings
 from ..extract.identity import SOURCE_IDENTITY_ROLE, decode_identity
+from ..extract.text import clean_visible_text
 from ..voc_assets import connection
-from . import case_media, case_senders, guest_evidence_view, guest_topic
+from . import case_media, case_senders, guest_evidence_view, guest_legacy_transcript, guest_topic
 
 TOKEN_PATTERN = r"[A-Za-z0-9_-]{43}"
 IMAGE_PATTERN = r"(?:[0-9]|1[0-9])-[a-f0-9]{64}"
@@ -290,12 +291,43 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
         origin.get("revision"), scope, context,
     ])
     # Display metadata is outside the fingerprint of an existing link.
+    if include_sender_names and scope == "pair" and len(rows) <= _MAX_SOURCE_MESSAGES:
+        if legacy := _legacy_messages(cfg, pair, rows, names, limit):
+            return fingerprint, legacy, scope, names, media
     for message, row in zip(context, selected_rows or ()):
         if nickname := _clean(nicknames.get(row["context_seq"]))[:300]:
             message["sender_name"] = nickname
     if position is not None:
         context[position]["anchor"] = True
     return fingerprint, context, scope, names, media
+
+
+def _legacy_messages(cfg: Settings, pair: dict, rows: list[dict], names: re.Pattern[str] | None,
+                     limit: int) -> list[dict]:
+    labels = case_senders.saved_legacy_labels(cfg.runtime.state_dir, pair["session_id"], rows)
+    match = guest_legacy_transcript.match_pair(pair, rows) if labels else None
+    if not match:
+        return []
+    originals, question_seq = match
+    limits = {"user": limit, "staff": limit}
+    result = []
+    for row in originals[:_FULL_CONTEXT_MESSAGES]:
+        role, seq = row["role"], row["context_seq"]
+        if role not in limits or limits[role] <= 0:
+            continue
+        message = _message(role, row["ts"], clean_visible_text(row["content"]), names, limits[role])
+        if message is None:
+            continue
+        limits[role] -= len(message["text"]) + 1
+        label = labels.get(seq)
+        if label is None or label.get("sender_kind") == "unidentified":
+            message["role"] = "unidentified"
+        elif nickname := _clean(label.get("sender_name"))[:300]:
+            message["sender_name"] = nickname
+        if seq == question_seq:
+            message["anchor"] = True
+        result.append(message)
+    return result if any(message.get("anchor") for message in result) else []
 
 
 def _registry(cfg: Settings) -> Path:

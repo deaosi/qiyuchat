@@ -171,6 +171,7 @@ const chatRoles = {
   user: { side: 'left', label: '客户' },
   customer: { side: 'left', label: '客户' },
   staff: { side: 'right', label: '客服' },
+  unidentified: { side: 'center', label: '身份未确认' },
   bot: { side: 'center', label: '机器人' },
   system: { side: 'center', label: '系统' },
 } as const
@@ -202,7 +203,7 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
           const anchored = typeof locate === 'string' ? message.id === locate : message.anchor
           const imageUrls = imageBase && Array.isArray(message.images)
             ? message.images.filter(id => typeof id === 'string' && guestImageId.test(id)).map(id => imageBase + id) : []
-          return <ConversationBubble key={index} side={role.side} sender={message.sender_name || role.label} time={message.time} question={message.anchor} anchored={anchored}>
+          return <ConversationBubble key={index} side={role.side} sender={message.sender_name || role.label} time={message.time} question={message.anchor && role.side === 'left'} anchored={anchored}>
             <ConversationMessageBody text={message.text} imageUrls={imageUrls} />
           </ConversationBubble>
         })}

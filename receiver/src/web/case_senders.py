@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -139,6 +140,8 @@ def saved_labels(db, state_dir: str, sid: str, retained: list[dict], tables: set
     if snapshot := _saved_snapshot(db, sid, retained, tables):
         for label in labels(state_dir, *snapshot, retained):
             result[label.pop("context_seq")] = label
+    else:
+        result.update(saved_legacy_labels(state_dir, sid, retained))
     return result
 
 
@@ -148,20 +151,76 @@ def saved_source_nicknames(db, sid: str, retained: list[dict], tables: set[str])
     if snapshot is None:
         return {}
     company = fuke_channel(snapshot[0])
-    result = {}
-    for seq, row in _source_matches(*snapshot, retained):
-        if row["from"] == 1:
-            account = row.get("externalUserId")
-            if company and not (isinstance(account, str) and _EXTERNAL_CONTACT.fullmatch(account.strip())):
-                continue
-            name = row.get("userName")
-            identifiers = (account, row.get("userId"))
-        elif not source_auto_reply(row):
-            name = row.get("staffName")
-            identifiers = (row.get("staffAccount"), row.get("staffId"))
-        else:
+    return {seq: name for seq, row in _source_matches(*snapshot, retained)
+            if (name := _source_nickname(row, company))}
+
+
+def _external_contact(row: dict) -> bool:
+    account = row.get("externalUserId")
+    return isinstance(account, str) and bool(_EXTERNAL_CONTACT.fullmatch(account.strip()))
+
+
+def _source_nickname(row: dict, company: bool) -> str:
+    if row["from"] == 1:
+        if company and not _external_contact(row):
+            return ""
+        name = row.get("userName")
+        identifiers = (row.get("externalUserId"), row.get("userId"))
+    elif not source_auto_reply(row):
+        name = row.get("staffName")
+        identifiers = (row.get("staffAccount"), row.get("staffId"))
+    else:
+        return ""
+    if isinstance(name, str) and name.strip() and all(name.strip().casefold() != str(value).strip().casefold()
+                                                     for value in identifiers if value is not None):
+        return name.strip()[:300]
+    return ""
+
+
+def _legacy_digest(message: dict) -> str:
+    return sha256(json.dumps(_key(message), ensure_ascii=True).encode()).hexdigest()
+
+
+def legacy_source_file(state_dir: str, sid: str) -> Path | None:
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", sid):
+        return None
+    return Path(state_dir) / "voc-legacy-senders" / f"{sid}.json"
+
+
+def legacy_source_records(metadata: dict, source: list, retained: list[dict]) -> dict:
+    """Keep only labels bound to exact retained rows from a verified group export."""
+    if not fuke_channel(metadata):
+        return {}
+    by_sequence = {m["context_seq"]: m for m in retained}
+    records = {}
+    for seq, row in _source_matches(metadata, source, retained, legacy=True):
+        if row["from"] == 0 and source_auto_reply(row):
             continue
-        if isinstance(name, str) and name.strip() and all(name.strip().casefold() != str(value).strip().casefold()
-                                                        for value in identifiers if value is not None):
-            result[seq] = name
+        records[str(seq)] = {
+            "digest": _legacy_digest(by_sequence[seq]),
+            "unidentified": row["from"] == 1 and not _external_contact(row),
+            "name": _source_nickname(row, True),
+        }
+    return records
+
+
+def saved_legacy_labels(state_dir: str, sid: str, retained: list[dict]) -> dict[int, dict]:
+    if not retained or not (path := legacy_source_file(state_dir, sid)):
+        return {}
+    try:
+        records = _object(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        return {}
+    result = {}
+    for message in retained:
+        seq = message["context_seq"]
+        record = records.get(str(seq))
+        if not isinstance(record, dict) or record.get("digest") != _legacy_digest(message):
+            continue
+        if record.get("unidentified") is True and message["role"] == "user":
+            result[seq] = {"sender_kind": "unidentified"}
+        else:
+            name = public_name(record.get("name"))
+            result[seq] = {"sender_name": name} if name else (
+                {"sender_name": "来源访客"} if message["role"] == "user" else {})
     return result

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from src import app
 from src.extract.identity import encode_identity
 from src.push_sync import SCHEMA, VERSION
-from src.web import guest_evidence as guest
+from src.web import case_senders, guest_evidence as guest
 from tests.test_local import LocalFixture
 
 
@@ -93,6 +93,42 @@ class TestGuestEvidence(LocalFixture):
         self.assertNotIn("<script", page)
         with patch.object(guest.time, "time", return_value=time.time() + 95 * 86400):
             self.assertIsNone(guest.resolve(self.cfg, token))
+
+    def test_legacy_guest_messages_use_exact_source_senders_without_reissuing_the_link(self):
+        sid = "123456"
+        messages = [
+            {"context_seq": 0, "role": "user", "ts": self.stamp, "content": "请帮忙确认设置"},
+            {"context_seq": 1, "role": "user", "ts": self.stamp + 1000, "content": "我来检查"},
+            {"context_seq": 2, "role": "staff", "ts": self.stamp + 2000, "content": "设置已核对"},
+        ]
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("INSERT INTO raw_session(session_id,user_id) VALUES(?,?)", (sid, "group-fixture"))
+            qa = db.execute("INSERT INTO qa_pair(session_id,idx,customer_id,asked_at,question,answer) VALUES(?,?,?,?,?,?)",
+                            (sid, 1, "group-fixture", self.stamp, "请帮忙确认设置\n我来检查", "设置已核对")).lastrowid
+            db.executemany("INSERT INTO raw_message(session_id,seq,role,content,ts) VALUES(?,?,?,?,?)",
+                           [(sid, m["context_seq"], m["role"], m["content"], m["ts"]) for m in messages])
+        token = self._token(guest.issue_url(self.cfg, qa, entry=self.entry))
+        self.assertEqual(len(guest.resolve_payload(self.cfg, token)["cases"][0]["messages"]), 2)
+
+        originals = [
+            {"id": seq + 1, "sessionId": int(sid), "time": message["ts"], "status": 1, "mType": 1,
+             "msg": message["content"], "staffId": 8, "from": int(message["role"] == "user"), **sender}
+            for seq, (message, sender) in enumerate(zip(messages, [
+                {"externalUserId": "wmExampleCustomer001", "userName": "店主昵称"},
+                {"externalUserId": "StaffLogin", "userName": ""},
+                {"staffName": "七鱼坐席昵称", "staffAccount": "QiyuLogin"},
+            ]))
+        ]
+        metadata = {"id": int(sid), "fromType": "wx_cs", "fromSubType": "福客AI-企业群"}
+        path = case_senders.legacy_source_file(self.cfg.runtime.state_dir, sid)
+        path.parent.mkdir()
+        path.write_text(json.dumps(case_senders.legacy_source_records(metadata, originals, messages)), encoding="utf-8")
+
+        rendered, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertEqual([(row["role"], row.get("sender_name")) for row in rendered["messages"]],
+                         [("user", "店主昵称"), ("unidentified", None), ("staff", "七鱼坐席昵称")])
+        self.assertTrue(rendered["messages"][0]["anchor"])
+        self.assertNotIn("QiyuLogin", guest.resolve(self.cfg, token).decode())
 
     def test_controlled_context_does_not_cross_visitor_or_case_boundary(self):
         qa = self._seed_case(controlled=True)
