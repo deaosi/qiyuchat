@@ -202,11 +202,12 @@ def _chat(case: dict) -> str:
         if not body:
             continue
         label, side = _ROLES.get(_text(message.get("role")), ("消息", "neutral"))
+        label = _text(message.get("sender_name")) or label
         stamp = _text(message.get("time"))
         time_markup = f"<time>{escape(stamp)}</time>" if stamp else ""
         rows.append(
             f'<li class="chat-row {side}"><div class="chat-turn">'
-            f'<div class="chat-meta"><strong>{label}</strong>{time_markup}</div>'
+            f'<div class="chat-meta"><strong>{escape(label)}</strong>{time_markup}</div>'
             f'<p class="chat-bubble">{escape(body)}</p></div></li>'
         )
     if rows:

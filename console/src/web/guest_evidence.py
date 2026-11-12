@@ -18,7 +18,7 @@ from ..clean.rules import mask_pii
 from ..config import Settings
 from ..extract.identity import SOURCE_IDENTITY_ROLE, decode_identity
 from ..voc_assets import connection
-from . import case_media, guest_evidence_view, guest_topic
+from . import case_media, case_senders, guest_evidence_view, guest_topic
 
 TOKEN_PATTERN = r"[A-Za-z0-9_-]{43}"
 IMAGE_PATTERN = r"(?:[0-9]|1[0-9])-[a-f0-9]{64}"
@@ -157,7 +157,8 @@ def _related_ids(value: object) -> set[str]:
 
 
 def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
-                        names: re.Pattern[str] | None, *, full: bool) -> tuple[list[dict], bool, int | None, dict]:
+                        names: re.Pattern[str] | None, *, full: bool,
+                        selected_rows: list[dict] | None = None) -> tuple[list[dict], bool, int | None, dict]:
     customer = pair.get("customer_id")
     questions = _related_ids(origin.get("question_message_ids"))
     answers = _related_ids(origin.get("answer_message_ids"))
@@ -220,6 +221,8 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
     anchored_row = segment[a_index]
     anchor_index = a_index if anchored_row["role"] == "user" and anchored_row["source_message_id"] in questions else q_index
     position = next((position for position, (index, _, _) in enumerate(projected) if index == anchor_index), None)
+    if selected_rows is not None:
+        selected_rows.extend(segment[index] for index, *_ in projected)
     media = {}
     for offset, (index, message, attachments) in enumerate(projected):
         for url in attachments[:_MAX_CASE_IMAGES - len(media)]:
@@ -230,10 +233,12 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
     return [message for _, message, _ in projected], limited, position, media
 
 
-def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tuple[str, list[dict], str, re.Pattern[str] | None, dict] | None:
+def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
+          include_sender_names: bool = False) -> tuple[str, list[dict], str, re.Pattern[str] | None, dict] | None:
     source = Path(cfg.runtime.db_path)
     if not source.is_file() or type(qa_id) is not int or qa_id <= 0:
         return None
+    selected_rows: list[dict] | None = [] if include_sender_names else None
     try:
         with connection(source) as db:
             db.execute("BEGIN")
@@ -257,16 +262,18 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tupl
             if origin and (origin.get("active") != 1 or origin.get("session_id") != sid):
                 return None
             rows = [dict(item) for item in db.execute(
-                "SELECT role,content,ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq LIMIT ?",
+                "SELECT seq AS context_seq,role,content,ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq LIMIT ?",
                 (sid, _MAX_SOURCE_MESSAGES + 1),
             )]
+            if not rows:
+                return None
+            names = _private_names(pair, dict(session_row), rows)
+            context, limited, position, media = (_controlled_context(pair, origin, rows, anchor, names, full=full,
+                                                                    selected_rows=selected_rows)
+                                                 if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False, None, {}))
+            nicknames = case_senders.saved_source_nicknames(db, sid, selected_rows, tables) if selected_rows else {}
     except (sqlite3.Error, OSError):
         return None
-    if not rows:
-        return None
-    names = _private_names(pair, dict(session_row), rows)
-    context, limited, position, media = (_controlled_context(pair, origin, rows, anchor, names, full=full)
-                                         if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False, None, {}))
     scope = ("limited" if limited else "context") if context else "pair"
     if not context:
         limit = _FULL_MESSAGE_LIMIT if full else _MAX_CONTEXT_TEXT
@@ -282,7 +289,10 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False) -> tupl
         pair.get("created_at"), origin.get("evidence_key"), origin.get("fingerprint"),
         origin.get("revision"), scope, context,
     ])
-    # A presentation marker should never change the fingerprint of an existing link.
+    # Display metadata is outside the fingerprint of an existing link.
+    for message, row in zip(context, selected_rows or ()):
+        if nickname := _clean(nicknames.get(row["context_seq"]))[:300]:
+            message["sender_name"] = nickname
     if position is not None:
         context[position]["anchor"] = True
     return fingerprint, context, scope, names, media
@@ -500,10 +510,10 @@ def upgrade_url(cfg: Settings, token: str, *, entry: dict, view: dict) -> str:
     return _save(cfg, payload, replace_token=token) if payload else ""
 
 
-def _verified_case(cfg: Settings, binding: dict, *, full: bool):
+def _verified_case(cfg: Settings, binding: dict, *, full: bool, include_sender_names: bool = False):
     if not isinstance(binding, dict) or not isinstance(binding.get("anchor"), str):
         return None
-    case = _case(cfg, binding.get("qa"), binding["anchor"], full=full)
+    case = _case(cfg, binding.get("qa"), binding["anchor"], full=full, include_sender_names=include_sender_names)
     fingerprint = binding.get("fingerprint")
     if case is None or not isinstance(fingerprint, str) or not _MEDIA_DIGEST.fullmatch(fingerprint):
         return None
@@ -587,7 +597,7 @@ def resolve_image(cfg: Settings, token: str, image_id: str) -> str | None:
 
 
 def _render_case(cfg: Settings, binding: dict, *, token: str, ordinal: int, full: bool) -> dict | None:
-    case = _verified_case(cfg, binding, full=full)
+    case = _verified_case(cfg, binding, full=full, include_sender_names=True)
     if case is None:
         return None
     for digest in _media_digests(binding):

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from src import app
 from src.extract.identity import encode_identity
+from src.push_sync import SCHEMA, VERSION
 from src.web import guest_evidence as guest
 from tests.test_local import LocalFixture
 
@@ -161,6 +162,57 @@ class TestGuestEvidence(LocalFixture):
         self.assertNotIn("另一位访客的私人回复", page)
         self.assertNotIn("href=", page)
         self.assertNotIn(token, page)
+
+    def test_saved_nicknames_follow_existing_link_scope_and_keep_body_redaction(self):
+        self.source = "6789031"
+        qa = self._seed_case(controlled=True)
+        ids = {i: f"source:{self.source}:{i + 1}" for i in (1, 3, 4, 5)}
+        with app.get_db(self.cfg).tx() as db:
+            db.executemany("UPDATE raw_message SET source_message_id=? WHERE session_id=? AND seq=?",
+                           [(mid, self.source, i) for i, mid in ids.items()])
+            db.execute("UPDATE qa_origin SET question_message_ids=?,answer_message_ids=? WHERE qa_id=?",
+                       (json.dumps([ids[4]]), json.dumps([ids[5]]), qa))
+            originals = [dict(row) for row in db.execute("SELECT * FROM raw_message WHERE source_message_id IN (?,?,?,?) ORDER BY seq",
+                                                         tuple(ids.values()))]
+        token = self._token(guest.issue_url(self.cfg, qa, entry=self.entry))
+        original_case, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertTrue(all("sender_name" not in message for message in original_case["messages"]))
+
+        source_names = {
+            1: {"userName": "范围外的客户昵称", "externalUserId": "wmAnotherExternalContact"},
+            3: {"userName": "身份不明的姓名", "externalUserId": "unverified-login"},
+            4: {"userName": "客户昵称 <小店> 13812345678", "externalUserId": "wmVerifiedExternalContact"},
+            5: {"staffName": "七鱼昵称 <值班> https://internal.example.com/profile", "staffAccount": "staff-login"},
+        }
+        source_rows = [{"id": row["seq"] + 1, "sessionId": int(self.source), "status": 1, "mType": 1,
+                        "time": row["ts"], "msg": row["content"], "from": 1 if row["role"] == "user" else 0,
+                        "staffId": 12, **source_names[row["seq"]]} for row in originals]
+        snapshot = {"projection_version": VERSION,
+                    "session": {"id": int(self.source), "fromType": "wx_cs", "fromSubType": "福客AI-服务群"},
+                    "messages": source_rows}
+        (Path(self.temp.name) / "fuke-staff-directory.json").write_text('{"unverified-login":"内部通讯录姓名"}', encoding="utf-8")
+        app.get_db(self.cfg)._conn.executescript(SCHEMA)
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("INSERT INTO push_sync_state(session_id,event_key,version,status,source_version,source_json,updated_at) "
+                       "VALUES(?,?,'v1','completed','v1',?,?)", (self.source, "fixture-event", json.dumps(snapshot), time.time()))
+
+        case, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertEqual([message.get("sender_name") for message in case["messages"]],
+                         [None, "客户昵称 <小店> 138****5678", "七鱼昵称 <值班> [链接已隐藏]"])
+        self.assertEqual([{k: v for k, v in message.items() if k != "sender_name"} for message in case["messages"]],
+                         original_case["messages"])
+        page = guest.resolve(self.cfg, token).decode()
+        self.assertIn("<strong>客户昵称 &lt;小店&gt; 138****5678</strong>", page)
+        self.assertIn("<strong>七鱼昵称 &lt;值班&gt; [链接已隐藏]</strong>", page)
+        for hidden in ("范围外的客户昵称", "身份不明的姓名", "unverified-login", "内部通讯录姓名", "staff-login",
+                       "internal.example.com", "朱测试店主", "唐测试客服", "13812345678"):
+            self.assertNotIn(hidden, page)
+
+        source_rows[-1]["msg"] = "消息原文不匹配"
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("UPDATE push_sync_state SET source_json=? WHERE session_id=?", (json.dumps(snapshot), self.source))
+        case, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertNotIn("sender_name", case["messages"][-1])
 
     def test_workspace_upgrade_only_enriches_existing_bound_cases(self):
         qa = self._seed_case(controlled=True)

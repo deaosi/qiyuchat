@@ -9,7 +9,7 @@ from unicodedata import normalize
 
 from ..clean.rules import mask_pii
 from ..push_sync import VERSION
-from ..qiyu.message import source_integer
+from ..qiyu.message import source_auto_reply, source_integer
 
 
 _FUKE_CHANNEL = re.compile(r"^福客\s*AI(?:$|[\s_·—-])", re.I)
@@ -71,10 +71,8 @@ def _key(message: dict) -> tuple:
     return message.get("role"), message.get("ts"), message.get("content")
 
 
-def labels(state_dir: str, metadata: dict, source: list, retained: list[dict], *, legacy: bool = False) -> list[dict]:
+def _source_matches(metadata: dict, source: list, retained: list[dict], *, legacy: bool = False):
     """Match exact originals to the already scoped, retained transcript rows."""
-    company = fuke_channel(metadata)
-    directory = _directory(state_dir) if company else {}
     by_id, by_content = {}, {}
     sid = metadata.get("id")
     for row in source:
@@ -95,7 +93,6 @@ def labels(state_dir: str, metadata: dict, source: list, retained: list[dict], *
         if legacy:
             by_content[key] = row if key not in by_content else None
     retained_counts = Counter(_key(message) for message in retained) if legacy else {}
-    result = []
     for message in retained:
         seq, key = message.get("context_seq"), _key(message)
         if type(seq) is not int or seq < 0:
@@ -106,18 +103,21 @@ def labels(state_dir: str, metadata: dict, source: list, retained: list[dict], *
             row = exact[1] if exact and exact[0] == key else None
         else:
             row = by_content.get(key) if legacy and retained_counts[key] == 1 else None
-        if row and (label := _label(row, company, directory)):
-            result.append({"context_seq": seq, **label})
-    return result
+        if row:
+            yield seq, row
 
 
-def saved_labels(db, state_dir: str, sid: str, retained: list[dict], tables: set[str]) -> dict[int, dict]:
-    session = db.execute("SELECT payload FROM raw_session WHERE session_id=?", (sid,)).fetchone()
-    company = bool(session and fuke_channel(_object(session["payload"])))
-    result = {m["context_seq"]: {"sender_kind": "unidentified"}
-              for m in retained if company and m["role"] == "user"}
+def labels(state_dir: str, metadata: dict, source: list, retained: list[dict], *, legacy: bool = False) -> list[dict]:
+    company = fuke_channel(metadata)
+    directory = _directory(state_dir) if company else {}
+    return [{"context_seq": seq, **label}
+            for seq, row in _source_matches(metadata, source, retained, legacy=legacy)
+            if (label := _label(row, company, directory))]
+
+
+def _saved_snapshot(db, sid: str, retained: list[dict], tables: set[str]) -> tuple[dict, list] | None:
     if "push_sync_state" not in tables or not any(m.get("source_message_id") for m in retained):
-        return result
+        return None
     row = db.execute(
         "SELECT source_json FROM push_sync_state WHERE session_id=? AND status='completed' "
         "AND source_version=version AND archive_reason=''", (sid,),
@@ -127,7 +127,41 @@ def saved_labels(db, state_dir: str, sid: str, retained: list[dict], tables: set
     if (snapshot.get("projection_version") != VERSION or not isinstance(metadata, dict)
             or not source_integer(metadata.get("id"), positive=True) or str(metadata["id"]) != sid
             or not isinstance(source, list)):
-        return result
-    for label in labels(state_dir, metadata, source, retained):
-        result[label.pop("context_seq")] = label
+        return None
+    return metadata, source
+
+
+def saved_labels(db, state_dir: str, sid: str, retained: list[dict], tables: set[str]) -> dict[int, dict]:
+    session = db.execute("SELECT payload FROM raw_session WHERE session_id=?", (sid,)).fetchone()
+    company = bool(session and fuke_channel(_object(session["payload"])))
+    result = {m["context_seq"]: {"sender_kind": "unidentified"}
+              for m in retained if company and m["role"] == "user"}
+    if snapshot := _saved_snapshot(db, sid, retained, tables):
+        for label in labels(state_dir, *snapshot, retained):
+            result[label.pop("context_seq")] = label
+    return result
+
+
+def saved_source_nicknames(db, sid: str, retained: list[dict], tables: set[str]) -> dict[int, str]:
+    """Read recorded nicknames without loading local account or staff directories."""
+    snapshot = _saved_snapshot(db, sid, retained, tables)
+    if snapshot is None:
+        return {}
+    company = fuke_channel(snapshot[0])
+    result = {}
+    for seq, row in _source_matches(*snapshot, retained):
+        if row["from"] == 1:
+            account = row.get("externalUserId")
+            if company and not (isinstance(account, str) and _EXTERNAL_CONTACT.fullmatch(account.strip())):
+                continue
+            name = row.get("userName")
+            identifiers = (account, row.get("userId"))
+        elif not source_auto_reply(row):
+            name = row.get("staffName")
+            identifiers = (row.get("staffAccount"), row.get("staffId"))
+        else:
+            continue
+        if isinstance(name, str) and name.strip() and all(name.strip().casefold() != str(value).strip().casefold()
+                                                        for value in identifiers if value is not None):
+            result[seq] = name
     return result
