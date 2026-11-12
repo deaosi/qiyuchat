@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ApiFilters } from '@/lib/api'
 import { createChatStore, type ChatAnswer } from '@/lib/voc-chat'
@@ -10,8 +10,8 @@ vi.mock('@/hooks/use-api', () => ({
 
 afterEach(cleanup)
 
-function setup(filters: ApiFilters) {
-  const answer: ChatAnswer = { answer: '示例答复', citations: [], scope: { label: '近 7 天' }, model: 'test', tools: [] }
+function setup(filters: ApiFilters, overrides: Partial<ChatAnswer> = {}) {
+  const answer: ChatAnswer = { answer: '示例答复', citations: [], scope: { label: '近 7 天' }, model: 'test', tools: [], ...overrides }
   const transport = vi.fn().mockResolvedValue(answer)
   const store = createChatStore({ transport })
   render(<VocChatWorkspace filters={filters} onScopeChange={vi.fn()} store={store} />)
@@ -111,4 +111,29 @@ it('uses topic-specific completions and lets Escape dismiss a suggestion for the
   fireEvent.keyDown(input, { key: 'Enter' })
   expect(transport.mock.calls[0][1].message).toBe('排查')
   await screen.findByText('示例答复')
+})
+
+it('offers analysis examples before and during a conversation and shows the actual read tools', async () => {
+  const { transport, input } = setup({ source: 'local', days: 7 }, {
+    answer_mode: 'computed',
+    tools: [{ name: 'daily_trend', label: '逐日计算咨询量与峰值' }],
+  })
+  const welcome = within(screen.getByRole('group', { name: '常用提问' }))
+  expect(welcome.getByRole('button', { name: '最近 7 天的 VOC 复盘' })).toBeTruthy()
+  fireEvent.click(welcome.getByRole('button', { name: '按天看咨询量和峰值' }))
+  expect(input.value).toBe('按天看咨询量和峰值')
+  expect(transport).not.toHaveBeenCalled()
+
+  fireEvent.keyDown(input, { key: 'Enter' })
+  await screen.findByText('示例答复')
+  fireEvent.click(screen.getByText('查询范围与模型'))
+  expect(screen.getByText('逐日计算咨询量与峰值')).toBeTruthy()
+  expect(screen.getByText('按数据直接统计')).toBeTruthy()
+  expect(screen.getByText('配置模型')).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: '提问示例' }))
+  const examples = within(screen.getByRole('dialog', { name: '提问示例' }))
+  fireEvent.click(examples.getByRole('button', { name: '按客服看接待分布' }))
+  expect(input.value).toBe('按客服看接待分布')
+  expect(transport).toHaveBeenCalledTimes(1)
 })

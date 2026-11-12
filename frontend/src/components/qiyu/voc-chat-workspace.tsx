@@ -3,8 +3,9 @@ import { ArrowDown, ArrowUp, Check, Copy, History, Square, SquarePen, Trash2 } f
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { type ApiFilters, type GatewayConfig } from '@/lib/api'
-import { chatScopeKey, chatScopeLabel, citationFilters, getVocChatStore, type ChatCitation, type ChatMessage, type ChatThread, type VocChatStore } from '@/lib/voc-chat'
+import { chatScopeKey, chatScopeLabel, citationFilters, getVocChatStore, type ChatAnswerMode, type ChatCitation, type ChatMessage, type ChatThread, type VocChatStore } from '@/lib/voc-chat'
 import { Button } from '@/components/ui/button'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { VocSourceInspector } from './voc-source-inspector'
@@ -14,13 +15,24 @@ type Selection = { threadId: string; citation: ChatCitation; message: ChatMessag
 type Preset = { prompt: string; keywords: string[] }
 const draftLimit = 2000
 const presetRotationMs = 5000
+const overviewSuggestions: Preset[] = [
+  { prompt: '最近 7 天的 VOC 复盘', keywords: ['复盘', '周报', 'VOC 复盘'] },
+  { prompt: '按天看咨询量和峰值', keywords: ['逐日', '峰值', '每日咨询量'] },
+  { prompt: '哪些客户群咨询最多？', keywords: ['客户群分布', '群咨询量'] },
+  { prompt: '找出与场景未触发相关的已核验 SOP', keywords: ['SOP', '已核验 SOP'] },
+]
 const suggestions: Preset[] = [
   { prompt: '当前范围的高频咨询有哪些？', keywords: ['高频问题', '高频咨询', '查高频'] },
   { prompt: '客服通常怎么回复场景未触发的问题？', keywords: ['话术', '客服回复', '接待答复', '场景未触发'] },
   { prompt: '哪些答案已通过会话验证，可以直接复用？', keywords: ['知识库', '可复用答案', '验证结果'] },
   { prompt: '机器人不回复时应先检查哪些设置？请附上案例依据。', keywords: ['排查', '机器人不回复', '功能异常'] },
   { prompt: '和上一个同等时段相比，哪些咨询明显增多？', keywords: ['趋势', '环比', '咨询增多'] },
-  { prompt: '有哪些客户问题还缺少明确的处理办法？', keywords: ['知识缺口', '处理办法缺失'] },
+  { prompt: '有哪些客户问题还缺少明确的处理办法？', keywords: ['知识缺口', '证据缺口', '处理办法缺失'] },
+  ...overviewSuggestions,
+  { prompt: '哪些客户咨询最多？', keywords: ['客户分布', '客户排行'] },
+  { prompt: '按客服看接待分布', keywords: ['客服分布', '客服接待量'] },
+  { prompt: '当前范围的数据概况', keywords: ['数据概况', '数据概览'] },
+  { prompt: '查找场景未触发的问题处理手册', keywords: ['处理手册'] },
 ]
 const topicSuggestions: Preset[] = [
   { prompt: '这个问题怎么排查？给出适用条件和来源。', keywords: ['排查', '排查依据'] },
@@ -29,12 +41,40 @@ const topicSuggestions: Preset[] = [
   { prompt: '列出这个问题的代表案例，并附上会话依据。', keywords: ['案例', '原话', '会话依据'] },
   { prompt: '这个问题目前还缺哪些证据，才能判断原因？', keywords: ['证据缺口', '判断原因'] },
 ]
+const welcomeSuggestions = [suggestions[0], ...overviewSuggestions]
+const answerModeLabels: Record<ChatAnswerMode, string> = {
+  grounded_model: '模型结合查询结果整理',
+  computed: '按数据直接统计',
+  source_reference: '根据已查询的依据呈现',
+  insufficient: '当前依据不足',
+}
 
 function matchPreset(draft: string, presets: Preset[]) {
-  const prefix = draft.trim()
-  if (prefix.length < 2 || /[\r\n]/.test(draft) || presets.some(({ prompt }) => prompt === prefix)) return
-  const matches = presets.filter(({ prompt, keywords }) => prompt.startsWith(prefix) || keywords.some(word => word.startsWith(prefix)))
+  const prefix = draft.trim().toLowerCase()
+  if (prefix.length < 2 || /[\r\n]/.test(draft) || presets.some(({ prompt }) => prompt.toLowerCase() === prefix)) return
+  const matches = presets.filter(({ prompt, keywords }) => prompt.toLowerCase().startsWith(prefix) || keywords.some(word => word.toLowerCase().startsWith(prefix)))
   if (matches.length === 1) return matches[0].prompt
+}
+
+function QueryDetails({ message, filters }: { message: ChatMessage; filters: ApiFilters }) {
+  const tools = [...new Set(message.tools?.map(tool => tool.label.trim()).filter(Boolean))]
+  return <details className="voc-chat-disclosure min-w-0 text-[11px] leading-5 text-muted-foreground">
+    <summary className="w-fit cursor-pointer list-none py-1 underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring">查询范围与模型</summary>
+    <div className="space-y-1 pt-1">
+      <dl className="space-y-1">
+        <div className="flex flex-wrap gap-x-2"><dt>范围</dt><dd>{message.scope || chatScopeLabel(citationFilters(filters, message.queryFilters))}</dd></div>
+        {message.answerMode && <div className="flex flex-wrap gap-x-2"><dt>回答方式</dt><dd>{answerModeLabels[message.answerMode]}</dd></div>}
+        {message.model && <div className="flex flex-wrap gap-x-2">
+          <dt>{message.answerMode && message.answerMode !== 'grounded_model' ? '配置模型' : '模型'}</dt>
+          <dd className="min-w-0 [overflow-wrap:anywhere]">{message.model}</dd>
+        </div>}
+      </dl>
+      {tools.length > 0 && <div>
+        <p className="font-medium">读取内容</p>
+        <ul className="space-y-0.5 pl-2">{tools.map(label => <li key={label}>{label}</li>)}</ul>
+      </div>}
+    </div>
+  </details>
 }
 
 const timestamp = (value: number) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value)
@@ -52,14 +92,17 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
   const [atBottom, setAtBottom] = useState(true)
   const [copied, setCopied] = useState('')
   const [presetIndex, setPresetIndex] = useState(0)
+  const [presetsOpen, setPresetsOpen] = useState(false)
   const [dismissedCompletion, setDismissedCompletion] = useState<{ threadId: string; draft: string } | null>(null)
   const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null), previousThread = useRef('')
   const nearBottom = useRef(true)
+  const chosenPreset = useRef(false)
   const completionId = useId()
   const gateway = useApi<GatewayConfig>('gateway/config', { source: 'local' }, refreshKey)
   const focus = useApi<{ topic: { question: string } }>('voc2/topic', { ...filters, id: filters.focus_topic }, refreshKey, Boolean(filters.focus_topic))
   const topicTitle = filters.focus_topic ? focus.data?.topic.question || '当前问题' : ''
   const presets = filters.focus_topic ? topicSuggestions : suggestions
+  const firstPrompts = filters.focus_topic ? topicSuggestions.slice(0, 3) : welcomeSuggestions
   const displayedPrompt = presets[presetIndex % presets.length].prompt
   const emptyDraft = !pending && current?.draft === ''
   const completionDismissed = current && dismissedCompletion?.threadId === current.id && dismissedCompletion.draft === current.draft
@@ -106,7 +149,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
     if (!current || pending) return
     const draft = current.draft.trim() ? `${current.draft}${current.draft.endsWith('\n') ? '' : '\n'}${prompt}` : prompt
     if (draft.length > draftLimit) {
-      toast.error('草稿已接近 2000 字，请删减后再加入话术。')
+      toast.error('草稿已接近 2000 字，请删减后再加入示例。')
       return
     }
     store.setDraft(current.id, draft)
@@ -146,14 +189,19 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
       }} aria-label="聊天消息">
         {!current ? <LoadingState label="正在打开对话…" className="mx-auto h-full max-w-3xl px-6 md:px-10" /> : current.messages.length === 0 ? <div key={current.id} className="qiyu-page-enter mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-6 py-8 md:px-10">
           <h3 className="text-xl font-semibold tracking-tight">{topicTitle || '想了解哪些客户咨询？'}</h3>
-          <p className="mt-3 text-sm leading-7 text-muted-foreground">{topicTitle ? chatScopeLabel(filters) : '查询高频问题、接待回复与知识依据。'}</p>
-          <div className="mt-5 max-w-xl">{presets.slice(0, 3).map(({ prompt }) => <button key={prompt} onClick={() => { fillPreset(prompt); input.current?.focus() }} className="voc-chat-suggestion block w-full rounded-md py-2.5 text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{prompt}</button>)}</div>
+          <p className="mt-3 text-sm leading-7 text-muted-foreground">{topicTitle ? chatScopeLabel(filters) : '查看咨询趋势、分布和可复用的处理办法。'}</p>
+          <div className={`mt-5 grid max-w-2xl gap-x-4 ${filters.focus_topic ? '' : 'sm:grid-cols-2'}`} role="group" aria-label="常用提问">
+            {firstPrompts.map(({ prompt }) => <button key={prompt} type="button" onClick={() => { fillPreset(prompt); input.current?.focus() }} className="voc-chat-suggestion rounded-md py-2.5 text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{prompt}</button>)}
+          </div>
         </div> : <div key={current.id} className="qiyu-page-enter mx-auto w-full max-w-3xl space-y-8 px-5 py-8 md:px-9" role="log" aria-label="对话内容" aria-live="polite">
           {current.messages.map(message => <article key={message.id} className={`voc-chat-message ${message.role === 'user' ? 'flex justify-end' : 'space-y-3'}`}>
             {message.role === 'user' ? <p className="max-w-[88%] whitespace-pre-wrap break-words rounded-lg bg-muted/70 px-4 py-3 text-sm leading-7">{message.content}</p> : <>
               <div className="whitespace-pre-wrap break-words text-sm leading-7 [overflow-wrap:anywhere]">{message.content}</div>
               {!!message.citations?.length && <details className="voc-chat-disclosure text-xs text-muted-foreground"><summary className="w-fit cursor-pointer list-none py-1 underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring">查看依据（{message.citations.length}）</summary><div className="space-y-1 pt-2">{message.citations.map((citation, index) => <button key={`${citation.kind}-${citation.id}`} onClick={() => openSource(citation, message)} className={`flex w-full items-start gap-2 py-1.5 text-left text-xs leading-5 underline-offset-4 transition-colors duration-150 hover:text-foreground hover:underline ${selection?.message.id === message.id && selection.citation.id === citation.id ? 'text-foreground underline' : 'text-muted-foreground'}`}><span className="shrink-0 tabular-nums">{index + 1}.</span><span className="min-w-0 flex-1 break-words">{citation.title || `来源 ${citation.id}`}</span></button>)}</div></details>}
-              <div className="flex items-start justify-between gap-3"><details className="voc-chat-disclosure min-w-0 text-[11px] leading-5 text-muted-foreground"><summary className="w-fit cursor-pointer list-none py-1 underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring">查询范围与模型</summary><div className="space-y-1 pt-1"><p>范围：{message.scope || chatScopeLabel(citationFilters(current.filters, message.queryFilters))}</p>{message.model && <p>模型：{message.model}</p>}</div></details><Button size="icon-sm" variant="ghost" aria-label="复制回答" onClick={() => void copy(message)}>{copied === message.id ? <Check className="size-3.5" /> : <Copy className="size-3.5 text-muted-foreground" />}</Button></div>
+              <div className="flex items-start justify-between gap-3">
+                <QueryDetails message={message} filters={current.filters} />
+                <Button size="icon-sm" variant="ghost" aria-label="复制回答" onClick={() => void copy(message)}>{copied === message.id ? <Check className="size-3.5" /> : <Copy className="size-3.5 text-muted-foreground" />}</Button>
+              </div>
             </>}
           </article>)}
           {pending && <LoadingState label="正在查询会话与知识依据…" rows={2} className="min-h-28 py-2" />}
@@ -189,6 +237,23 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
           </div>
           <div className="mt-2 flex items-center gap-2 sm:gap-3">
             <span className="min-w-0 max-w-[40%] truncate px-1 py-1 text-[11px] text-muted-foreground" title={gateway.data?.model ? `当前网关模型：${gateway.data.model}` : undefined}>{gateway.data?.model || (gateway.loading ? '正在读取模型' : '使用已配置模型')}</span>
+            <Popover open={presetsOpen} onOpenChange={setPresetsOpen}>
+              <PopoverTrigger asChild>
+                <Button type="button" variant="ghost" size="xs" className="shrink-0 text-muted-foreground" disabled={!current || pending}>提问示例</Button>
+              </PopoverTrigger>
+              <PopoverContent side="top" align="start" sideOffset={8} aria-label="提问示例"
+                className="max-h-[min(65dvh,24rem,var(--radix-popover-content-available-height))] w-[min(23rem,calc(100vw_-_2rem))] overflow-y-auto overscroll-contain p-1.5"
+                onCloseAutoFocus={event => {
+                  if (!chosenPreset.current) return
+                  event.preventDefault()
+                  chosenPreset.current = false
+                  input.current?.focus()
+                }}>
+                {presets.map(({ prompt }) => <button key={prompt} type="button"
+                  className="block w-full rounded-sm px-2.5 py-2 text-left text-xs leading-5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:bg-muted focus-visible:text-foreground focus-visible:outline-hidden"
+                  onClick={() => { fillPreset(prompt); chosenPreset.current = true; setPresetsOpen(false) }}>{prompt}</button>)}
+              </PopoverContent>
+            </Popover>
             <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/70 sm:inline">{completion ? 'Esc 取消补全' : emptyDraft ? 'Enter 填入提问' : 'Enter 发送'} · Shift+Enter 换行</span>
             {pending ? <Button type="button" size="icon-sm" className="ml-auto shrink-0 sm:ml-0" aria-label="停止等待" title="停止等待" onClick={() => current && store.stop(current.id)}><Square className="size-3.5 fill-current" /></Button> : <Button type="submit" size="icon-sm" className="ml-auto shrink-0 rounded-lg sm:ml-0" aria-label="发送问题" disabled={!current?.draft.trim()}><ArrowUp className="size-4" /></Button>}
           </div>
