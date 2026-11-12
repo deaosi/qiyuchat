@@ -471,6 +471,9 @@ class Handler(BaseHTTPRequestHandler):
         if name.startswith("voc2/"):
             try:
                 paged = name == "voc2/topics" and ("limit" in qs or "offset" in qs)
+                preview = name in ("voc2/issue-pilot", "voc2/playbooks") and "first_page" in qs
+                if preview and qs["first_page"] != ["1"]:
+                    raise ValueError("首页参数无效。")
                 if paged:
                     limit, offset = _int(qs, "limit", 20), _int(qs, "offset", 0)
                     if not 1 <= limit <= 20 or offset < 0:
@@ -486,14 +489,17 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("高频问题趋势筛选无效。")
                     result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"),
                                              workbench=workbench == "1", trend=trend)
-                elif name in ("voc2/issue-pilot", "voc2/playbooks") and "first_page" in qs:
-                    if qs["first_page"] != ["1"]:
-                        raise ValueError("首页参数无效。")
-                    result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"), first_page=True)
                 else:
                     result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"))
                 if paged:
                     result = {**result, "items": result["items"][offset:offset + limit]}
+                elif preview and name == "voc2/issue-pilot":
+                    result = {**result, "items": result["items"][:6], "first_page_total": result["total"]}
+                elif preview:
+                    paths = result.get("case_paths", [])
+                    first_paths = paths[:8]
+                    result = {**result, "case_paths": first_paths, "items": result["items"][:8 - len(first_paths)],
+                              "first_page_total": len(paths) + len(result["items"])}
                 self._json(result)
             except (voc_service.ServiceError, voc.VocError) as exc:
                 self._json({"error": str(exc)}, exc.status)

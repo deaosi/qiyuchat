@@ -470,16 +470,26 @@ class TestVocHttp(LocalFixture):
             get.assert_not_called()
 
     def test_first_page_read_uses_the_normal_route_and_filters(self):
-        with patch("src.web.server.voc_service.get", return_value={}) as get:
-            for name in ("issue-pilot", "playbooks"):
+        items = [{"id": f"item-{index}"} for index in range(12)]
+        cases = [{"id": f"case-{index}"} for index in range(5)]
+        with patch("src.web.server.voc_service.get") as get:
+            for name, data, limit in (("issue-pilot", {"items": items, "total": len(items)}, 6),
+                                      ("playbooks", {"items": items, "case_paths": cases, "total": len(items)}, 8)):
+                get.return_value = data
                 path = "/api/voc2/" + name + "?source=local&days=7&first_page=1"
                 self.assertEqual(self.call(path)[0], 401)
-                self.assertEqual(self.call(path, headers=self.headers())[0], 200)
+                status, preview = self.call(path, headers=self.headers())[:2]
+                self.assertEqual(status, 200)
+                preview = json.loads(preview)
                 self.assertEqual(get.call_args.args[1], name)
                 self.assertEqual(get.call_args.args[2]["days"], 7)
-                self.assertEqual(get.call_args.kwargs, {"first_page": True})
-                self.assertEqual(self.call(path.replace("&first_page=1", ""), headers=self.headers())[0], 200)
                 self.assertEqual(get.call_args.kwargs, {})
+                combined = data.get("case_paths", []) + items
+                self.assertEqual(preview.get("case_paths", []) + preview["items"], combined[:limit])
+                self.assertEqual(preview["first_page_total"], len(combined))
+                self.assertEqual(preview["total"], data["total"])
+                status, full = self.call(path.replace("&first_page=1", ""), headers=self.headers())[:2]
+                self.assertEqual((status, json.loads(full)), (200, data))
                 get.reset_mock()
                 for query in ("first_page=2", "first_page=1&first_page=1"):
                     self.assertEqual(self.call("/api/voc2/" + name + "?" + query, headers=self.headers())[0], 400)
