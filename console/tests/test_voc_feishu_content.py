@@ -60,7 +60,7 @@ class TestFeishuContent(LocalFixture):
             {"id": topic_id(1), "question": "机器人没回复", "consultation_count": 3},
             {"id": topic_id(2), "question": "机器人答错了", "consultation_count": 1},
         ]
-        group = {**members[0], "theme": "回复异常", "members": members}
+        group = {**members[0], "category_key": topic_id(30), "theme": "回复异常", "members": members}
 
         def row(topic, qa):
             return {"topic_id": topic["id"], "data": {},
@@ -69,13 +69,16 @@ class TestFeishuContent(LocalFixture):
         rows = {members[0]["id"]: [row(members[0], qa) for qa in (1, 2, 3)],
                 members[1]["id"]: [row(members[1], 4)]}
         ranking = {"items": [group], "comparison": {"current": {"source_pairs": 4, "processed_pairs": 4}},
-                   "guest_anchors": {}, "guest_rows": rows, "guest_topics": {item["id"]: item for item in members}}
+                   "guest_anchors": {members[0]["id"]: [(1, "original-anchor")]},
+                   "guest_rows": rows, "guest_topics": {item["id"]: item for item in members}}
         with patch.object(export.voc_engine, "feishu_topics", return_value=ranking), \
                 patch.object(export.voc_topic_insights, "gaps", return_value=[]), \
                 patch.object(export, "_case_projection", side_effect=lambda row, _, **kwargs: row["source"]):
             document = export.build_document(self.cfg, self.scope, "topics")
 
         record = document["records"][0]
+        self.assertEqual(record["key"], members[0]["id"])
+        self.assertEqual(record["_guest_anchors"], [(1, "original-anchor")])
         self.assertEqual((record["title"], record["consultations"]), ("回复异常", 3))
         self.assertIn("机器人答错了", record["detail"])
         view = record["_guest_view"]

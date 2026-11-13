@@ -14,6 +14,30 @@ function json(data: unknown): Response {
 
 afterEach(() => vi.unstubAllGlobals())
 
+it('accepts a mapped category with one member only when its stable key and representative are valid', async () => {
+  const workbench = { ...filters, workbench: 1 } as const
+  const representative = `t_${'a'.repeat(24)}`
+  const item = {
+    id: representative, question: '为什么机器人不回复？', theme: '机器人回复异常', last_seen: '',
+    event_count: 1, customer_count: 1, session_count: 1, mention_count: 1, samples: [],
+    platforms: [], merchant_count: 1, unknown_merchant_sessions: 0,
+    trend: { status: 'unknown', previous_consultation_count: null, delta: null },
+    category_key: `t_${'b'.repeat(24)}`,
+    members: [{ id: representative, question: '为什么机器人不回复？', theme: '机器人不回复', consultation_count: 1 }],
+  }
+  const comparison = { current: { start: '', end: '', source_pairs: 1, processed_pairs: 1 }, previous: null,
+    comparable: false, note: '', last_synced_at: '' }
+  const valid = { items: [item], total: 1, category_total: 1, comparison }
+  const fetch = vi.fn().mockResolvedValueOnce(json(valid))
+  for (const invalid of [
+    { ...item, category_key: undefined }, { ...item, category_key: ' ' }, { ...item, members: [] },
+    { ...item, members: [{ ...item.members[0], id: `t_${'c'.repeat(24)}` }] },
+  ]) fetch.mockResolvedValueOnce(json({ ...valid, items: [invalid] }))
+  vi.stubGlobal('fetch', fetch)
+  await expect(apiGet('voc2/topics', workbench)).resolves.toEqual(valid)
+  for (let index = 0; index < 4; index++) await expect(apiGet('voc2/topics', workbench)).rejects.toMatchObject({ status: 502 })
+})
+
 describe('VOC knowledge reuse response', () => {
   const item = {
     id: 'knowledge-1', topic_id: 'topic-1', question: '如何启用规则？', answer: '在后台启用规则。', scope: '',

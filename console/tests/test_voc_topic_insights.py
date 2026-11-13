@@ -44,13 +44,72 @@ class TestTrendScope(unittest.TestCase):
 
 
 class TestWorkbenchProjection(unittest.TestCase):
+    def test_explicit_category_aliases_keep_original_topics_and_separate_sync_anomalies(self):
+        definitions = {
+            identity: {"id": identity, "theme": label, "question": f"{identity} 原始咨询", "primary_intent": intent,
+                       "boundary": "", "revision": 1}
+            for identity, label, intent in (
+                ("script", "话术配置", "configuration_guidance"),
+                ("scene", " 场景话术配置 ", "configuration_guidance"),
+                ("setup", "场景配置", "configuration_guidance"),
+                ("sync", "知识库同步", "configuration_guidance"),
+                ("operation", "同步操作", "configuration_guidance"),
+                ("problem", "同步异常", "functional_anomaly"),
+                ("sync_failure", "知识库同步异常", "functional_anomaly"),
+                ("repro", "场景配置", "functional_anomaly"),
+                ("unrelated", "场景配置导出", "configuration_guidance"),
+                ("earlier", "回复话术配置", "configuration_guidance"),
+            )
+        }
+
+        def event(topic, session, customer, qa_id):
+            return {"topic_id": topic, "source": {"qa_id": qa_id, "session_id": session, "customer_id": customer,
+                    "asked_at": 1, "asked_at_text": "2026-11-12", "answer": ""},
+                    "data": {"question_span": {"quote": definitions[topic]["question"], "start": 0, "end": 4},
+                             "domain": {"primary_intent": definitions[topic]["primary_intent"]}}}
+
+        rows = [event("script", "session-1", "a", 1), event("scene", "session-1", "a", 2),
+                event("setup", "session-2", "b", 3), event("sync", "session-3", "c", 4),
+                event("operation", "session-3", "c", 5), event("problem", "session-3", "c", 6),
+                event("sync_failure", "session-4", "c", 7), event("repro", "session-1", "a", 8),
+                event("unrelated", "session-5", "d", 9)]
+        prior = [event("script", "previous-1", "a", 10), event("earlier", "previous-1", "a", 11)]
+        period = {"source_pairs": 10, "processed_pairs": 10}
+        comparison = insights.comparison(period, period, "")
+        cfg = Settings()
+        with patch.object(engine, "_topic_definitions", return_value=definitions), patch.object(
+                engine, "_workbench_data", side_effect=[
+                    (rows, prior, set(), comparison), (rows, prior, set(), comparison),
+                    ([rows[2]], prior, set(), comparison),
+                ]):
+            rank = engine.topics(cfg, {}, workbench=True)
+            feishu = engine.feishu_topics(cfg, {}, grouped=True)
+            singleton, = engine.topics(cfg, {"group": "只在此群"}, workbench=True)["items"]
+        self.assertEqual(rank["items"], feishu["items"])
+        self.assertEqual(rank["category_total"], 5)
+        grouped = {item["theme"]: item for item in rank["items"]}
+        family = grouped["场景与话术配置"]
+        self.assertEqual((family["consultation_count"], family["session_count"], family["customer_count"]), (2, 2, 2))
+        self.assertEqual(family["trend"]["previous_consultation_count"], 1)
+        self.assertEqual({item["id"]: item["theme"].strip() for item in family["members"]},
+                         {"script": "话术配置", "scene": "场景话术配置", "setup": "场景配置"})
+        self.assertEqual(singleton["category_key"], family["category_key"])
+        self.assertEqual(singleton["id"], "setup")
+        self.assertEqual(singleton["members"][0]["id"], "setup")
+        self.assertEqual((grouped["数据同步"]["consultation_count"], grouped["数据同步异常"]["consultation_count"]), (1, 2))
+        self.assertNotEqual(grouped["数据同步"]["category_key"], grouped["数据同步异常"]["category_key"])
+        self.assertEqual(grouped["场景配置"]["id"], "repro")
+        self.assertEqual(grouped["场景配置导出"]["id"], "unrelated")
+        self.assertNotIn("category_key", grouped["场景配置导出"])
+        self.assertEqual(set(feishu["guest_topics"]), {row["topic_id"] for row in rows})
+
     def test_category_ranking_deduplicates_current_and_prior_without_collapsing_member_topics(self):
         definitions = {
             identity: {"id": identity, "theme": label, "question": question, "primary_intent": intent,
                        "boundary": "", "revision": 1}
             for identity, label, question, intent in (
                 ("wrong", "回复异常", "回复不正确的原因？", "functional_anomaly"),
-                ("missing", " 回复异常 ", "机器人有时不回复的原因？", "functional_anomaly"),
+                ("missing", " 机器人回复异常 ", "机器人有时不回复的原因？", "functional_anomaly"),
                 ("earlier", "回复异常", "为什么延迟回复？", "functional_anomaly"),
                 ("config", "回复异常", "回复内容怎么配置？", "configuration_guidance"),
                 ("order", "待办规则", "待办如何进入？", "configuration_guidance"),

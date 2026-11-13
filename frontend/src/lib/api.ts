@@ -311,16 +311,20 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     && Array.isArray(v.actions) && v.actions.every(action => isRecord(action) && typeof action.method_code === 'string'
       && ref(action.instruction) && ['suggested', 'verified'].includes(String(action.effect_status)) && nullableRef(action.verification))
     && isStringArray(v.tags)
-  const topicMembers = (members: unknown, representativeId: string) => Array.isArray(members) && members.length >= 2
+  const categoryKey = (value: unknown) => typeof value === 'string' && /^t_[a-f0-9]{24}$/.test(value)
+  const topicMembers = (members: unknown, representativeId: string, minimum: number) => Array.isArray(members) && members.length >= minimum
     && members.every(member => isRecord(member) && typeof member.id === 'string' && Boolean(member.id)
-      && typeof member.question === 'string' && Boolean(member.question.trim()) && isCount(member.consultation_count))
+      && typeof member.question === 'string' && Boolean(member.question.trim()) && isCount(member.consultation_count)
+      && (member.theme === undefined || typeof member.theme === 'string'))
     && members[0].id === representativeId && new Set(members.map(member => member.id)).size === members.length
   const topic = (v: unknown) => isRecord(v) && typeof v.id === 'string' && typeof v.question === 'string'
     && typeof v.theme === 'string' && typeof v.last_seen === 'string'
     && hasCounts(v, ['event_count', 'customer_count', 'session_count', 'mention_count']) && isStringArray(v.samples)
     && (v.primary_intent === undefined || intents.includes(String(v.primary_intent)))
     && (v.consultation_count === undefined || isCount(v.consultation_count))
-    && (v.members === undefined || topicMembers(v.members, v.id))
+    && (v.category_key === undefined
+      ? v.members === undefined || topicMembers(v.members, v.id, 2)
+      : categoryKey(v.category_key) && topicMembers(v.members, v.id, 1))
   const evidence = (v: unknown) => isRecord(v) && typeof v.id === 'string' && typeof v.event_id === 'string'
     && typeof v.question === 'string' && typeof v.answer === 'string' && typeof v.staff_source_verified === 'boolean'
     && Array.isArray(v.claims) && v.claims.every(claim => isRecord(claim) && typeof claim.role === 'string'

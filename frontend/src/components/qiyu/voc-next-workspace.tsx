@@ -23,8 +23,8 @@ export type DiagnosisStatus = 'reported' | 'pending' | 'config_cause_confirmed' 
 type SourceRef = { message_id: string | number; start: number; end: number }
 export type Ref = { source: 'question' | 'answer'; quote: string; start: number; end: number; role: string; alignment: 'exact'; source_refs?: SourceRef[] }
 export type Domain = { primary_intent: PrimaryIntent; fragment_role: 'request' | 'follow_up' | 'reproduction_context'; platforms: Ref[]; modules: Ref[]; merchant_goal: Ref | null; expected: Ref | null; actual: Ref | null; reproduction_context: Ref[]; prerequisites: Ref[]; operation_path: Ref[]; diagnosis: { status: DiagnosisStatus; cause_code: string; cause: Ref | null; evidence: Ref[] }; actions: { method_code: string; instruction: Ref; effect_status: 'suggested' | 'verified'; verification: Ref | null }[]; tags: string[] }
-type TopicMember = { id: string; question: string; consultation_count: number }
-export type Topic = { id: string; question: string; theme: string; primary_intent?: PrimaryIntent; consultation_count?: number; event_count: number; customer_count: number; session_count: number; mention_count: number; last_seen: string; samples: string[]; platforms?: string[]; merchant_count?: number; unknown_merchant_sessions?: number; trend?: TopicTrend; members?: TopicMember[] }
+type TopicMember = { id: string; question: string; consultation_count: number; theme?: string }
+export type Topic = { id: string; question: string; theme: string; category_key?: string; primary_intent?: PrimaryIntent; consultation_count?: number; event_count: number; customer_count: number; session_count: number; mention_count: number; last_seen: string; samples: string[]; platforms?: string[]; merchant_count?: number; unknown_merchant_sessions?: number; trend?: TopicTrend; members?: TopicMember[] }
 export type KnowledgeReuse = 'direct' | 'reference' | 'history' | 'blocked'
 export type Knowledge = { reuse_level?: KnowledgeReuse; id: string; topic_id: string; variant_id?: string; kind?: VocKnowledgeKind; diagnosis_status?: DiagnosisStatus; effect_status?: 'suggested' | 'verified'; applicability?: Ref[]; confirmed_cause?: Ref | null; conversation_verification?: VocConversationVerification; knowledge_reuse?: VocKnowledgeReuse; question: string; answer: string; scope: string; steps: string[]; cautions: string[]; reply_patterns: string[]; evidence_count: number; status: 'ready'; version: number; updated_at: string; evidence: Evidence[] }
 export type Evidence = { id: string; event_id: string; qa_id?: number | string; question: string; answer: string; question_quote?: string; source_kind?: string; customer_name?: string; customer_id?: string; group_name?: string; staff_name?: string; asked_at?: string | number; asked_at_text?: string; session_id?: string; domain?: Domain; staff_source_verified: boolean; question_message_ids?: (string | number)[]; workbench?: { commerce_settings: Ref[]; scenario_conditions: Ref[]; actual: Ref[]; question_message_id?: string; suspected_report_ready?: boolean }; claims: { role: string; quote: string; start: number; end: number; source_refs: SourceRef[] }[] }
@@ -109,8 +109,9 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
     finally { setRunning(false) }
   }
 
+  const rankedByCategory = topics.data?.category_total !== undefined
   const metrics = [
-    { label: topics.data?.category_total === undefined ? '高频主题' : '高频分类', value: topics.data?.category_total ?? summary.data?.topic_count },
+    { label: rankedByCategory ? '高频分类' : '高频主题', value: topics.data?.category_total ?? summary.data?.topic_count },
     { label: '咨询次数', value: topics.data?.category_consultation_count ?? summary.data?.consultation_count },
     { label: '咨询片段', value: summary.data?.total_events },
   ]
@@ -152,8 +153,8 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
     </Card>}
     <Card>
       <CardHeader>
-        <CardTitle ref={rankingHeading} role="heading" aria-level={2} tabIndex={-1} className="scroll-mt-4">咨询主题排行</CardTitle>
-        <CardDescription>按咨询次数排序，同一会话的同一主题去重。</CardDescription>
+        <CardTitle ref={rankingHeading} role="heading" aria-level={2} tabIndex={-1} className="scroll-mt-4">{rankedByCategory ? '咨询分类排行' : '咨询主题排行'}</CardTitle>
+        <CardDescription>{rankedByCategory ? '按咨询次数排序，同一会话内同一商家的同类咨询计一次。' : '按咨询次数排序，同一会话的同一主题去重。'}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div role="group" aria-label="趋势筛选" className="flex w-fit max-w-full flex-wrap gap-1 rounded-lg border bg-muted/35 p-1">
@@ -165,12 +166,15 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
           {topics.data?.items.length ? <div className="divide-y">{topics.data.items.map((item, index) => {
             const badge = trendBadgeText(item.trend)
             const platforms = item.platforms?.slice(0, 3).join('、')
-            return <button type="button" key={item.id} onClick={() => setRanking({ scopeKey, page, selectedId: item.members?.[0]?.id ?? item.id, members: item.members })} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-sm px-1 py-4 text-left transition-colors hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring sm:px-2">
+            const memberCount = item.members?.length ?? 0
+            const theme = item.theme.trim()
+            const showQuestion = theme && theme !== item.question.trim() && (!item.category_key || memberCount < 2)
+            return <button type="button" key={item.category_key ?? item.id} onClick={() => setRanking({ scopeKey, page, selectedId: item.members?.[0]?.id ?? item.id, members: item.members })} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-sm px-1 py-4 text-left transition-colors hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring sm:px-2">
               <span className="flex min-w-0 items-start gap-3">
                 <span className="w-7 shrink-0 text-right text-sm tabular-nums text-muted-foreground"><span className="sr-only">排名 </span>{count(offset + index + 1)}</span>
                 <span className="min-w-0 [overflow-wrap:anywhere]">
-                  <span className="flex flex-wrap items-center gap-1.5"><span className="font-medium">{item.theme.trim() || item.question}</span>{badge && <Badge variant="outline" className="font-normal">{badge}</Badge>}</span>
-                  {item.theme.trim() && item.theme.trim() !== item.question.trim() && <span className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.question}</span>}
+                  <span className="flex flex-wrap items-center gap-1.5"><span className="font-medium">{theme || item.question}</span>{badge && <Badge variant="outline" className="font-normal">{badge}</Badge>}</span>
+                  {showQuestion && <span className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.question}</span>}
                   <span className="mt-1 block text-xs leading-5 text-muted-foreground">{[intentLabels[item.primary_intent || 'unclear'], platforms, item.last_seen && `最近 ${displayTime(item.last_seen)}`].filter(Boolean).join(' · ')}</span>
                 </span>
               </span>
@@ -179,14 +183,14 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
                   <span className="font-medium text-foreground">{count(item.consultation_count)} 次咨询</span>
                   <span className="flex flex-col items-end gap-x-1 sm:flex-row"><span>{count(item.session_count)} 个会话</span>{item.merchant_count !== undefined && <><span aria-hidden="true" className="hidden sm:inline">·</span><span>识别 {count(item.merchant_count)} 家商家</span></>}</span>
                 </span>
-                <span className="shrink-0 rounded-md border px-2 py-1 text-xs font-medium">{item.members && item.members.length > 1 ? `查看 ${count(item.members.length)} 个问法` : '查看问答'}</span>
+                <span className="shrink-0 rounded-md border px-2 py-1 text-xs font-medium">{memberCount > 1 ? `查看 ${count(memberCount)} 个细分问题` : '查看问答'}</span>
               </span>
             </button>
           })}</div> : <p role="status" className="py-10 text-center text-sm text-muted-foreground">{emptyTrendMessage(trend, comparison)}</p>}
         </QueryPanel>
       </CardContent>
       {(pageLoading || page > 0 || Boolean(topics.data?.total)) && <CardFooter className="flex-wrap justify-between gap-3 border-t text-xs text-muted-foreground">
-        <span>{topics.data ? `共 ${count(topics.data.total)} 个${topics.data.category_total === undefined ? '主题' : '分类'}` : ''}</span>
+        <span>{topics.data ? `共 ${count(topics.data.total)} 个${rankedByCategory ? '分类' : '主题'}` : ''}</span>
         <nav aria-label="高频问题分页" className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" disabled={pageLoading || page === 0} onClick={() => changePage(page - 1)}><ChevronLeft />上一页</Button>
           <span aria-live="polite" className="tabular-nums">第 {page + 1}{lastPage !== null && !pageLoading ? ` / ${lastPage + 1}` : ''} 页</span>
@@ -201,8 +205,8 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
     }}>
       <SheetContent className="w-full gap-0 sm:max-w-3xl xl:max-w-4xl">
         <TopicDetailPanel exchangeOnly>
-          {selectedMembers && selectedMembers.length > 1 && <div className="mb-4 space-y-2" role="group" aria-label="选择具体问法">
-            <p className="text-sm font-medium">选择具体问法</p>
+          {selectedMembers && selectedMembers.length > 1 && <div className="mb-4 space-y-2" role="group" aria-label="选择细分问题">
+            <p className="text-sm font-medium">选择细分问题</p>
             <div className="grid max-h-56 gap-2 overflow-y-auto pr-1">{selectedMembers.map(member => <Button key={member.id} type="button" variant={member.id === selectedId ? 'default' : 'outline'}
               size="sm" className="h-auto min-w-0 justify-start whitespace-normal py-2 text-left [overflow-wrap:anywhere]" aria-pressed={member.id === selectedId}
               onClick={() => setRanking(current => ({ ...current, selectedId: member.id, members: selectedMembers }))}>

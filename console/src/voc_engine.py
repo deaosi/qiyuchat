@@ -35,6 +35,26 @@ from .voc_semantics import LocalBGE, SemanticError, retrieve
 from .voc_search import rank_materials
 
 PIPELINE_VERSION = VERSION + "/" + quality.VERSION
+_RANK_FAMILIES = {
+    ("configuration_guidance", "scene_reply_setup"): (
+        "场景与话术配置",
+        ("话术配置", "场景话术配置", "场景话术设置", "场景配置", "场景设置", "场景条件配置",
+         "话术设置", "回复配置", "回复话术配置", "回复内容配置"),
+    ),
+    ("configuration_guidance", "data_sync"): (
+        "数据同步",
+        ("同步操作", "同步设置", "同步配置", "知识同步", "知识库同步", "表格同步", "商品数据同步", "商品同步"),
+    ),
+    ("functional_anomaly", "data_sync"): (
+        "数据同步异常",
+        ("同步异常", "同步失败", "同步问题", "知识同步异常", "知识库同步异常", "表格同步异常",
+         "商品数据同步异常", "商品同步异常", "商品同步"),
+    ),
+    ("functional_anomaly", "robot_reply"): (
+        "回复异常",
+        ("机器人回复异常",),
+    ),
+}
 
 
 class EngineError(voc.VocError):
@@ -437,9 +457,20 @@ def _consultations(rows: list[dict], *, category: bool) -> int:
     return len({variants.consultation_key(row)[:parts] for row in rows})
 
 
+def _rank_label(label: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", label).casefold().split())
+
+
+_RANK_ALIASES = {(intent, _rank_label(label)): family
+                 for (intent, family), (canonical_label, aliases) in _RANK_FAMILIES.items()
+                 for label in (canonical_label, *aliases)}
+
+
 def _rank_category(topic: dict) -> tuple[str, ...]:
-    label = " ".join(unicodedata.normalize("NFKC", topic["theme"]).casefold().split())
+    label = _rank_label(topic["theme"])
     intent = topic.get("primary_intent", "")
+    if family := _RANK_ALIASES.get((intent, label)):
+        return ("family", intent, family)
     if label and intent in ("functional_anomaly", "configuration_guidance"):
         return ("theme", intent, label)
     return ("topic", topic["id"])
@@ -465,9 +496,15 @@ def _rank_categories(definitions: dict, items: list[dict], rows: list[dict], pri
         top = children[0]
         current = current_rows[key]
         topic = {**_public_topic(top, current), "consultation_count": _consultations(current, category=True)}
-        if len(children) > 1:
-            topic["theme"] = top["theme"].strip()
-            topic["members"] = [{field: item[field] for field in ("id", "question", "consultation_count")} for item in children]
+        if key[0] == "family":
+            topic["theme"] = _RANK_FAMILIES[(key[1], key[2])][0]
+            # The representative's topic ID may change with the selected period.
+            # A publication can use this stable family key independently.
+            topic["category_key"] = "t_" + assets.digest(("voc-rank-category", key))[:24]
+        if key[0] == "family" or len(children) > 1:
+            topic["theme"] = topic["theme"].strip()
+            topic["members"] = [{field: item[field] for field in ("id", "question", "consultation_count", "theme")}
+                                for item in children]
         ranked.append(_topic_insight(topic, current, prior_rows[key], key in seen, comparison, category=True))
     return sorted(ranked, key=lambda item: (-item["consultation_count"], -item["event_count"], item["id"]))
 

@@ -43,7 +43,7 @@ describe('VOC frequency ranking pagination', () => {
       { id: 'child-1', question: '为什么没有触发？', consultation_count: 4 },
       { id: 'child-2', question: '为什么回复错误？', consultation_count: 3 },
     ]
-    const grouped = { ...topics[0], id: 'child-1', theme: '回复异常', question: members[0].question, consultation_count: 6, members }
+    const grouped = { ...topics[0], id: 'child-1', category_key: 'reply-anomaly', theme: '回复异常', question: members[0].question, consultation_count: 6, members }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
       if (name === 'voc2/topics') return { items: [grouped], total: 1, category_total: 1, category_consultation_count: 6 }
       if (name === 'voc2/topic') {
@@ -57,13 +57,16 @@ describe('VOC frequency ranking pagination', () => {
       return summary
     })
     render(<VocFrequencyWorkspace filters={{ ...initialScope, group: '分组测试' }} {...handlers} />)
-    const row = await screen.findByRole('button', { name: /排名\s*1.*回复异常.*6 次咨询.*查看 2 个问法/ })
+    const row = await screen.findByRole('button', { name: /排名\s*1.*回复异常.*6 次咨询.*查看 2 个细分问题/ })
+    expect(screen.getByRole('heading', { name: '咨询分类排行' })).toBeTruthy()
+    expect(within(row).queryByText(members[0].question)).toBeNull()
     expect(screen.getByText('高频分类')).toBeTruthy()
     expect(within(screen.getByText('咨询次数').parentElement!).getByText('6')).toBeTruthy()
     expect(screen.getByText('共 1 个分类')).toBeTruthy()
     fireEvent.click(row)
     const drawer = within(await screen.findByRole('dialog', { name: '问题与原句依据' }))
     expect(await drawer.findByText('客服回复 child-1')).toBeTruthy()
+    expect(drawer.getByRole('group', { name: '选择细分问题' })).toBeTruthy()
     const first = drawer.getByRole('button', { name: /为什么没有触发.*4 次咨询/ })
     const second = drawer.getByRole('button', { name: /为什么回复错误.*3 次咨询/ })
     expect(first.getAttribute('aria-pressed')).toBe('true')
