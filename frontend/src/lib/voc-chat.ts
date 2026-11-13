@@ -8,7 +8,7 @@ export type ChatExample = {
   time?: string
   outcome?: string
 }
-export type ChatAnswerMode = 'grounded_model' | 'computed' | 'source_reference' | 'insufficient'
+export type ChatAnswerMode = 'grounded_model' | 'grounded_selection' | 'computed' | 'source_reference' | 'insufficient'
 export type ChatAnswer = { answer: string; citations: ChatCitation[]; examples?: ChatExample[]; scope: { label: string; start?: string; end?: string; query_filters?: VocQueryFilters }; model: string; tools: { name: string; label: string }[]; answer_mode?: ChatAnswerMode; warnings?: string[] }
 export type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; citations?: ChatCitation[]; examples?: ChatExample[]; scope?: string; queryFilters?: VocQueryFilters; model?: string; tools?: { name: string; label: string }[]; answerMode?: ChatAnswerMode; warnings?: string[] }
 export type ChatThread = { id: string; title: string; filters: ApiFilters; messages: ChatMessage[]; draft: string; updatedAt: number; error?: string }
@@ -21,7 +21,7 @@ export const CHAT_STORAGE_KEY = 'qiyu-voc-chat-v1'
 const projectionKeys = ['days', 'start', 'end', 'group', 'staff', 'customer', 'q', 'support_intent', 'diagnosis_status', 'replied', 'cluster', 'focus_topic'] as const
 const intents = ['all', 'configuration_guidance', 'functional_anomaly', 'unclear'] as const
 const diagnoses = ['all', 'reported', 'pending', 'config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed', 'not_applicable'] as const
-const answerModes = ['grounded_model', 'computed', 'source_reference', 'insufficient'] as const
+const answerModes = ['grounded_model', 'grounded_selection', 'computed', 'source_reference', 'insufficient'] as const
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown, maximum = 500) => typeof value === 'string' ? value.slice(0, maximum) : ''
 

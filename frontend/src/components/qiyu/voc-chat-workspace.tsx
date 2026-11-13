@@ -49,6 +49,7 @@ const topicSuggestions: Preset[] = [
 const welcomeSuggestions = [suggestions[0], ...overviewSuggestions, evidenceAnalysisSuggestion]
 const answerModeLabels: Record<ChatAnswerMode, string> = {
   grounded_model: '模型结合查询结果整理',
+  grounded_selection: '模型选取重点，按原始依据呈现',
   computed: '按数据直接统计',
   source_reference: '根据已查询的依据呈现',
   insufficient: '当前依据不足',
@@ -71,7 +72,7 @@ function QueryDetails({ message, filters }: { message: ChatMessage; filters: Api
         <div className="flex flex-wrap gap-x-2"><dt>范围</dt><dd>{message.scope || chatScopeLabel(citationFilters(filters, message.queryFilters))}</dd></div>
         {message.answerMode && <div className="flex flex-wrap gap-x-2"><dt>回答方式</dt><dd>{answerModeLabels[message.answerMode]}</dd></div>}
         {message.model && <div className="flex flex-wrap gap-x-2">
-          <dt>{message.answerMode && message.answerMode !== 'grounded_model' ? '配置模型' : '模型'}</dt>
+          <dt>{message.answerMode === 'grounded_model' || message.answerMode === 'grounded_selection' ? '模型' : '配置模型'}</dt>
           <dd className="min-w-0 [overflow-wrap:anywhere]">{message.model}</dd>
         </div>}
       </dl>
