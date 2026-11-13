@@ -697,6 +697,16 @@ class TestAdminKey(LocalFixture):
         self.assertNotIn(key, headers["Set-Cookie"])
         cookie = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
         self.assertEqual(self.call("/", headers=cookie)[0], 200)
+        for managed in (cookie, {"X-Admin-Key": key}):
+            with self.subTest(managed_credential=next(iter(managed))):
+                status, denied, response = self.call("/panel", headers=managed)
+                self.assertEqual(status, 403)
+                self.assertEqual(response["Content-Type"], "text/plain; charset=utf-8")
+                self.assertNotIn(b"<form", denied)
+                self.assertEqual(self.call("/panel.js", headers=managed)[0], 403)
+        status, _, response = self.call("/login", "POST", urlencode({"key": key, "next": "/panel"}).encode())
+        self.assertEqual(status, 403)
+        self.assertNotIn("Set-Cookie", response)
         self.assertEqual(self.call("/api/panel/keys", headers=cookie)[0], 403)
         self.assertEqual(self.panel_write({"action": "revoke", "id": key_id},
                                           headers={**cookie, "X-Admin-Key": ""})[0], 403)

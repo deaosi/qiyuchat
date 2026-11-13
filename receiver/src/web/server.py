@@ -280,6 +280,13 @@ class Handler(BaseHTTPRequestHandler):
     def _send_login(self, error: str = "", status: int = 401, *, panel: bool = False) -> None:
         self._send(self._login_html(error, panel), "text/html; charset=utf-8", status)
 
+    def _panel_forbidden(self, *, page: bool = False) -> None:
+        message = "此页面仅对使用恒密钥登录的管理员开放。"
+        if page:
+            self._send(message.encode("utf-8"), "text/plain; charset=utf-8", 403)
+        else:
+            self._json({"error": message}, 403)
+
     def _panel_gate(self, path: str) -> bool:
         if not self._need_auth():
             self._json({"error": "管理员密钥管理未启用。"}, 403)
@@ -287,15 +294,15 @@ class Handler(BaseHTTPRequestHandler):
         presented = self.headers.get("X-Admin-Key", "").strip() or self._cookie_value(self.COOKIE)
         if self._permanent_key_ok(presented):
             return True
-        if presented and not self._managed_session_ok(presented):
+        if presented and not (self._managed_session_ok(presented) or self.server.key_store.identify(presented)):
             self._note_fail()
             if self._rate_limited():
                 self._json({"error": "尝试次数过多，请 10 分钟后再试"}, 429)
                 return False
-        if path == "/panel":
+        if path == "/panel" and not presented:
             self._send_login("请使用恒密钥登录密钥管理。", panel=True)
         else:
-            self._json({"error": "密钥管理需要使用恒密钥登录。"}, 403)
+            self._panel_forbidden(page=path == "/panel")
         return False
 
     def _gate(self, path: str, qs: dict[str, list[str]]) -> bool:
@@ -654,7 +661,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if key_id := self.server.key_store.identify(key):
             if panel:
-                self._send_login("请使用恒密钥登录密钥管理。", 403, panel=True)
+                self._panel_forbidden(page=True)
             else:
                 self._redirect("/", self._cookie_header(self._managed_session(key_id)))
             return
