@@ -59,7 +59,7 @@ class EvidenceBoundComposition(unittest.TestCase):
         self.assertEqual(model.call_args_list[0].args[1], answer.WRITE)
         self.assertEqual(model.call_args_list[1].args[1], answer.VERIFY)
         payload = model.call_args_list[0].args[2]
-        self.assertEqual(payload['history'], history[-4:])
+        self.assertEqual(payload['history'], history)
         self.assertNotIn('_citation', payload['sources'][0])
 
     def test_unknown_reference_is_rejected_before_semantic_verification(self):

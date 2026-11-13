@@ -15,18 +15,74 @@ export type ChatAnswer = { answer: string; citations: ChatCitation[]; examples?:
 export type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; citations?: ChatCitation[]; examples?: ChatExample[]; scope?: string; queryFilters?: VocQueryFilters; model?: string; tools?: { name: string; label: string }[]; answerMode?: ChatAnswerMode; warnings?: string[] }
 export type ChatThread = { id: string; title: string; filters: ApiFilters; messages: ChatMessage[]; draft: string; updatedAt: number; error?: string }
 export type ChatContext = { query_filters: VocQueryFilters; citations: Pick<ChatCitation, 'kind' | 'id'>[] }
-export type ChatRequest = { message: string; history: { role: 'user' | 'assistant'; content: string }[]; context?: ChatContext }
+export type ChatRequest = { message: string; history: { role: 'user' | 'assistant'; content: string }[]; summary?: string; context?: ChatContext }
 type ChatSnapshot = { threads: ChatThread[]; activeId: string; pending: Record<string, boolean>; storageWarning: boolean }
 type Transport = (filters: ApiFilters, body: ChatRequest, signal: AbortSignal) => Promise<ChatAnswer>
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
 export const CHAT_STORAGE_KEY = 'qiyu-voc-chat-v1'
 const requestHistoryLength = 6
 const requestHistoryMessageLength = 1000
+const requestSummaryLength = 1800
+const summaryTurnLimit = 4
 const projectionKeys = ['days', 'start', 'end', 'group', 'staff', 'customer', 'q', 'support_intent', 'diagnosis_status', 'replied', 'cluster', 'focus_topic'] as const
 const intents = ['all', 'configuration_guidance', 'functional_anomaly', 'unclear'] as const
 const diagnoses = ['all', 'reported', 'pending', 'config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed', 'not_applicable'] as const
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown, maximum = 500) => typeof value === 'string' ? value.slice(0, maximum) : ''
+
+function takeCharacters(value: string, limit: number): string {
+  return Array.from(value.slice(0, limit * 2)).slice(0, limit).join('')
+}
+
+function excerpt(value: string, limit: number): string {
+  const line = takeCharacters(value, limit * 4).replace(/\s+/g, ' ').trim()
+  return takeCharacters(line, limit)
+}
+
+function subjectTerms(value: string): Set<string> {
+  const terms = new Set<string>()
+  const subject = excerpt(value, 200).toLowerCase()
+    .replace(/之前|刚才|上面|继续|查询|告诉我|请问|如何|怎么|哪些|什么|相关|问题|案例|依据|客服|回复/g, ' ')
+  for (const phrase of subject.match(/[\u3400-\u9fff]+|[a-z0-9][a-z0-9._-]*/g) || []) {
+    if (/^[a-z0-9]/.test(phrase)) terms.add(phrase)
+    else for (let i = 1; i < phrase.length; i++) terms.add(phrase.slice(i - 1, i + 1))
+  }
+  return terms
+}
+
+function summarizeEarlierTurns(messages: ChatMessage[], question: string): string | undefined {
+  if (!messages.length) return undefined
+  const turns: { question?: ChatMessage; answer?: ChatMessage }[] = []
+  for (const message of messages) {
+    const current = turns.at(-1)
+    if (message.role === 'user') turns.push({ question: message })
+    else if (current && !current.answer) current.answer = message
+    else turns.push({ answer: message })
+  }
+  // Preserve the original subject, recent continuity, and an older turn related to the new question.
+  const newestStart = Math.max(1, turns.length - 2)
+  const selected = new Set([0, ...turns.slice(newestStart).map((_, i) => newestStart + i)])
+  const requested = subjectTerms(question)
+  let best = -1, bestScore = -1
+  for (let i = newestStart - 1; i > 0; i--) {
+    const turn = turns[i]
+    const titles = turn.answer?.citations?.slice(0, 2).map(ref => ref.title) || []
+    const terms = subjectTerms([...titles, turn.question?.content].filter(Boolean).join(' '))
+    const score = [...requested].filter(term => terms.has(term)).length
+    if (score > bestScore) { best = i; bestScore = score }
+  }
+  if (best >= 0) selected.add(best)
+  const entryLimit = Math.floor((requestSummaryLength - summaryTurnLimit * 2) / summaryTurnLimit)
+  return [...selected].sort((a, b) => a - b).map(index => {
+    const { question: asked, answer } = turns[index]
+    const cited = answer?.citations?.slice(0, 2).map(ref => excerpt(ref.title, 32)).filter(Boolean).join('、')
+    const lines = [asked?.content && `提问：${excerpt(asked.content, 125)}`,
+      answer?.scope && `当时范围：${excerpt(answer.scope, 63)}`,
+      cited && `引用标题：${cited}`,
+      answer?.content && `答复摘录：${excerpt(answer.content, 175)}`].filter(Boolean)
+    return takeCharacters(lines.join('\n'), entryLimit)
+  }).filter(Boolean).join('\n\n') || undefined
+}
 
 function readExamples(value: unknown): ChatExample[] | undefined {
   if (!Array.isArray(value)) return undefined
@@ -215,19 +271,20 @@ export function createChatStore(options: { storage?: StorageLike; transport?: Tr
       const thread = state.threads.find(t => t.id === threadId), question = content.trim()
       if (!thread || requests.has(threadId) || !question || question.length > 2000) return
       const request = { controller: new AbortController(), messageId: id(), text: question }
-      // Match the server's history budget without truncating the saved conversation.
-      const history = thread.messages
+      const messages = thread.messages
         .filter(message => (message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string')
+      const history = messages
         .slice(-requestHistoryLength)
         .map(({ role, content }) => ({
           role,
-          content: Array.from(content.slice(0, requestHistoryMessageLength * 2)).slice(0, requestHistoryMessageLength).join(''),
+          content: takeCharacters(content, requestHistoryMessageLength),
         }))
+      const summary = summarizeEarlierTurns(messages.slice(0, -requestHistoryLength), question)
       const context = previousContext(thread.messages)
       requests.set(threadId, request)
       update(threadId, t => ({ ...t, title: t.messages.length ? t.title : question.slice(0, 42), messages: [...t.messages, { id: request.messageId, role: 'user', content: question }], draft: '', error: '', updatedAt: now() }), { ...state.pending, [threadId]: true })
       try {
-        const answer = await transport({ ...thread.filters }, { message: question, history, ...(context ? { context } : {}) }, request.controller.signal)
+        const answer = await transport({ ...thread.filters }, { message: question, history, ...(summary ? { summary } : {}), ...(context ? { context } : {}) }, request.controller.signal)
         if (requests.get(threadId) !== request) return
         requests.delete(threadId)
         const queryFilters = { ...answer.scope.query_filters }

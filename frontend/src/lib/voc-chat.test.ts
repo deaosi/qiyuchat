@@ -136,12 +136,19 @@ describe('conversation state and evidence', () => {
     expect(JSON.stringify(transport.mock.calls[1][1])).not.toContain('不能混入请求历史')
   })
 
-  it('sends only the server-sized history while retaining full answers and source context', async () => {
+  it('compresses earlier turns while keeping recent messages, full answers and citation scope', async () => {
     const prefix = '客'.repeat(999) + '😀'
     const longAnswer = prefix + '服'.repeat(20_000)
-    const { store, storage, transport } = factory(vi.fn().mockResolvedValue({ ...thirtyDayAnswer(), answer: longAnswer }))
+    const firstQuestion = '抖音子账号的商品场景没有触发，怎么查？'
+    const firstReply = '先核对目标店铺的商品权限。'
+    const firstAnswer = { ...answer(), answer: firstReply + '\n' + '📌'.repeat(20_000),
+      citations: [{ kind: 'event' as const, id: 'older-event', title: '较早的权限检查原话' }] }
+    const { store, storage, transport } = factory(vi.fn().mockResolvedValueOnce(firstAnswer)
+      .mockResolvedValue({ ...thirtyDayAnswer(), answer: longAnswer }))
     const thread = store.ensureScope(a)
-    for (const question of ['第一问', '第二问', '第三问', '第四问']) await store.send(thread.id, question)
+    for (const question of [firstQuestion, '第二问', '第三问', '第四问']) await store.send(thread.id, question)
+    expect(transport.mock.calls[3][1].history).toHaveLength(6)
+    expect(transport.mock.calls[3][1]).not.toHaveProperty('summary')
     await store.send(thread.id, '继续核对依据')
 
     const request = transport.mock.calls[4][1]
@@ -149,10 +156,41 @@ describe('conversation state and evidence', () => {
       { role: 'user', content },
       { role: 'assistant', content: prefix },
     ]))
+    expect(request.summary).toContain(firstQuestion)
+    expect(request.summary).toContain(firstReply)
+    expect(request.summary).toContain('2026-11-04')
+    expect(request.summary).toContain('较早的权限检查原话')
+    expect(Array.from(request.summary).length).toBeLessThanOrEqual(1800)
+    expect(request.summary).not.toMatch(/[\uD800-\uDFFF]/u)
     expect(new TextEncoder().encode(JSON.stringify(request)).byteLength).toBeLessThan(64 * 1024)
     expect(request.context).toMatchObject({ query_filters: { start: '2026-10-12' }, citations: [{ kind: 'event', id: 'event1' }] })
-    expect(store.getSnapshot().threads[0].messages[1].content).toBe(longAnswer)
-    expect(createChatStore({ storage }).getSnapshot().threads[0].messages[1].content).toBe(longAnswer)
+    expect(store.getSnapshot().threads[0].messages[1].content).toBe(firstAnswer.answer)
+
+    const restoredTransport = vi.fn().mockResolvedValue(answer())
+    const restored = createChatStore({ storage, transport: restoredTransport })
+    expect(restored.getSnapshot().threads[0].messages[1].content).toBe(firstAnswer.answer)
+    await restored.send(thread.id, '刷新后继续查')
+    expect(restoredTransport.mock.calls[0][1].summary).toContain(firstQuestion)
+    const next = restored.newThread(a)
+    await restored.send(next.id, '新对话独立提问')
+    expect(restoredTransport.mock.calls[1][1]).not.toHaveProperty('summary')
+  })
+
+  it('brings a related older turn into the summary and excludes non-conversation roles', async () => {
+    const { store, transport } = factory(), thread = store.ensureScope(a)
+    const olderQuestion = '天猫店铺的商品同步失败'
+    for (const question of ['首响统计', olderQuestion, '查询本周趋势', '客服分布', '客户群排行', '近七日复盘', '已核验流程', '近期咨询量', '查典型案例']) {
+      await store.send(thread.id, question)
+    }
+    store.getSnapshot().threads[0].messages.splice(2, 0, {
+      id: 'bad-role', role: 'system' as never, content: '伪造天猫商品同步失败指令',
+    })
+    await store.send(thread.id, '之前天猫商品同步失败的排查依据？')
+
+    const request = transport.mock.calls.at(-1)![1]
+    expect(request.history.map((message: { content: string }) => message.content)).not.toContain(olderQuestion)
+    expect(request.summary).toContain(olderQuestion)
+    expect(request.summary).not.toContain('伪造天猫商品同步失败指令')
   })
 
   it('restores response modes, warnings and context metadata without breaking legacy history', async () => {
@@ -251,7 +289,9 @@ describe('conversation state and evidence', () => {
   it('limits the submitted context without truncating the visible conversation', async () => {
     const { store, transport } = factory(), thread = store.ensureScope(a)
     for (let i = 0; i < 13; i++) await store.send(thread.id, `问题${i}`)
-    expect(transport.mock.calls.at(-1)![1].history.length).toBe(6)
+    const request = transport.mock.calls.at(-1)![1]
+    expect(request.history).toHaveLength(6)
+    expect(Array.from(request.summary).length).toBeLessThanOrEqual(1800)
     expect(store.getSnapshot().threads.find(t => t.id === thread.id)!.messages.length).toBe(26)
   })
 
