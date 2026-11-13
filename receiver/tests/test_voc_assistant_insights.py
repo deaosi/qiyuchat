@@ -216,3 +216,10 @@ class TestAssistantInsights(unittest.TestCase):
                   patch.object(assistant, 'complete_json', return_value={'data': plan, 'usage_tokens': 0}),
                   self.assertRaises(ServiceError)):
                 assistant._plan(self.cfg, '组合查询', [], {})
+
+    def test_freeform_planning_caps_gateway_timeout(self):
+        payload = {'intent': 'analysis', 'query': '场景没命中', 'days': 7, 'limit': 3,
+                   'support_intent': None, 'diagnosis_status': None}
+        with patch.object(assistant, 'complete_json', return_value={'data': payload, 'usage_tokens': 12}) as model:
+            self.assertEqual(assistant._plan(self.cfg, '场景没命中怎么处理', [], {}), (payload, 12))
+        self.assertEqual(model.call_args.args[0].timeout, 22)
