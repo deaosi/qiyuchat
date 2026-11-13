@@ -136,6 +136,25 @@ describe('conversation state and evidence', () => {
     expect(JSON.stringify(transport.mock.calls[1][1])).not.toContain('不能混入请求历史')
   })
 
+  it('sends only the server-sized history while retaining full answers and source context', async () => {
+    const prefix = '客'.repeat(999) + '😀'
+    const longAnswer = prefix + '服'.repeat(20_000)
+    const { store, storage, transport } = factory(vi.fn().mockResolvedValue({ ...thirtyDayAnswer(), answer: longAnswer }))
+    const thread = store.ensureScope(a)
+    for (const question of ['第一问', '第二问', '第三问', '第四问']) await store.send(thread.id, question)
+    await store.send(thread.id, '继续核对依据')
+
+    const request = transport.mock.calls[4][1]
+    expect(request.history).toEqual(['第二问', '第三问', '第四问'].flatMap(content => [
+      { role: 'user', content },
+      { role: 'assistant', content: prefix },
+    ]))
+    expect(new TextEncoder().encode(JSON.stringify(request)).byteLength).toBeLessThan(64 * 1024)
+    expect(request.context).toMatchObject({ query_filters: { start: '2026-10-12' }, citations: [{ kind: 'event', id: 'event1' }] })
+    expect(store.getSnapshot().threads[0].messages[1].content).toBe(longAnswer)
+    expect(createChatStore({ storage }).getSnapshot().threads[0].messages[1].content).toBe(longAnswer)
+  })
+
   it('restores response modes, warnings and context metadata without breaking legacy history', async () => {
     const response: ChatAnswer = { ...thirtyDayAnswer(), answer_mode: 'grounded_selection', warnings: ['当前来源未覆盖全部会话'] }
     const { store, storage } = factory(vi.fn().mockResolvedValue(response)), thread = store.ensureScope(a)
@@ -232,7 +251,7 @@ describe('conversation state and evidence', () => {
   it('limits the submitted context without truncating the visible conversation', async () => {
     const { store, transport } = factory(), thread = store.ensureScope(a)
     for (let i = 0; i < 13; i++) await store.send(thread.id, `问题${i}`)
-    expect(transport.mock.calls.at(-1)![1].history.length).toBe(20)
+    expect(transport.mock.calls.at(-1)![1].history.length).toBe(6)
     expect(store.getSnapshot().threads.find(t => t.id === thread.id)!.messages.length).toBe(26)
   })
 

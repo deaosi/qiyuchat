@@ -125,7 +125,7 @@ class TestAssistantInsights(unittest.TestCase):
             result = assistant.answer(self.cfg, {}, {'message': '查问答概况和处理流程'})
         self.assertIn('来源问答 12 条', result['answer'])
         self.assertEqual([tool['name'] for tool in result['tools']], ['overview'])
-        self.assertIn('暂未查到结果', result['warnings'][0])
+        self.assertIn('暂时无法读取', result['warnings'][0])
         self.assertIn('模型整理等待超时', result['warnings'])
 
     def test_ambiguous_topic_metric_does_not_count_whole_scope(self):
@@ -270,7 +270,7 @@ class TestAssistantInsights(unittest.TestCase):
         for status in (502, 504):
             with self.subTest(status=status), patch.object(assistant, '_plan', side_effect=
                     assistant.ModelProtocolError('上游内部错误', status)):
-                result = assistant.answer(self.cfg, filters, {'message': '查抖音上周的特定异常原因'})
+                result = assistant.answer(self.cfg, filters, {'message': '上周查询'})
             self.assertEqual(result['answer_mode'], 'insufficient')
             self.assertEqual(result['scope']['query_filters']['group'], '测试群')
             self.assertEqual(result['citations'], [])
@@ -320,3 +320,56 @@ class TestAssistantInsights(unittest.TestCase):
         self.assertEqual([call.args[2] for call in read.call_args_list], ['first_response', 'daily_trend'])
         self.assertEqual(result['usage_tokens'], 12)
         self.assertIn('最高 15 条', result['answer'])
+
+
+    def test_timeout_calculates_two_supported_metrics_without_relaxing_filters(self):
+        with (patch.object(assistant, '_plan', side_effect=assistant.ModelProtocolError('timeout', 504)),
+              patch.object(assistant.voc_assistant_metrics, 'read_metric',
+                           return_value=('读取结果', [], '读取结果')) as read):
+            result = assistant.answer(
+                self.cfg, {'days': 7, 'group': '测试群', 'staff': '测试客服'},
+                {'message': '结合目前的数据，帮我看看最近14天客服首响表现和每天的咨询量'})
+        self.assertEqual({item['name'] for item in result['tools']}, {'first_response', 'daily_trend'})
+        self.assertEqual(result['answer_mode'], 'computed')
+        self.assertEqual(result['usage_tokens'], 0)
+        for call in read.call_args_list:
+            filters = call.args[1]
+            self.assertEqual((filters['group'], filters['staff']), ('测试群', '测试客服'))
+            first = assistant.date.fromisoformat(filters['start'])
+            last = assistant.date.fromisoformat(filters['end'])
+            self.assertEqual((last - first).days + 1, 14)
+
+    def test_timeout_returns_only_fresh_scoped_evidence(self):
+        event = {'id': 'episode_case', 'question': '抖音店铺授权失败', 'answer': '请检查子账号权限。',
+                 'staff_source_verified': True, 'claims': [{'role': 'staff', 'quote': '请检查子账号权限。'}],
+                 'source_fingerprint': 'current'}
+        self.engine.search_local_evidence.return_value = [event]
+        self.engine.event_details.return_value = {event['id']: event}
+        with patch.object(assistant, '_plan', side_effect=assistant.ModelProtocolError('timeout', 504)):
+            result = assistant.answer(self.cfg, {'days': 7, 'group': '测试群'},
+                                      {'message': '查抖音昨天的店铺授权失败'})
+            self.engine.event_details.return_value = {event['id']: {**event, 'source_fingerprint': 'changed'}}
+            stale = assistant.answer(self.cfg, {'days': 7, 'group': '测试群'},
+                                     {'message': '查抖音昨天的店铺授权失败'})
+        self.assertEqual(result['answer_mode'], 'source_reference')
+        self.assertIn(event['answer'], result['answer'])
+        self.assertEqual([ref['id'] for ref in result['citations']], [event['id']])
+        scope = self.engine.search_local_evidence.call_args.args[1]
+        self.assertEqual(scope['group'], '测试群')
+        self.assertEqual(scope['start'], scope['end'])
+        self.assertNotIn(event['answer'], stale['answer'])
+        self.assertEqual(stale['citations'], [])
+
+    def test_failed_read_returns_normal_chat_message(self):
+        with patch.object(assistant, '_read_insight', side_effect=OSError('private path')):
+            result = assistant.answer(self.cfg, {'days': 7}, {'message': '客服平均首响时间'})
+        self.assertTrue(result['answer'].strip())
+        self.assertEqual(result['answer_mode'], 'insufficient')
+        self.assertNotIn('private path', result['answer'])
+
+    def test_capability_question_does_not_call_gateway_or_data_tools(self):
+        with patch.object(assistant, '_plan') as plan:
+            result = assistant.answer(self.cfg, {}, {'message': '你能帮我查哪些数据？'})
+        plan.assert_not_called()
+        self.assertIn('客服平均首响', result['answer'])
+        self.assertEqual(result['tools'], [])

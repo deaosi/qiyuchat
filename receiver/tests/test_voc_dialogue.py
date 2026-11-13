@@ -2,13 +2,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from src.config import LLMConfig
 from src import voc_assistant as A, voc_answer as W
 from src.voc_service import ServiceError
 
 
 class EvidenceDialogue(unittest.TestCase):
     def setUp(self):
-        self.cfg = SimpleNamespace(runtime=SimpleNamespace(voc_domain='zhihuige'), llm=SimpleNamespace(model_main='any-provider-model'))
+        self.cfg = SimpleNamespace(runtime=SimpleNamespace(voc_domain='zhihuige'), llm=LLMConfig(model_main='any-provider-model'))
         self.engine = Mock()
         self.engine.search.return_value = {'topics': [], 'knowledge': [], 'events': []}
         self.engine.knowledge.return_value = {'items': []}

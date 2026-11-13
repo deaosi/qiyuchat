@@ -172,5 +172,41 @@ class MaterialRetrieval(unittest.TestCase):
             self.assertEqual(engine.search(self.cfg, {}, '子账号权限'), {'topics': [], 'knowledge': [], 'events': []})
 
 
+    def test_local_evidence_uses_scoped_projection_and_never_matches_on_staff_reply(self):
+        scope = {'days': 7, 'group': 'synthetic-group', 'focus_topic': 't1'}
+        right = event('right', '子账号的商品权限怎么重新授权')
+        wrong = event('wrong', '打开安装页面固定底座', staff=True, quote='请重新授权子账号商品权限。')
+        rows = [dict(row, revision=2) for row in (right, wrong)]
+        with patch.object(engine, '_topic_view', return_value=rows) as projected, \
+             patch.object(engine, '_topic_evidence', side_effect=lambda row: row), \
+             patch.object(search, 'vectors', side_effect=AssertionError('local evidence must not embed')):
+            found = engine.search_local_evidence(self.cfg, scope, '能不能帮我查找子账号商品权限重新授权的会话')
+        projected.assert_called_once_with(self.cfg, scope)
+        self.assertEqual(found, [rows[0]])
+        self.assertFalse(found[0]['staff_source_verified'])
+
+    def test_local_evidence_requires_platform_and_matching_failure_symptom(self):
+        rows = [event('right', '抖店的AI一直没有回复', staff=True),
+                event('other-platform', '天猫店的机器人没有回复', staff=True),
+                event('unknown-platform', '机器人没有回复', staff=True),
+                event('excess', '抖音店的机器人一直重复回复', staff=True)]
+        found = search.rank_local_evidence('抖音机器人不回复怎么排查', rows, limit=3)
+        self.assertEqual([row['id'] for row in found], ['right'])
+
+    def test_local_evidence_can_match_merchant_symptom_but_not_a_staff_domain_quote(self):
+        row = event('case', '授权保存后怎么操作')
+        ref = {'source': 'question', 'alignment': 'exact', 'quote': '子账号商品权限无法授权'}
+        matching = dict(row, domain={'actual': ref})
+        misleading = dict(row, domain={'actual': dict(ref, source='answer')})
+        query = '帮我查一下子账号商品权限无法授权的问题'
+        self.assertEqual(search.rank_local_evidence(query, [matching], 1), [matching])
+        self.assertEqual(search.rank_local_evidence(query, [misleading], 1), [])
+
+    def test_local_evidence_skips_search_when_query_has_no_subject(self):
+        with patch.object(engine, '_topic_view') as projected:
+            self.assertEqual(engine.search_local_evidence(self.cfg, {}, '有哪些相关客服回复和会话记录'), [])
+        projected.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

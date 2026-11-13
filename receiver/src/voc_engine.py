@@ -14,7 +14,6 @@ import importlib.util
 from itertools import zip_longest
 import json
 import logging
-import re
 import sqlite3
 import time
 import unicodedata
@@ -34,7 +33,8 @@ from .voc_extract import (VERSION, MAX_OUTPUT_TOKENS, MAX_SOURCE_CHARS, GatewayP
 from .voc_model import VocModelError
 from .voc_outcome import _visitor_owners
 from .voc_semantics import LocalBGE, SemanticError, retrieve
-from .voc_search import has_staff_reply, rank_materials
+from .voc_search import (STAFF_SYMPTOMS, has_local_evidence_terms, has_staff_reply,
+                         rank_local_evidence, rank_materials)
 
 PIPELINE_VERSION = VERSION + "/" + quality.VERSION
 _RANK_FAMILIES = {
@@ -1460,19 +1460,9 @@ def relevant_topics(cfg: Settings, filters: dict, query: str) -> list[dict]:
     return relevant_items(cfg, topics(cfg, filters)['items'], query, kind='topic')
 
 
-_STAFF_SYMPTOMS = {
-    '机器人不回复': re.compile(
-        r'(?:机器人|AI|智能客服|福客)[^。！？\n]{0,12}(?:(?:没(?:有)?|未|不|无法)(?:正常|自动)?(?:回复|回应|应答|接待)|不理)',
-        re.I),
-    '场景未触发': re.compile(
-        r'场景[^。！？\n]{0,16}(?:没(?:有)?|未|无法|未能|不)(?:正常)?(?:触发|命中|生效)'
-        r'|(?:没有|没|未|无法)(?:触发|命中)[^。！？\n]{0,12}场景'),
-}
-
-
 def search_staff_symptom(cfg: Settings, filters: dict, symptom: str, limit: int) -> dict:
     # Match the customer's symptom before selecting the source-bound staff reply.
-    pattern = _STAFF_SYMPTOMS[symptom]
+    pattern = STAFF_SYMPTOMS[symptom]
     rows = _topic_view(cfg, filters)
     topics_by_id = {row['id']: row for row in _topic_items(cfg, rows)}
     events = []
@@ -1487,6 +1477,17 @@ def search_staff_symptom(cfg: Settings, filters: dict, symptom: str, limit: int)
     events = events[:limit]
     return {'events': events, 'topics': [topics_by_id[identity] for identity in
                                          dict.fromkeys(row['topic_id'] for row in events)]}
+
+
+def search_local_evidence(cfg: Settings, filters: dict, query: str, limit: int = 3) -> list[dict]:
+    """Retrieve source excerpts in the current scope without invoking a model."""
+    if not isinstance(query, str) or not 1 <= len(query.strip()) <= 2000 or type(limit) is not int or not 1 <= limit <= 10:
+        raise EngineError("检索词须为 1–2000 字，结果数为 1–10。")
+    if not has_local_evidence_terms(query):
+        return []
+    events = [{**_topic_evidence(row), 'topic_id': row['topic_id'], 'revision': row['revision']}
+              for row in _topic_view(cfg, filters)]
+    return rank_local_evidence(query, events, limit)
 
 
 def search(cfg: Settings, filters: dict, query: str, limit: int = 5, *, require_staff: bool = False) -> dict:

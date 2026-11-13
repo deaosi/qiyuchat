@@ -20,6 +20,8 @@ type ChatSnapshot = { threads: ChatThread[]; activeId: string; pending: Record<s
 type Transport = (filters: ApiFilters, body: ChatRequest, signal: AbortSignal) => Promise<ChatAnswer>
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
 export const CHAT_STORAGE_KEY = 'qiyu-voc-chat-v1'
+const requestHistoryLength = 6
+const requestHistoryMessageLength = 1000
 const projectionKeys = ['days', 'start', 'end', 'group', 'staff', 'customer', 'q', 'support_intent', 'diagnosis_status', 'replied', 'cluster', 'focus_topic'] as const
 const intents = ['all', 'configuration_guidance', 'functional_anomaly', 'unclear'] as const
 const diagnoses = ['all', 'reported', 'pending', 'config_cause_confirmed', 'platform_limit_confirmed', 'defect_confirmed', 'not_applicable'] as const
@@ -213,7 +215,14 @@ export function createChatStore(options: { storage?: StorageLike; transport?: Tr
       const thread = state.threads.find(t => t.id === threadId), question = content.trim()
       if (!thread || requests.has(threadId) || !question || question.length > 2000) return
       const request = { controller: new AbortController(), messageId: id(), text: question }
-      const history = thread.messages.filter(message => (message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string').slice(-20).map(({ role, content }) => ({ role, content }))
+      // Match the server's history budget without truncating the saved conversation.
+      const history = thread.messages
+        .filter(message => (message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string')
+        .slice(-requestHistoryLength)
+        .map(({ role, content }) => ({
+          role,
+          content: Array.from(content.slice(0, requestHistoryMessageLength * 2)).slice(0, requestHistoryMessageLength).join(''),
+        }))
       const context = previousContext(thread.messages)
       requests.set(threadId, request)
       update(threadId, t => ({ ...t, title: t.messages.length ? t.title : question.slice(0, 42), messages: [...t.messages, { id: request.messageId, role: 'user', content: question }], draft: '', error: '', updatedAt: now() }), { ...state.pending, [threadId]: true })

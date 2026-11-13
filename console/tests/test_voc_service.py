@@ -260,7 +260,30 @@ class TestVocAssistant(LocalFixture):
             result=A.answer(self.cfg,{}, {'message':'操作方法'})
         self.assertIn(row['answer'],result['answer']);self.assertIn(row['scope'],result['answer'])
         with patch('src.voc_assistant.complete_json',side_effect=[self.plan('knowledge'),{'data':{'ids':['invented']},'usage_tokens':3}]):
-            with self.assertRaises(S.ServiceError):A.answer(self.cfg,{}, {'message':'操作方法'})
+            result = A.answer(self.cfg, {}, {'message': '操作方法'})
+        self.assertEqual(result['answer_mode'], 'insufficient')
+        self.assertTrue(result['answer'].strip())
+        self.assertEqual(result['citations'], [])
+        self.assertNotIn(row['answer'], result['answer'])
+        self.assertNotIn('invented', result['answer'])
+
+    def test_knowledge_selector_timeout_keeps_scoped_verified_staff_evidence(self):
+        row = {'id': 'k1', 'question': '如何同步知识？', 'answer': '尚未确认的知识条目。', 'status': 'ready'}
+        event = {
+            'id': 'e-sync', 'question_quote': '知识同步后为什么没显示？', 'answer': '请查看目标店铺的同步状态。',
+            'staff_source_verified': True, 'claims': [{'role': 'staff', 'quote': '请查看目标店铺的同步状态。'}],
+        }
+        self.engine.search.return_value = {'knowledge': [row], 'topics': [], 'events': [event]}
+        with (patch('src.voc_assistant.complete_json', side_effect=[
+                  self.plan('knowledge'), M.ModelProtocolError('Synthetic selector timeout', 504)]),
+              patch('src.voc_answer.compose', return_value=(None, 0, '保留来源原话。'))):
+            result = A.answer(self.cfg, {'days': 7, 'group': '限定客户群'}, {'message': '知识同步后为什么没显示？'})
+        self.assertEqual(result['answer_mode'], 'source_reference')
+        self.assertEqual(result['scope']['query_filters']['group'], '限定客户群')
+        self.assertEqual([item['id'] for item in result['citations']], ['e-sync'])
+        self.assertIn(event['answer'], result['answer'])
+        self.assertNotIn(row['answer'], result['answer'])
+        self.assertNotIn('Synthetic selector timeout', result['answer'])
 
     def test_selected_knowledge_is_revalidated_after_network_call(self):
         row={'id':'k1','question':'如何操作？','answer':'即将失效的旧答案','status':'ready'}
@@ -318,8 +341,10 @@ class TestVocAssistant(LocalFixture):
 
     def test_model_cannot_request_sql_or_unknown_tool(self):
         with patch('src.voc_assistant.complete_json',return_value=self.plan('delete')):
-            with self.assertRaises(S.ServiceError):A.answer(self.cfg,{}, {'message':'任意查询'})
-        self.engine.search.assert_not_called()
+            result = A.answer(self.cfg, {}, {'message': '任意查询'})
+        self.assertTrue(result['answer'].strip())
+        self.assertEqual((result['answer_mode'], result['tools'], result['citations']), ('insufficient', [], []))
+        self.assertEqual(self.engine.method_calls, [])
 
     def test_history_rejects_system_role_before_model_call(self):
         with patch('src.voc_assistant.complete_json') as model:
@@ -355,8 +380,12 @@ class TestVocAssistant(LocalFixture):
     def test_invalid_domain_filter_plan_never_calls_data_tools(self):
         plan=self.domain_plan('top_topics');plan['data']['support_intent']='SELECT private'
         with patch('src.voc_assistant.complete_json',return_value=plan):
-            with self.assertRaises(S.ServiceError):A.answer(self.domain_cfg(),{}, {'message':'查询'})
-        self.assertEqual(self.engine.method_calls,[])
+            result = A.answer(self.domain_cfg(), {'support_intent': 'functional_anomaly'}, {'message': '查询'})
+        self.assertEqual(result['scope']['query_filters']['support_intent'], 'functional_anomaly')
+        self.assertEqual((result['answer_mode'], result['tools'], result['citations']), ('insufficient', [], []))
+        self.assertTrue(result['answer'].strip())
+        self.assertNotIn('SELECT private', result['answer'])
+        self.assertEqual(self.engine.method_calls, [])
 
     def test_advice_is_not_described_as_a_verified_fix(self):
         text=A._knowledge_text({'kind':'troubleshooting_advice','effect_status':'suggested','answer':'请开启场景并保存，再测试命中结果。'})
@@ -423,7 +452,12 @@ class TestVocAssistant(LocalFixture):
         small={**large,'id':'small','answer':'打开场景并保存。'}
         self.engine.search.return_value={'knowledge':[large,small],'topics':[],'events':[]}
         with patch('src.voc_assistant.complete_json',side_effect=[self.domain_plan('knowledge'),{'data':{'ids':['large']},'usage_tokens':1}]):
-            with self.assertRaises(S.ServiceError):A.answer(self.domain_cfg(),{}, {'message':'如何设置场景？'})
+            result = A.answer(self.domain_cfg(), {}, {'message': '如何设置场景？'})
+        self.assertEqual(result['answer_mode'], 'insufficient')
+        self.assertTrue(result['answer'].strip())
+        self.assertEqual(result['citations'], [])
+        self.assertNotIn(large['scope'], result['answer'])
+        self.assertNotIn(small['answer'], result['answer'])
 
 
 class TestVocHttp(LocalFixture):
@@ -461,6 +495,18 @@ class TestVocHttp(LocalFixture):
         with patch('src.web.server.voc_assistant.answer',side_effect=reply):
             status,raw=self.call('/api/voc2/assistant?source=local','POST',self.headers(),b'{"message":"test"}')
         self.assertEqual(status,200);self.assertEqual(json.loads(raw)['model'],'synthetic')
+
+    def test_assistant_gateway_failure_is_a_chat_response_but_malformed_input_still_is_rejected(self):
+        path = '/api/voc2/assistant?source=local&days=7'
+        with patch('src.voc_assistant.complete_json', side_effect=M.ModelProtocolError('Synthetic gateway timeout', 504)):
+            status, raw = self.call(path, 'POST', self.headers(), json.dumps({'message': '查询'}).encode())
+            invalid, _ = self.call(path, 'POST', self.headers(), b'{}')
+        self.assertEqual((status, invalid), (200, 400))
+        reply = json.loads(raw)
+        self.assertTrue(reply['answer'].strip())
+        self.assertEqual(reply['answer_mode'], 'insufficient')
+        self.assertIn('最近 7 天', reply['scope']['label'])
+        self.assertNotIn('Synthetic gateway timeout', reply['answer'])
 
     def test_voc_reads_do_not_hold_the_shared_dashboard_database_lock(self):
         def read(*args):
