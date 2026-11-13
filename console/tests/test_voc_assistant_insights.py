@@ -10,7 +10,7 @@ from src.voc_service import ServiceError
 class TestAssistantInsights(unittest.TestCase):
     def setUp(self):
         self.cfg = SimpleNamespace(runtime=SimpleNamespace(voc_domain='zhihuige'),
-                                   llm=SimpleNamespace(model_main='fixture-model'))
+                                   llm=LLMConfig(model_main='fixture-model'))
         self.engine = Mock()
         engine_patch = patch.object(assistant, '_engine', return_value=self.engine)
         engine_patch.start()
@@ -62,8 +62,9 @@ class TestAssistantInsights(unittest.TestCase):
             patch.object(assistant, '_plan', return_value=(plan, 5)),
             patch.object(assistant.voc_assistant_metrics, 'read_metric',
                          return_value=('商家甲群 12 条', [], '客户群 1 共 12 条')),
-            patch.object(assistant.voc_assistant_solutions, 'read_solution',
-                         return_value=('已核验的 SOP', [ref])) as solution,
+            patch.object(assistant.voc_assistant_solutions, 'read_solution_evidence',
+                         return_value=('已核验的 SOP', [ref], [])) as solution,
+            patch.object(assistant.voc_agent, 'choose_followup', return_value=([], 0, '')),
             patch.object(assistant.voc_answer, 'compose', return_value=({'answer': '按来源汇总。'}, 7, '')) as writer,
         ):
             result = assistant.answer(self.cfg, {'days': 30, 'staff': '测试客服'}, {'message': '看分布和未触发 SOP'})
@@ -74,6 +75,55 @@ class TestAssistantInsights(unittest.TestCase):
         self.assertNotIn('商家甲群', str(writer.call_args.args[-1]))
         self.assertEqual(solution.call_args.args[3], '场景未触发')
         self.assertEqual(solution.call_args.args[1]['staff'], '测试客服')
+
+    def test_guided_agent_reads_grouped_rank_then_scoped_variant_sop_and_conversation(self):
+        first, second = 't_' + 'a' * 24, 't_' + 'b' * 24
+        group = {'id': first, 'theme': '回复异常', 'question': '答错了怎么办', 'consultation_count': 11,
+                 'event_count': 12, 'customer_count': 3, 'session_count': 10,
+                 'members': [{'id': first, 'question': '答错了怎么办', 'consultation_count': 8},
+                             {'id': second, 'question': '机器人没回复', 'consultation_count': 4}]}
+        event = {'id': 'episode_agent', 'question_quote': '机器人这条没回复', 'topic_id': second}
+        citation = {'kind': 'event', 'id': event['id'], 'title': event['question_quote']}
+        example = {'citation': citation, 'question': '机器人这条没回复', 'reply': '请先核对当前接待状态。'}
+        self.engine.topics.return_value = {'items': [group]}
+        self.engine.topic_detail.return_value = {'events': [event]}
+        self.engine.event_detail.return_value = {'event': event}
+        next_reads = [{'name': name, 'query': '', 'topic_ref': 'T2'} for name in ('sops', 'evidence')]
+        with (
+            patch.object(assistant.voc_agent, 'choose_followup', return_value=(next_reads, 2, '')) as follow,
+            patch.object(assistant.voc_assistant_solutions, 'read_solution_evidence',
+                         return_value=('当前范围未查到符合条件的完整 SOP。', [], [])) as solution,
+            patch.object(assistant, 'build_examples', return_value=[example]),
+            patch.object(assistant.voc_answer, 'compose', return_value=(None, 0, '测试回退')) as writer,
+        ):
+            result = assistant.answer(self.cfg, {'days': 7, 'group': '测试群'}, {'message': assistant._AGENT_EXAMPLE + '。'})
+        self.assertEqual([tool['name'] for tool in result['tools']], ['top_topics', 'sops', 'evidence'])
+        self.assertTrue(self.engine.topics.call_args.kwargs['workbench'])
+        self.assertIn('机器人没回复（4 次）', result['answer'])
+        self.assertIn('未查到符合条件的完整 SOP', result['answer'])
+        self.assertEqual(result['examples'], [example])
+        self.assertIn(example['reply'], str(writer.call_args.args[-1]))
+        self.assertEqual(solution.call_args.args[1]['focus_topic'], second)
+        self.assertEqual(solution.call_args.args[1]['group'], '测试群')
+        self.assertNotIn('测试群', follow.call_args.kwargs['scope']['label'])
+        self.assertEqual(follow.call_args.kwargs['topics'][1], {'ref': 'T2', 'label': '回复异常 / 机器人没回复'})
+
+    def test_agent_keeps_first_read_if_follow_up_read_fails(self):
+        plan = {'intent': 'insights', 'query': '', 'days': 7, 'limit': 3, 'support_intent': None,
+                'diagnosis_status': None, 'reads': [{'name': 'overview', 'query': ''}]}
+        with (
+            patch.object(assistant, '_plan', return_value=(plan, 0)),
+            patch.object(assistant.voc_agent, 'choose_followup', return_value=(
+                [{'name': 'sops', 'query': '场景未触发', 'topic_ref': ''}], 1, '')),
+            patch.object(assistant.voc_assistant_metrics, 'read_metric',
+                         return_value=('来源问答 12 条', [], '来源问答 12 条')),
+            patch.object(assistant.voc_assistant_solutions, 'read_solution_evidence', side_effect=OSError),
+            patch.object(assistant.voc_answer, 'compose', return_value=(None, 0, '')),
+        ):
+            result = assistant.answer(self.cfg, {}, {'message': '查问答概况和处理流程'})
+        self.assertIn('来源问答 12 条', result['answer'])
+        self.assertEqual([tool['name'] for tool in result['tools']], ['overview'])
+        self.assertIn('暂未查到结果', result['warnings'][0])
 
     def test_ambiguous_topic_metric_does_not_count_whole_scope(self):
         self.engine.relevant_topics.return_value = [{'id': 'a', 'question': '测试 A'}, {'id': 'b', 'question': '测试 B'}]

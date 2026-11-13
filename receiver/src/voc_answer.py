@@ -199,7 +199,7 @@ def compose(cfg, question, history, scope, sources, *, time_budget: int | None =
                 raise ValueError('Unsupported number')
             if any(s['kind'] == 'computed' for s in admitted) and _has_quantity(text):
                 raise ValueError('Computed numbers must be rendered by the program')
-            _check_success(text, referenced, computed=any(s['kind'] == 'computed' for s in admitted))
+            _check_success(text, referenced, computed=any(source['kind'] == 'computed' for source, _ in referenced))
             used_refs.extend(referenced)
             paragraphs.append(text.strip())
         follow = draft['follow_up']
@@ -209,7 +209,7 @@ def compose(cfg, question, history, scope, sources, *, time_budget: int | None =
             raise ValueError('Unsupported follow-up number')
         if any(s['kind'] == 'computed' for s in admitted) and _has_quantity(follow):
             raise ValueError('Computed numbers cannot be reassigned in a question')
-        _check_success(follow, used_refs, computed=any(s['kind'] == 'computed' for s in admitted))
+        _check_success(follow, used_refs, computed=any(source['kind'] == 'computed' for source, _ in used_refs))
         answer = '\n\n'.join(paragraphs + ([follow.strip()] if follow.strip() else []))
         for identity in used:
             for condition in allowed[identity]['constraints']:

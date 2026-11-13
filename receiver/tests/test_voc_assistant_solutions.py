@@ -1,7 +1,7 @@
 from unittest import TestCase
 from unittest.mock import Mock
 
-from src.voc_assistant_solutions import read_solution
+from src.voc_assistant_solutions import read_solution, read_solution_evidence
 
 
 def source(qa, message, quote='已在原会话核对'):
@@ -76,6 +76,45 @@ class TestSolutionReads(TestCase):
         self.assertIn('已核验指引，效果待复测', answer)
         self.assertNotIn('已有案例的客户反馈', answer)
         self.assertNotIn('店铺同步\n当前处理指引', answer)
+
+    def test_visible_sop_evidence_uses_one_complete_scoped_witness_and_exact_quotes(self):
+        entry = branch('branch_1', 1, verified=True)
+        entry['condition_evidence'].append(source(2, 'question-2', '另一个账号的提问'))
+        entry['result_evidence'].append(source(2, 'result-2', '另一个账号的反馈'))
+        entry['steps'][0]['evidence'][0]['quote'] = '先保存退款触发条件，再测试 https://internal.example/signed'
+        self.engine.complete_sops.return_value = {'items': [{'id': 'playbook_0', 'title': '退款触发排查',
+            'branches': [entry, branch('branch_2', 3, verified=True)]}]}
+        self.engine._topic_view.return_value = [event('episode_other', 2, 'question-2'),
+                                              event('episode_exact', 1, 'question-1'),
+                                              event('episode_hidden', 3, 'question-3')]
+
+        _, _, evidence = read_solution_evidence(self.cfg, self.filters, 'sops', '', 1, engine=self.engine)
+
+        self.assertEqual(len(evidence), 1)
+        found = evidence[0]
+        self.assertEqual(found['condition'], '退款场景仅适用于子账号')
+        self.assertEqual(found['feedback'], ['客户反馈复测已经触发。'])
+        self.assertEqual(found['citations'], [{'kind': 'event', 'id': 'episode_exact', 'title': '退款触发排查'}])
+        self.assertIn('重新设置退款触发条件并保存。', found['body'])
+        self.assertIn('先保存退款触发条件，再测试 [已隐藏]', found['proof'])
+        self.assertNotIn('另一个账号', found['proof'])
+        self.assertNotIn('另一个账号', found['body'])
+        self.assertNotIn('internal.example', found['proof'])
+
+    def test_sop_model_evidence_requires_a_full_witness_with_unique_scoped_event(self):
+        entry = branch('branch_1', 1, verified=True)
+        second = branch('branch_2', 2, verified=True)
+        second['retest_evidence'] = [source(9, 'unrelated-retest')]
+        self.engine.complete_sops.return_value = {'items': [{'id': 'playbook_0', 'title': '退款触发排查',
+            'branches': [entry, second]}]}
+        self.engine._topic_view.return_value = [event('episode_first', 1, 'question-1'),
+                                              event('episode_second', 1, 'question-1'),
+                                              event('episode_unbound', 2, 'question-2')]
+
+        answer, _, evidence = read_solution_evidence(self.cfg, self.filters, 'sops', '', 2, engine=self.engine)
+
+        self.assertIn('2 个已验证分支', answer)
+        self.assertEqual(evidence, [])
 
     def test_ambiguous_event_anchors_do_not_link_an_unrelated_intent(self):
         self.engine.playbooks.return_value = {'items': [], 'case_paths': [

@@ -15,6 +15,10 @@ type Selection = { threadId: string; citation: ChatCitation; message: ChatMessag
 type Preset = { prompt: string; keywords: string[] }
 const draftLimit = 2000
 const presetRotationMs = 5000
+const evidenceAnalysisSuggestion: Preset = {
+  prompt: '找出当前范围最常见的一类问题，查看具体问法、已核验 SOP 和真实会话，并指出还缺哪些证据。',
+  keywords: ['综合分析', '核对证据'],
+}
 const overviewSuggestions: Preset[] = [
   { prompt: '最近 7 天的 VOC 复盘', keywords: ['复盘', '周报', 'VOC 复盘'] },
   { prompt: '按天看咨询量和峰值', keywords: ['逐日', '峰值', '每日咨询量'] },
@@ -33,6 +37,7 @@ const suggestions: Preset[] = [
   { prompt: '按客服看接待分布', keywords: ['客服分布', '客服接待量'] },
   { prompt: '当前范围的数据概况', keywords: ['数据概况', '数据概览'] },
   { prompt: '查找场景未触发的问题处理手册', keywords: ['处理手册'] },
+  evidenceAnalysisSuggestion,
 ]
 const topicSuggestions: Preset[] = [
   { prompt: '这个问题怎么排查？给出适用条件和来源。', keywords: ['排查', '排查依据'] },
@@ -41,7 +46,7 @@ const topicSuggestions: Preset[] = [
   { prompt: '列出这个问题的代表案例，并附上会话依据。', keywords: ['案例', '原话', '会话依据'] },
   { prompt: '这个问题目前还缺哪些证据，才能判断原因？', keywords: ['证据缺口', '判断原因'] },
 ]
-const welcomeSuggestions = [suggestions[0], ...overviewSuggestions]
+const welcomeSuggestions = [suggestions[0], ...overviewSuggestions, evidenceAnalysisSuggestion]
 const answerModeLabels: Record<ChatAnswerMode, string> = {
   grounded_model: '模型结合查询结果整理',
   computed: '按数据直接统计',
@@ -57,7 +62,8 @@ function matchPreset(draft: string, presets: Preset[]) {
 }
 
 function QueryDetails({ message, filters }: { message: ChatMessage; filters: ApiFilters }) {
-  const tools = [...new Set(message.tools?.map(tool => tool.label.trim()).filter(Boolean))]
+  const queriesId = useId()
+  const queries = [...new Set(message.tools?.map(tool => tool.label.trim()).filter(Boolean))]
   return <details className="voc-chat-disclosure min-w-0 text-[11px] leading-5 text-muted-foreground">
     <summary className="w-fit cursor-pointer list-none py-1 underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring">查询范围与模型</summary>
     <div className="space-y-1 pt-1">
@@ -69,9 +75,9 @@ function QueryDetails({ message, filters }: { message: ChatMessage; filters: Api
           <dd className="min-w-0 [overflow-wrap:anywhere]">{message.model}</dd>
         </div>}
       </dl>
-      {tools.length > 0 && <div>
-        <p className="font-medium">读取内容</p>
-        <ul className="space-y-0.5 pl-2">{tools.map(label => <li key={label}>{label}</li>)}</ul>
+      {queries.length > 0 && <div>
+        <p className="font-medium" id={queriesId}>本次已执行的查询</p>
+        <ul aria-labelledby={queriesId} className="space-y-0.5 pl-2">{queries.map(label => <li key={label}>{label}</li>)}</ul>
       </div>}
     </div>
   </details>
@@ -226,7 +232,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
       }} aria-label="聊天消息">
         {!current ? <LoadingState label="正在打开对话…" className="mx-auto h-full max-w-3xl px-6 md:px-10" /> : current.messages.length === 0 ? <div key={current.id} className="qiyu-page-enter mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-6 py-8 md:px-10">
           <h3 className="text-xl font-semibold tracking-tight">{topicTitle || '想了解哪些客户咨询？'}</h3>
-          <p className="mt-3 text-sm leading-7 text-muted-foreground">{topicTitle ? chatScopeLabel(filters) : '查看咨询趋势、分布和可复用的处理办法。'}</p>
+          <p className="mt-3 text-sm leading-7 text-muted-foreground">{topicTitle ? chatScopeLabel(filters) : '可以分析高频问题和咨询趋势，核对处理流程，也可以追问具体会话。'}</p>
           <div className={`mt-5 grid max-w-2xl gap-x-4 ${filters.focus_topic ? '' : 'sm:grid-cols-2'}`} role="group" aria-label="常用提问">
             {firstPrompts.map(({ prompt }) => <button key={prompt} type="button" onClick={() => { fillPreset(prompt); input.current?.focus() }} className="voc-chat-suggestion rounded-md py-2.5 text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{prompt}</button>)}
           </div>
@@ -242,7 +248,7 @@ export function VocChatWorkspace({ filters, refreshKey = 0, onScopeChange, store
               </div>
             </>}
           </article>)}
-          {pending && <LoadingState label="正在查询会话与知识依据…" rows={2} className="min-h-28 py-2" />}
+          {pending && <LoadingState label="正在查询数据并整理回答…" rows={2} className="min-h-28 py-2" />}
         </div>}
       </div>
       {!atBottom && current?.messages.length ? <Button variant="outline" size="icon-sm" className="absolute bottom-40 right-6 rounded-full bg-background shadow-sm" aria-label="回到最新消息" onClick={() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; nearBottom.current = true; setAtBottom(true) }}><ArrowDown /></Button> : null}

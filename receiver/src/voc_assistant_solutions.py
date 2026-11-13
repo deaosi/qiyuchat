@@ -29,17 +29,22 @@ _PRIVATE = re.compile(
 )
 
 
-def _text(value, limit: int = 480) -> str:
+def _text(value, limit: int | None = 480) -> str:
     if not isinstance(value, str):
         return ''
     text = ' '.join(_PRIVATE.sub('[已隐藏]', mask_pii(clean_visible_text(value))).split())
-    return text if len(text) <= limit else text[:limit] + '…'
+    return text if limit is None or len(text) <= limit else text[:limit] + '…'
+
+
+def _anchor(item) -> tuple[int, str] | None:
+    if (isinstance(item, dict) and type(item.get('qa_id')) is int and item['qa_id'] > 0
+            and isinstance(item.get('message_id'), str) and item['message_id']):
+        return item['qa_id'], item['message_id']
+    return None
 
 
 def _anchors(evidence: list[dict]) -> tuple[tuple[int, str], ...]:
-    return tuple(dict.fromkeys((item['qa_id'], item['message_id']) for item in evidence
-                               if isinstance(item, dict) and type(item.get('qa_id')) is int and item['qa_id'] > 0
-                               and isinstance(item.get('message_id'), str) and item['message_id']))[:8]
+    return tuple(dict.fromkeys(anchor for item in evidence if (anchor := _anchor(item))))[:8]
 
 
 def _branch(item: dict, branch: dict, *, complete: bool) -> dict | None:
@@ -54,6 +59,7 @@ def _branch(item: dict, branch: dict, *, complete: bool) -> dict | None:
              f'适用条件\n{condition}', '处理步骤']
     lines += [f'{index}. {text}' for index, (_, text) in enumerate(steps, 1)]
     lines.append(f'复测方法\n{retest}')
+    procedure = '\n'.join(lines)
     if verified:
         lines.append('已有案例的客户反馈\n' + '\n'.join(feedback[:3]))
     if escalation := _text(branch.get('escalation')):
@@ -63,8 +69,15 @@ def _branch(item: dict, branch: dict, *, complete: bool) -> dict | None:
     # outside the extracted Q&A pair even though the SOP proves its origin.
     refs = [*branch['condition_evidence'], *(ref for step, _ in steps for ref in step['evidence']),
             *branch['retest_evidence'], *results]
-    return {'id': branch['id'], 'group': item['id'], 'kind': 'branch', 'title': _text(item['title']),
-            'lines': lines, 'anchors': _anchors(refs)}
+    entry = {'id': branch['id'], 'group': item['id'], 'kind': 'branch', 'title': _text(item['title']),
+             'lines': lines, 'anchors': _anchors(refs)}
+    procedure_parts = [condition, retest, *(text for _, text in steps)]
+    if complete and len(steps) == len(branch['steps']) and all(len(part) <= 1200 for part in procedure_parts):
+        entry['verified_branch'] = {'condition': condition, 'procedure': procedure,
+                                    'evidence_groups': [branch['condition_evidence'],
+                                                        *(step['evidence'] for step, _ in steps),
+                                                        branch['retest_evidence'], results]}
+    return entry
 
 
 def _case(item: dict) -> dict | None:
@@ -149,9 +162,8 @@ def _event_anchors(row: dict) -> set[tuple[int, str]]:
     return anchors
 
 
-def _citations(engine, cfg, filters: dict, entries: list[dict]) -> list[dict]:
-    anchors = {anchor for item in entries for anchor in item.get('anchors', ())}
-    events = defaultdict(list)
+def _resolve_event_anchors(engine, cfg, filters: dict, anchors: set[tuple[int, str]]) -> dict:
+    events = defaultdict(set)
     if anchors:
         # Restrict source loading to the chosen cases and use the same projected
         # event view as the citation drawer, including episode and legacy IDs.
@@ -159,18 +171,48 @@ def _citations(engine, cfg, filters: dict, entries: list[dict]) -> list[dict]:
                                   qa_ids={qa_id for qa_id, _ in anchors})
         for row in engine._topic_view(cfg, filters, current=current):
             for anchor in _event_anchors(row) & anchors:
-                events[anchor].append(row['id'])
+                events[anchor].add(row['id'])
+    return {anchor: next(iter(identities)) for anchor, identities in events.items() if len(identities) == 1}
 
+def _citations(entries: list[dict], events: dict) -> list[dict]:
     references = {}
     for item in entries:
         if identity := item.get('topic'):
             kind = 'topic'
         else:
             kind = 'event'
-            identity = next((events[anchor][0] for anchor in item.get('anchors', ()) if len(events[anchor]) == 1), '')
+            identity = next((events[anchor] for anchor in item.get('anchors', ()) if anchor in events), '')
         if identity:
             references.setdefault((kind, identity), {'kind': kind, 'id': identity, 'title': item['title'][:120]})
     return list(references.values())
+
+
+def _witnesses(entry: dict) -> dict:
+    groups = []
+    for evidence in entry['verified_branch']['evidence_groups']:
+        by_qa = defaultdict(list)
+        for ref in evidence:
+            if (anchor := _anchor(ref)) and (quote := _text(ref.get('quote'), None)) and len(quote) <= 1600:
+                by_qa[anchor[0]].append((anchor, quote))
+        groups.append(by_qa)
+    complete = set(groups[0]).intersection(*groups[1:])
+    return {qa: [group[qa] for group in groups] for qa in sorted(complete)}
+
+
+def _branch_evidence(entry: dict, witnesses: dict, events: dict) -> dict | None:
+    branch = entry['verified_branch']
+    for groups in witnesses.values():
+        # The result can be a later message outside the extracted event. Link
+        # through an unambiguous scoped condition, step or retest in this QA.
+        identity = next((events[anchor] for group in groups[:-1] for anchor, _ in group if anchor in events), '')
+        if not identity:
+            continue
+        feedback = list(dict.fromkeys(quote for _, quote in groups[-1]))[:3]
+        proof = list(dict.fromkeys(quote for group in groups[:-1] for _, quote in group)) + feedback
+        body = '\n'.join((entry['title'], branch['procedure'], '已有案例的客户反馈', *feedback))
+        return {'body': body, 'proof': '\n'.join(proof), 'condition': branch['condition'], 'feedback': feedback,
+                'citations': [{'kind': 'event', 'id': identity, 'title': entry['title'][:120]}]}
+    return None
 
 
 def _heading(name: str, entries: list[dict], shown: int) -> str:
@@ -192,6 +234,12 @@ def _heading(name: str, entries: list[dict], shown: int) -> str:
 
 def read_solution(cfg, filters: dict, name: str, query: str, limit: int, *, engine) -> tuple[str, list[dict]]:
     """Read a bounded set of scoped facts and supported source citations."""
+    text, citations, _ = read_solution_evidence(cfg, filters, name, query, limit, engine=engine)
+    return text, citations
+
+
+def read_solution_evidence(cfg, filters: dict, name: str, query: str, limit: int, *, engine) -> tuple[str, list[dict], list[dict]]:
+    """Also expose original evidence for visible SOPs with a scoped complete witness."""
     if name not in ('sops', 'playbooks', 'gaps') or not isinstance(query, str) or len(query.strip()) > 1000:
         raise ServiceError('处理依据查询无效。')
     if type(limit) is not int or not 1 <= limit <= 10:
@@ -202,6 +250,14 @@ def read_solution(cfg, filters: dict, name: str, query: str, limit: int, *, engi
         entries = engine.relevant_items(cfg, candidates, query.strip(), kind='knowledge')
     visible = entries[:limit]
     lines = [_heading(name, entries, len(visible))]
+    anchors = {anchor for item in visible for anchor in item.get('anchors', ())}
+    supported = []
     for item in visible:
         lines.append('\n'.join([item['title'], *(line for line in item['lines'] if line)]))
-    return '\n\n'.join(lines), _citations(engine, cfg, filters, visible)
+        if name == 'sops' and 'verified_branch' in item:
+            witnesses = _witnesses(item)
+            supported.append((item, witnesses))
+            anchors.update(anchor for groups in witnesses.values() for group in groups[:-1] for anchor, _ in group)
+    events = _resolve_event_anchors(engine, cfg, filters, anchors)
+    evidence = [entry for item, witnesses in supported if (entry := _branch_evidence(item, witnesses, events))]
+    return '\n\n'.join(lines), _citations(visible, events), evidence

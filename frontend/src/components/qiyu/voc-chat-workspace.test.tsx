@@ -137,6 +137,29 @@ it('offers analysis examples before and during a conversation and shows the actu
   expect(transport).toHaveBeenCalledTimes(1)
 })
 
+it('submits the guided evidence question and lists only the queries returned for that answer', async () => {
+  const question = '找出当前范围最常见的一类问题，查看具体问法、已核验 SOP 和真实会话，并指出还缺哪些证据。'
+  const { transport, input } = setup({ source: 'local', days: 7 })
+  let finish!: (answer: ChatAnswer) => void
+  transport.mockReturnValueOnce(new Promise<ChatAnswer>(resolve => { finish = resolve }))
+
+  const welcome = within(screen.getByRole('group', { name: '常用提问' }))
+  fireEvent.click(welcome.getByRole('button', { name: question }))
+  expect(input.value).toBe(question)
+  expect(transport).not.toHaveBeenCalled()
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(transport.mock.calls[0][1].message).toBe(question)
+  expect(screen.getByText('正在查询数据并整理回答…')).toBeTruthy()
+
+  await act(async () => finish({ answer: '已查到问法和一条原会话。', answer_mode: 'grounded_model',
+    citations: [], scope: { label: '近 7 天' }, model: 'test',
+    tools: [{ name: 'rank', label: '统计高频问题' }, { name: 'cases', label: '查看相关会话' }],
+  }))
+  fireEvent.click(screen.getByText('查询范围与模型'))
+  const queries = within(screen.getByRole('list', { name: '本次已执行的查询' }))
+  expect(queries.getAllByRole('listitem').map(item => item.textContent)).toEqual(['统计高频问题', '查看相关会话'])
+})
+
 it('shows the original question, reply and feedback with an event in the answer scope', async () => {
   const { input } = setup({ source: 'local', days: 7, group: '当前群' }, {
     citations: [{ kind: 'topic', id: 't_held', title: '保留主题依据' }],
