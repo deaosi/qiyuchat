@@ -116,6 +116,27 @@ class TestEpisodeProjection(unittest.TestCase):
         self.assertEqual(engine.topics(self.cfg, {"q": "还是没有触发"})["items"], [])
         self.assertEqual(engine.topic_detail(self.cfg, {"q": "还是没有触发"}, self.old)["events"][0]["id"], "i-2")
 
+    def test_batch_event_reads_share_one_projection_and_keep_scoped_legacy_aliases(self):
+        self.legacy()
+        self.assertEqual(live.run(self.cfg, max_calls=1, max_tokens=200_000, extract=self.extract)["assigned"], 1)
+        episode = next(row for row in engine._topic_view(self.cfg, {}) if row.get("episode_id"))
+        filters = {"focus_topic": episode["topic_id"]}
+        requested = {episode["id"], "i-1", "i-2", "i-3", "episode_missing"}
+        expected = {identity: engine.event_detail(self.cfg, filters, identity)["event"]
+                    for identity in (episode["id"], "i-1", "i-2")}
+
+        with patch.object(engine, "_topic_view", wraps=engine._topic_view) as projected, \
+                patch.object(engine, "_sources", wraps=engine._sources) as sources:
+            result = engine.event_details(self.cfg, filters, requested)
+
+        self.assertEqual(result, expected)
+        self.assertEqual(result["i-2"]["topic_id"], self.old)
+        projected.assert_called_once()
+        sources.assert_called_once_with(self.cfg, filters)
+        with self.assertRaises(engine.EngineError) as error:
+            engine.event_detail(self.cfg, filters, "i-3")
+        self.assertEqual(error.exception.status, 404)
+
     def test_episode_without_legacy_classification_exposes_complete_evidence_shape(self):
         self.legacy()
         self.assertEqual(live.run(self.cfg, max_calls=1, max_tokens=200_000, extract=self.extract)["assigned"], 1)

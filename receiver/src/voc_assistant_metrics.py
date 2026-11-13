@@ -18,7 +18,7 @@ _DIMENSIONS = {
     "staff_breakdown": ("staff_name", "客服", "未记录客服"),
     "customer_breakdown": ("customer_id", "客户", "匿名客户"),
 }
-_METRICS = frozenset(("overview", "daily_trend", *_DIMENSIONS))
+_METRICS = frozenset(("overview", "daily_trend", "first_response", *_DIMENSIONS))
 _IDENTITY = re.compile(
     r"(?:qiyu-(?:external(?:-sha256)?|user|session):[^\s，。；！？、]+"
     r"|(?<![a-z0-9])(?:"
@@ -97,6 +97,45 @@ def _overview(rows: list[dict], heading: str) -> str:
     )
 
 
+def _first_response(cfg: Settings, rows: list[dict], heading: str) -> str:
+    qa_ids = [row["qa_id"] for row in rows]
+    with voc_assets.connection(Path(cfg.runtime.db_path)) as db:
+        db.execute("BEGIN")
+        sync_columns = {column["name"] for column in db.execute("PRAGMA table_info(push_sync_state)")}
+        official = "0"
+        if {"session_id", "status", "source_json", "source_version", "version"} <= sync_columns:
+            official = """EXISTS (
+                SELECT 1 FROM push_sync_state AS source WHERE source.session_id = scoped.session_id
+                AND source.status = 'completed' AND source.source_json <> ''
+                AND source.source_version = source.version
+            )"""
+        total, samples, average, official_samples = db.execute(f"""
+            WITH scoped AS (
+                SELECT DISTINCT session_id FROM qa_pair
+                WHERE qa_id IN (SELECT value FROM json_each(?))
+            ), measurements AS (
+                SELECT CASE WHEN typeof(session.first_reply_cost) = 'integer' AND session.first_reply_cost > 0
+                            THEN session.first_reply_cost END AS elapsed_ms,
+                       {official} AS official
+                FROM scoped LEFT JOIN raw_session AS session ON session.session_id = scoped.session_id
+            )
+            SELECT COUNT(*), COUNT(elapsed_ms), AVG(elapsed_ms),
+                   COUNT(CASE WHEN elapsed_ms IS NOT NULL AND official THEN 1 END)
+            FROM measurements
+        """, (voc_assets.dump(qa_ids),)).fetchone()
+    if not total:
+        return f"{heading}暂无匹配的来源会话。"
+    if not samples:
+        return f"{heading}有 {total} 个来源会话，均无有效的客服首响记录，暂无法计算平均首响。"
+    return (
+        f"{heading}客服平均首响为 {average / 1000:.2f} 秒。\n"
+        f"{total} 个来源会话中，{samples} 个有有效首响记录"
+        f"（其中 {official_samples} 个来自当前七鱼同步，{samples - official_samples} 个为其他留存记录）。"
+        f"{total - samples} 个无有效首响记录，未计入平均值。\n"
+        "按来源问答筛选会话，每个会话计一次。首响是访客首条消息到客服首次回复的耗时。"
+    )
+
+
 def _daily(rows: list[dict], period: Period, heading: str, limit: int) -> str:
     daily = Counter(_day(row["asked_at"]) for row in rows)
     unknown = daily.pop(None, 0)
@@ -170,5 +209,8 @@ def read_metric(cfg: Settings, filters: dict, name: str, limit: int, *, engine) 
     if name in _DIMENSIONS:
         display, model = _breakdown(rows, name, heading, limit)
         return display, [], model
+    if name == "first_response":
+        text = _first_response(cfg, rows, heading)
+        return text, [], text
     text = _overview(rows, heading) if name == "overview" else _daily(rows, period, heading, limit)
     return text, [], text

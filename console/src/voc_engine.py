@@ -14,6 +14,7 @@ import importlib.util
 from itertools import zip_longest
 import json
 import logging
+import re
 import sqlite3
 import time
 import unicodedata
@@ -33,7 +34,7 @@ from .voc_extract import (VERSION, MAX_OUTPUT_TOKENS, MAX_SOURCE_CHARS, GatewayP
 from .voc_model import VocModelError
 from .voc_outcome import _visitor_owners
 from .voc_semantics import LocalBGE, SemanticError, retrieve
-from .voc_search import rank_materials
+from .voc_search import has_staff_reply, rank_materials
 
 PIPELINE_VERSION = VERSION + "/" + quality.VERSION
 _RANK_FAMILIES = {
@@ -622,16 +623,38 @@ def topic_detail(cfg: Settings, filters: dict, topic_id: str, *, workbench: bool
     return {"topic": _public_topic(topic, rows), "events": evidence, "evidence": evidence, "total": len(rows)}
 
 
+def event_details(cfg: Settings, filters: dict, event_ids: set[str] | list[str]) -> dict[str, dict]:
+    """Resolve requested events from one scoped source read and projection."""
+    requested = set(event_ids)
+    if not requested:
+        return {}
+
+    episode_ids = {identity for identity in requested if identity.startswith("episode_")}
+    legacy_ids = requested - episode_ids
+    current = _sources(cfg, filters)
+    projected = _topic_view(cfg, filters, current=current) if episode_ids else None
+    found = {row["id"]: row for row in projected or () if row["id"] in episode_ids}
+
+    if legacy_ids:
+        found.update({row["id"]: row for row in _events(cfg, filters, _current=current) if row["id"] in legacy_ids})
+        missing = legacy_ids - found.keys()
+        if missing and filters.get("focus_topic") and variants.mode(cfg) == "zhihuige":
+            if projected is None:
+                projected = _topic_view(cfg, filters, current=current)
+            aliases = missing & episode_projection.legacy_event_ids(projected)
+            if aliases:
+                originals = _events(cfg, episode_projection.source_filters(filters), _current=current)
+                found.update({row["id"]: row for row in originals if row["id"] in aliases})
+
+    return {identity: {**_topic_evidence(row), "topic_id": row["topic_id"], "revision": row["revision"]}
+            for identity, row in found.items()}
+
+
 def event_detail(cfg: Settings, filters: dict, event_id: str) -> dict:
-    events = _topic_view(cfg, filters) if event_id.startswith("episode_") else _events(cfg, filters)
-    row = next((row for row in events if row["id"] == event_id), None)
-    if row is None and filters.get("focus_topic") and variants.mode(cfg) == "zhihuige" and not event_id.startswith("episode_"):
-        if event_id in episode_projection.legacy_event_ids(_topic_view(cfg, filters)):
-            row = next((item for item in _events(cfg, episode_projection.source_filters(filters))
-                        if item["id"] == event_id), None)
-    if row is None:
+    event = event_details(cfg, filters, {event_id}).get(event_id)
+    if event is None:
         raise EngineError("当前范围内没有该咨询事件，来源可能已更新。", 404)
-    return {"event": {**_topic_evidence(row), "topic_id": row["topic_id"], "revision": row["revision"]}}
+    return {"event": event}
 
 
 def defects(cfg: Settings, filters: dict) -> dict:
@@ -1435,6 +1458,35 @@ def relevant_items(cfg: Settings, items: list[dict], query: str, *, kind: str = 
 def relevant_topics(cfg: Settings, filters: dict, query: str) -> list[dict]:
     """All relevant scoped topics, not a top-N sample used as a false total."""
     return relevant_items(cfg, topics(cfg, filters)['items'], query, kind='topic')
+
+
+_STAFF_SYMPTOMS = {
+    '机器人不回复': re.compile(
+        r'(?:机器人|AI|智能客服|福客)[^。！？\n]{0,12}(?:(?:没(?:有)?|未|不|无法)(?:正常|自动)?(?:回复|回应|应答|接待)|不理)',
+        re.I),
+    '场景未触发': re.compile(
+        r'场景[^。！？\n]{0,16}(?:没(?:有)?|未|无法|未能|不)(?:正常)?(?:触发|命中|生效)'
+        r'|(?:没有|没|未|无法)(?:触发|命中)[^。！？\n]{0,12}场景'),
+}
+
+
+def search_staff_symptom(cfg: Settings, filters: dict, symptom: str, limit: int) -> dict:
+    # Match the customer's symptom before selecting the source-bound staff reply.
+    pattern = _STAFF_SYMPTOMS[symptom]
+    rows = _topic_view(cfg, filters)
+    topics_by_id = {row['id']: row for row in _topic_items(cfg, rows)}
+    events = []
+    for row in rows:
+        if row['topic_id'] not in topics_by_id or not row['source'].get('_staff_verified'):
+            continue
+        event = _topic_evidence(row)
+        actual = ((event.get('domain') or {}).get('actual') or {}).get('quote') or ''
+        if (pattern.search(event.get('question_quote') or event['question']) or pattern.search(actual)) and has_staff_reply(event):
+            events.append({**event, 'topic_id': row['topic_id']})
+    events.sort(key=lambda row: (-(row.get('asked_at') or 0), row['id']))
+    events = events[:limit]
+    return {'events': events, 'topics': [topics_by_id[identity] for identity in
+                                         dict.fromkeys(row['topic_id'] for row in events)]}
 
 
 def search(cfg: Settings, filters: dict, query: str, limit: int = 5, *, require_staff: bool = False) -> dict:

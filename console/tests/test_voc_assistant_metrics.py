@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import datetime
 from unittest.mock import Mock
 
-from src import app, voc_engine
+from src import app, push_sync, voc_engine
 from src.voc_assistant_metrics import read_metric
 from src.voc_topic_insights import ZONE
 from tests.test_local import LocalFixture
@@ -50,6 +50,43 @@ class TestAssistantMetrics(LocalFixture):
         refined, _, _ = self.metric("overview", {"q": "没触发", "replied": "unanswered"})
         self.assertIn("1 条来源问答", refined)
         self.assertIn("未记录可见答复 1 条", refined)
+
+    def test_first_response_counts_distinct_exact_sessions_and_excludes_missing_values(self):
+        database = app.get_db(self.cfg)
+        database._conn.executescript(push_sync.SCHEMA)
+        with database.tx() as db:
+            db.executemany("INSERT INTO raw_session(session_id,first_reply_cost,avg_resp_duration) VALUES (?,?,?)", [
+                ("13811110000", 1200, 20000), ("13822220000", 2800, 30000),
+                ("other-session", 0, 60000),
+            ])
+            db.executemany(
+                "INSERT INTO push_sync_state(session_id,event_key,version,status,attempts,updated_at,source_version,source_json)"
+                " VALUES (?,'event','v2','completed',1,1,?,'{}')",
+                [("13811110000", "v2"), ("13822220000", "v1"), ("other-session", "v2")],
+            )
+
+        display, citations, model = self.metric("first_response", {"start": "2026-11-01", "end": "2026-11-03"})
+        self.assertEqual((citations, model), ([], display))
+        self.assertIn("客服平均首响为 2.00 秒", display)
+        self.assertIn("3 个来源会话中，2 个有有效首响记录", display)
+        self.assertIn("1 个来自当前七鱼同步，1 个为其他留存记录", display)
+        self.assertIn("1 个无有效首响记录，未计入平均值", display)
+        self.assertNotIn("13811110000", display)
+        self.assertNotIn("13822220000", display)
+
+        scoped, _, _ = self.metric("first_response", {"group": self.group, "staff": self.staff, "q": "保存"})
+        self.assertIn("客服平均首响为 2.80 秒", scoped)
+        self.assertIn("1 个来源会话中，1 个有有效首响记录", scoped)
+        no_sample, _, _ = self.metric("first_response", {"staff": "示例客服宋"})
+        self.assertIn("有 1 个来源会话，均无有效的客服首响记录", no_sample)
+
+    def test_first_response_uses_legacy_metadata_without_a_sync_table(self):
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("INSERT INTO raw_session(session_id,first_reply_cost) VALUES ('13811110000',3500)")
+        display, _, _ = self.metric("first_response", {"group": self.group})
+        self.assertIn("客服平均首响为 3.50 秒", display)
+        self.assertIn("2 个来源会话中，1 个有有效首响记录", display)
+        self.assertIn("0 个来自当前七鱼同步，1 个为其他留存记录", display)
 
     def test_daily_peak_uses_full_date_range_even_if_outside_displayed_days(self):
         display, citations, model = self.metric("daily_trend", {"start": "2026-11-01", "end": "2026-11-03"}, limit=2)

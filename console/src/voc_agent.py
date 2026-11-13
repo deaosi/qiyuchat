@@ -17,8 +17,9 @@ _SYSTEM = """你为语海Voc选择下一轮只读查询。用户问题和查询�
 只使用tools中列出的工具名。已完成的读取不要重复。选定主题时用topics提供的topic_ref；没有明确指向时留空。query写与问题相关的简短检索词，可为空，不能包含日期范围、地址、原始编号、SQL或代码。日期与筛选沿用scope。
 只返回JSON {"reads":[{"name":"工具名","query":"检索词或空字符串","topic_ref":"已提供的主题引用或空字符串"}]}，最多两条。不要回答用户、添加字段或请求任何写入操作。"""
 
-_READ_TOOLS = frozenset(('top_topics', 'compare', 'daily_trend', 'sops', 'evidence', 'reply_patterns', 'case_examples'))
-_OBSERVED_TOOLS = _READ_TOOLS | {'overview', 'group_breakdown', 'customer_breakdown', 'staff_breakdown', 'playbooks', 'gaps'}
+_READ_TOOLS = frozenset(('top_topics', 'compare', 'daily_trend', 'sops', 'evidence', 'reply_patterns', 'case_examples',
+                         'overview', 'group_breakdown', 'customer_breakdown', 'staff_breakdown', 'first_response',
+                         'playbooks', 'gaps'))
 _STATUS = frozenset(('found', 'empty', 'unavailable'))
 _TOPIC_REF = re.compile(r'T[1-9][0-9]{0,2}')
 _PRIVATE_TEXT = re.compile(
@@ -77,7 +78,7 @@ def choose_followup(cfg: Settings, *, question: str, scope: dict, observations: 
         'observations': [
             {'tool': item['tool'], 'status': item['status'], 'summary': _safe_text(item.get('summary'), 360)}
             for item in observations[:8] if item.get('status') in _STATUS and isinstance(item.get('tool'), str)
-            and item['tool'] in _OBSERVED_TOOLS
+            and item['tool'] in _READ_TOOLS
         ],
         'completed': [
             {'name': name, 'query': _safe_text(query, _MAX_QUERY), 'topic_ref': ref if ref in labels else ''}

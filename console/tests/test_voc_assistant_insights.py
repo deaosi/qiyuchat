@@ -240,7 +240,7 @@ class TestAssistantInsights(unittest.TestCase):
     def test_troubleshooting_preset_reads_same_scope_without_model_calls(self):
         event = {'id': 'episode_reply', 'question': '机器人没回复', 'answer': '请先看接待状态。'}
         ref = {'kind': 'event', 'id': event['id'], 'title': event['question']}
-        self.engine.event_detail.return_value = {'event': event}
+        self.engine.event_details.return_value = {event['id']: event}
         with (
             patch.object(assistant, '_plan') as planner,
             patch.object(assistant.voc_agent, 'choose_followup') as followup,
@@ -275,16 +275,48 @@ class TestAssistantInsights(unittest.TestCase):
             self.assertEqual(result['scope']['query_filters']['group'], '测试群')
             self.assertEqual(result['citations'], [])
             self.assertEqual(result['tools'], [])
-            self.assertIn('请补充具体平台', result['answer'])
+            self.assertIn('可指定指标、时间或具体问题', result['answer'])
             self.assertNotIn('上游内部错误', result['answer'])
         self.engine.search.assert_not_called()
 
     def test_source_presets_keep_date_or_explicit_topic_and_request_only_relevant_tools(self):
         plan = assistant._direct_plan('最近14天，场景没触发怎么排查？')
         self.assertEqual(plan['days'], 14)
-        self.assertEqual([read['query'] for read in plan['reads']], ['场景没触发'] * 2)
+        self.assertEqual([read['query'] for read in plan['reads']], ['场景未触发'] * 2)
         self.assertIsNone(assistant._direct_plan('抖音场景未触发怎么排查？'))
         plan = assistant._direct_plan('找出与场景未触发相关的已核验 SOP')
         self.assertEqual(plan['reads'], [{'name': 'sops', 'query': '场景未触发'}])
         self.assertEqual(assistant._direct_plan('列出这个问题的代表案例，并附上会话依据。', has_topic=True)['intent'],
                          'case_examples')
+
+
+    def test_first_response_question_routes_directly_and_preserves_filters(self):
+        with (patch.object(assistant, '_plan') as planner,
+              patch.object(assistant.voc_assistant_metrics, 'read_metric',
+                           return_value=('平均首响 18.3 秒。', [], '平均首响 18.3 秒。')) as read):
+            result = assistant.answer(self.cfg, {'days': 7, 'group': '测试群', 'staff': '测试客服'},
+                                      {'message': '能查询到客服的首响平均时间吗？'})
+        planner.assert_not_called()
+        self.assertEqual(result['usage_tokens'], 0)
+        self.assertIn('平均首响 18.3 秒', result['answer'])
+        self.assertEqual([item['name'] for item in result['tools']], ['first_response'])
+        self.assertEqual(read.call_args.args[1]['group'], '测试群')
+        self.assertEqual(read.call_args.args[1]['staff'], '测试客服')
+        self.assertEqual(assistant._direct_plan('最近14天客服平均首响时间是多少')['days'], 14)
+        self.assertIsNone(assistant._direct_plan('对比抖音和天猫的客服首响平均时间'))
+
+    def test_model_can_plan_first_response_and_other_metrics_in_one_query(self):
+        model_plan = {'intent': 'insights', 'query': '', 'days': 14, 'limit': 3, 'support_intent': None,
+                      'diagnosis_status': None, 'reads': [{'name': 'first_response', 'query': ''},
+                                                         {'name': 'daily_trend', 'query': ''}]}
+        with (patch.object(assistant, 'complete_json', return_value={'data': model_plan, 'usage_tokens': 12}) as model,
+              patch.object(assistant.voc_assistant_metrics, 'read_metric', side_effect=[
+                  ('平均首响 18.3 秒。', [], '平均首响 18.3 秒。'), ('最高 15 条。', [], '最高 15 条。')]) as read,
+              patch.object(assistant.voc_agent, 'choose_followup') as followup):
+            result = assistant.answer(self.cfg, {'group': '测试群'},
+                                      {'message': '最近14天内客户的首响表现和咨询峰值如何？'})
+        model.assert_called_once()
+        followup.assert_not_called()
+        self.assertEqual([call.args[2] for call in read.call_args_list], ['first_response', 'daily_trend'])
+        self.assertEqual(result['usage_tokens'], 12)
+        self.assertIn('最高 15 条', result['answer'])
