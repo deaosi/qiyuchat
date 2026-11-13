@@ -223,3 +223,16 @@ class TestAssistantInsights(unittest.TestCase):
         with patch.object(assistant, 'complete_json', return_value={'data': payload, 'usage_tokens': 12}) as model:
             self.assertEqual(assistant._plan(self.cfg, '场景没命中怎么处理', [], {}), (payload, 12))
         self.assertEqual(model.call_args.args[0].timeout, 22)
+
+    def test_explicit_rank_and_case_requests_skip_gateway_planning(self):
+        for message, tools in [
+            ('最近7天有哪些高频问题？请用一条真实会话说明客服怎么答。', ['top_topics']),
+            ('最近7天，先看高频问题和逐日咨询峰值，再用真实会话核对最常见问题的客服回复。',
+             ['top_topics', 'daily_trend']),
+        ]:
+            with self.subTest(message=message):
+                plan = assistant._direct_plan(message)
+                self.assertEqual(plan['days'], 7)
+                self.assertEqual([read['name'] for read in plan['reads']], tools)
+                self.assertEqual(plan['rank_followups'], ('evidence',))
+        self.assertIsNone(assistant._direct_plan('最近7天请分析回复错误是否增加，再核对抖音的客服回复。'))

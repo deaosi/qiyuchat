@@ -77,6 +77,13 @@ _AGENT_TOOLS = ('top_topics', 'compare', 'daily_trend', 'sops', 'evidence', 'rep
 _AGENT_READ_LIMIT = 5
 _AGENT_SECONDS = 35
 _AGENT_SUMMARY_SECONDS = 18
+_RANK_CASE_REQUEST = re.compile(
+    r'(?:请|帮我)?\s*(?:(?:最近|近)\s*(?P<days>[1-9][0-9]{0,2})\s*天|当前范围)?(?:内|的)?[，,\s]*'
+    r'(?:先)?(?:看看?|查(?:看|询)?|列出|有哪些)?\s*(?:高频问题|高频咨询)(?:有哪些)?'
+    r'(?P<trend>和逐日咨询峰值|和每天的咨询量)?[？?。；，,\s]*'
+    r'(?:再|请)?\s*(?:用(?:一条|一个)?|找(?:出|个|一条)?)(?:真实|实际)(?:会话|案例)'
+    r'(?:核对(?:最常见问题的)?客服回复|说明客服(?:怎么答|怎么回复))'
+)
 
 def _engine():
     from . import voc_engine
@@ -163,7 +170,13 @@ def _direct_plan(message: str, *, has_references: bool = False) -> dict | None:
         return {**plan, 'intent': 'case_examples', 'use_context': True}
     if text == _AGENT_EXAMPLE:
         return {**plan, 'intent': 'insights', 'limit': 1, 'explain': True,
-                'reads': [{'name': 'top_topics', 'query': ''}], 'guided': True}
+                'reads': [{'name': 'top_topics', 'query': ''}], 'rank_followups': ('sops', 'evidence')}
+    if match := _RANK_CASE_REQUEST.fullmatch(text):
+        days = int(match['days']) if match['days'] else None
+        if days is None or days <= 365:
+            reads = ['top_topics', 'daily_trend'] if match['trend'] else ['top_topics']
+            return {**plan, 'intent': 'insights', 'days': days, 'explain': True,
+                    'reads': [{'name': name, 'query': ''} for name in reads], 'rank_followups': ('evidence',)}
     if text in DIRECT_READS:
         return {**plan, 'intent': 'insights', 'reads': [{'name': DIRECT_READS[text], 'query': ''}]}
     if report := re.fullmatch(r'(?:最近\s*(?P<days>\d{1,3})\s*天的?\s*)?(?:语海)?VOC\s*复盘', text, re.I):
@@ -825,9 +838,9 @@ def _insights_answer(cfg, filters, body, plan, tokens, *, agent=False):
 
     if agent and len(plan['reads']) < _AGENT_READ_LIMIT and plan.get('explain', True):
         handles = _agent_topic_handles(ranked, citations.values(), scoped.get('focus_topic'))
-        if plan.get('guided'):
+        if fixed_followups := plan.get('rank_followups'):
             top = next(iter(handles), '')
-            followup = [{'name': name, 'query': '', 'topic_ref': top} for name in ('sops', 'evidence')] if top else []
+            followup = [{'name': name, 'query': '', 'topic_ref': top} for name in fixed_followups] if top else []
         else:
             model_scope = _scope({key: scoped.get(key) for key in ('start', 'end', 'days')})
             followup, usage, warning = voc_agent.choose_followup(
@@ -903,7 +916,7 @@ def _insights_answer(cfg, filters, body, plan, tokens, *, agent=False):
             result['citations'] = result['citations'][:10]
         elif _CASE_REQUEST.search(body['message']):
             result['answer'] += '\n\n本次未查到同时可核对商家原话和人工客服回复的匹配案例。'
-        if plan.get('guided') and any(tool['name'] == 'sops' for tool in result['tools']) and not sops:
+        if 'sops' in plan.get('rank_followups', ()) and any(tool['name'] == 'sops' for tool in result['tools']) and not sops:
             result['answer'] += ('\n\n本次未取得可定位到同一会话的完整 SOP 依据。'
                                  '核验完整流程需要同案的适用条件、处理步骤、复测过程和客户结果。')
         if result['answer_mode'] == 'computed' and (cases or sops or case_refs) and all(
