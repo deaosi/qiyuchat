@@ -9,7 +9,9 @@ from unittest.mock import patch
 from src.config import RuntimeConfig, Settings
 from src.db import DB
 from src.extract.identity import SOURCE_IDENTITY_ROLE, encode_identity
+from src.push_sync import SCHEMA as PUSH_SCHEMA, VERSION as PUSH_VERSION, _project
 from src.web import api
+from tests.test_case_replies import SID, metadata, source
 
 
 class CaseContext(unittest.TestCase):
@@ -80,6 +82,48 @@ class CaseContext(unittest.TestCase):
         self.assertEqual(result['context_scope'], 'session_customer')
         self.assertNotIn(SOURCE_IDENTITY_ROLE, str(result['messages']))
         self.assertNotIn('隐藏的内部边界', str(result))
+
+    def test_explicit_source_session_preserves_all_visible_participants_and_staff_after_boundary(self):
+        sid = str(SID)
+        identity = self.pair(sid=sid, customer='qiyu-external:visitor-a')
+        rows = [
+            source(1, 1, '甲问如何配置？', userName='甲店'),
+            source(2, 0, '请先查看权限。', staffName='客服甲'),
+            source(3, 1, '乙也需要重新同步。', externalUserId='visitor-b', userId=102, userName='乙店'),
+            source(4, 0, '原始内部边界', mType=113),
+            source(5, 0, '同步完成后可查看。', staffName='客服乙'),
+            source(6, 0, '机器人提示', staffId=0, mType=110),
+        ]
+        session = metadata(rows)
+        projected = _project(session, rows, session, SID)
+        self.db._conn.executescript(PUSH_SCHEMA)
+        self.db.upsert_sessions([session], verified_source=True)
+        self.db.upsert_messages(sid, projected, verified_source=True)
+        with self.db.tx() as conn:
+            conn.execute("""INSERT INTO push_sync_state(session_id,event_key,version,status,updated_at,source_version,source_json)
+                         VALUES (?,?,?,'completed',0,?,?)""",
+                         (sid, 'event-fixture', 'version-fixture', 'version-fixture',
+                          json.dumps({'projection_version': PUSH_VERSION, 'session': session, 'messages': rows})))
+            conn.execute('INSERT INTO qa_origin(qa_id,evidence_key,session_id,question_message_ids,answer_message_ids,fingerprint) '
+                         'VALUES (?,?,?,?,?,?)', (identity, 'source-context-fixture', sid,
+                                                  json.dumps([f'source:{sid}:1']), json.dumps([f'source:{sid}:2']), 'fixture'))
+        self.messages([{'role': 'staff', 'content': '另一条会话', 'ts': 1}], sid='different-session')
+        with patch.object(api.case_replies, 'lookup', side_effect=AssertionError('GET must not call upstream')):
+            standard = self.detail(identity)
+            result = api.detail(self.cfg, identity, full_session=True)
+        self.assertEqual([m['content'] for m in standard['messages']], ['甲问如何配置？', '请先查看权限。'])
+        self.assertEqual(result['context_scope'], 'source_session')
+        self.assertEqual(result['availability'], 'available')
+        self.assertFalse(result['can_lookup_replies'])
+        messages = result['messages']
+        self.assertEqual([m['content'] for m in messages],
+                         ['甲问如何配置？', '请先查看权限。', '乙也需要重新同步。', '同步完成后可查看。', '机器人提示'])
+        self.assertEqual([m['role'] for m in messages], ['user', 'staff', 'user', 'staff', 'bot'])
+        self.assertEqual([m.get('sender_name') for m in messages], ['甲店', '客服甲', '乙店', '客服乙', None])
+        self.assertEqual([m['ts'] for m in messages], [r['time'] for r in rows if r['id'] != 4])
+        self.assertEqual([m['is_question'] for m in messages], [True, False, False, False, False])
+        self.assertEqual([m['is_answer'] for m in messages], [False, True, False, False, False])
+        self.assertEqual(result['message_count'], 5)
 
     def test_unresolved_controlled_customer_is_empty_not_archived_or_joined(self):
         identity = self.pair(customer='qiyu-session:session-local')

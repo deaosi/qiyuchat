@@ -54,17 +54,18 @@ export function ConversationSection({ children, title = '聊天记录', count }:
   </section>
 }
 
-export function ConversationSheet({ open, onOpenChange, onCloseAutoFocus, children }: {
+export function ConversationSheet({ open, onOpenChange, onCloseAutoFocus, description = '查看与当前客户相关的会话片段，核对原话、客服回复与咨询背景。', children }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   onCloseAutoFocus?: (event: Event) => void
+  description?: string
   children: ReactNode
 }) {
   return <Sheet open={open} onOpenChange={onOpenChange}>
     <SheetContent onCloseAutoFocus={onCloseAutoFocus} className="w-full gap-0 sm:max-w-[560px] data-[state=open]:duration-250 data-[state=closed]:duration-200">
       <SheetHeader className="shrink-0 border-b p-6 pr-12">
         <SheetTitle className="text-lg">问答与相关会话上下文</SheetTitle>
-        <SheetDescription>查看与当前客户相关的会话片段，核对原话、客服回复与咨询背景。</SheetDescription>
+        <SheetDescription>{description}</SheetDescription>
       </SheetHeader>
       {children}
     </SheetContent>

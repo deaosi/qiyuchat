@@ -20,6 +20,7 @@ export interface ApiFilters {
   limit?: number
   offset?: number
   first_page?: 1
+  context?: 'session'
   id?: string | number
   top?: number
   status?: VocStatus | KnowledgeStatus | 'all'
@@ -647,7 +648,7 @@ function validateGetResponse(name: string, data: unknown, filters: ApiFilters): 
             && validDetailImages(message.images))
           && (data.message_count === undefined || isCount(data.message_count) && data.message_count === (data.messages as unknown[]).length)
           && (data.availability === undefined || ['available', 'partial', 'archived', 'empty'].includes(String(data.availability)))
-          && (data.context_scope === undefined || ['session_customer', 'legacy_session'].includes(String(data.context_scope)))
+          && (data.context_scope === undefined || ['session_customer', 'legacy_session', 'source_session'].includes(String(data.context_scope)))
           && (data.can_lookup_replies === undefined || typeof data.can_lookup_replies === 'boolean')
         break
       case 'status':

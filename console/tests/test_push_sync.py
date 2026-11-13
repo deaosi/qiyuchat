@@ -29,7 +29,7 @@ def message(mid=1, direction=1, text="商品发票应该怎么申请？", **chan
     return {"id": mid, "sessionId": SID, "from": direction,
             "staffId": 9 if direction == 0 else 0, "userId": 101,
             "externalUserId": "external-test-customer", "staffName": "合成客服",
-            "mType": 1, "status": 1, "time": int(NOW * 1000) - 10_000 + mid,
+            "mType": 1, "status": 1, "time": int((NOW - 3700) * 1000) + mid,
             "msg": text, **changes}
 
 
@@ -39,7 +39,7 @@ def sources():
 
 
 def metadata(**changes):
-    return {"id": SID, "startTime": int(NOW * 1000) - 20_000,
+    return {"id": SID, "startTime": int((NOW - 3710) * 1000),
             "endTime": int(NOW * 1000) - 1, "staffId": 9, "staffName": "合成客服",
             "userId": 101, "userName": "合成客户", "fromGroup": "售后",
             "fromType": "web", "staffMessageCount": 2, "userMessageCount": 2,
@@ -427,6 +427,65 @@ class TestPushSync(LocalFixture):
         self.api.on_messages = None
         self.assertEqual(self.sync(NOW + 1)["completed"], 1)
         self.assertEqual(self.state()["attempts"], 1)
+
+    def test_quiet_window_counts_latest_valid_message_and_refetches_at_exact_deadline(self):
+        quiet_from = NOW - 90
+        self.api.rows = [message(1, time=int((quiet_from - 20) * 1000)),
+                         message(2, 0, "已发出图片", mType=2, time=int(quiet_from * 1000)),
+                         message(3, 0, "系统结束", mType=999, time=int((NOW - 2) * 1000)),
+                         message(4, 1, "发送失败", status=0, time=int((NOW - 1) * 1000))]
+        result = self.sync()
+        self.assertEqual((result["deferred"], result["failed"], result["qa_pairs"]), (1, 0, 0))
+        self.assertEqual(self.target_messages(), [])
+        self.assertFalse(self.sql("SELECT 1 FROM raw_session WHERE session_id=?", (str(SID),)))
+        state = self.state()
+        self.assertEqual((state["status"], state["retry_after"], state["owner"], state["claim_until"], state["attempts"]),
+                         ("pending", quiet_from + P.QUIET_SECONDS, "", 0, 0))
+        self.assertEqual(self.sync(quiet_from + P.QUIET_SECONDS - .001)["claimed"], 0)
+        self.assertEqual(len(self.api.calls), 2)
+        self.assertEqual(self.sync(quiet_from + P.QUIET_SECONDS)["completed"], 1)
+        self.assertEqual(len(self.api.calls), 4)
+        self.assertEqual([row["role"] for row in self.target_messages()], ["user", "staff", "boundary", "boundary"])
+
+    def test_new_valid_message_extends_pending_quiet_time_without_new_end_event(self):
+        first = NOW - 90
+        last = NOW - 20
+        self.api.rows[-1]["time"] = int(first * 1000)
+        self.assertEqual(self.sync()["deferred"], 1)
+        self.api.rows.append(message(5, 0, "请核对当前接待状态。", mType=110, time=int(last * 1000)))
+        self.api.metadata["staffMessageCount"] += 1
+        self.assertEqual(self.sync(first + P.QUIET_SECONDS)["deferred"], 1)
+        self.assertEqual(self.state()["retry_after"], last + P.QUIET_SECONDS)
+        self.assertEqual(self.state()["event_key"], "end-1")
+        self.assertEqual(self.target_messages(), [])
+        self.assertEqual(self.sync(last + P.QUIET_SECONDS)["completed"], 1)
+
+    def test_newer_end_leaves_existing_verified_snapshot_visible_until_ready(self):
+        self.assertEqual(self.sync()["completed"], 1)
+        previous = self.state()
+        previous_messages = self.target_messages(controls=True)
+        previous_qa = self.sql("SELECT * FROM qa_pair WHERE session_id=?", (str(SID),))
+        latest_message = NOW + 15
+        self.api.rows.append(message(5, 0, "有其他情况也可以继续反馈。", time=int(latest_message * 1000)))
+        self.api.metadata.update(endTime=int((NOW + 30) * 1000), staffMessageCount=3)
+        self.event("end-reopened", self.api.metadata, int((NOW + 30) * 1000))
+
+        self.assertEqual(self.sync(NOW + 31)["deferred"], 1)
+        self.assertEqual(self.state(), previous)
+        self.assertEqual(self.target_messages(controls=True), previous_messages)
+        self.assertEqual(self.sql("SELECT * FROM qa_pair WHERE session_id=?", (str(SID),)), previous_qa)
+        self.assertEqual(self.sync(NOW + 32)["claimed"], 0)
+        self.assertEqual(self.sync(latest_message + P.QUIET_SECONDS)["completed"], 1)
+        self.assertEqual(self.state()["event_key"], "end-reopened")
+        self.assertEqual(len(self.target_messages(controls=True)), len(previous_messages) + 1)
+        self.assertFalse(self.sql("SELECT 1 FROM push_sync_quiet"))
+
+    def test_end_time_is_used_when_no_valid_chat_exists(self):
+        self.api.rows = [message(1, 1, "未发送", status=0), message(2, 0, "系统结束", mType=999),
+                         message(3, 1, "  "), message(4, 0, "")]
+        self.assertEqual(self.sync()["deferred"], 1)
+        self.assertEqual(self.state()["retry_after"], self.api.metadata["endTime"] / 1000 + P.QUIET_SECONDS)
+        self.assertEqual(self.target_messages(), [])
 
     def test_extraction_failure_rolls_back_metadata_messages_qa_and_completion(self):
         before = self.sql("SELECT * FROM qa_pair ORDER BY qa_id")

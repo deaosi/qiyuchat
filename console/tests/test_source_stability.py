@@ -103,8 +103,8 @@ class TestSourceStability(LocalFixture):
     def test_prepending_messages_reorders_idx_without_reassigning_existing_ids(self):
         self.sync()
         before = {p["question"]:p for p in self.pairs()}
-        first = message(9, 1, "这个配件是否单独出售？", time=int(NOW*1000)-15_000)
-        second = message(10, 0, "请在商品详情中核对。", time=int(NOW*1000)-14_000)
+        first = message(9, 1, "这个配件是否单独出售？", time=message()["time"]-5000)
+        second = message(10, 0, "请在商品详情中核对。", time=first["time"]+1000)
         self.api.rows = [first,second,*self.api.rows]
         self.api.metadata.update(userMessageCount=3,staffMessageCount=3)
         self.event("end-2",self.api.metadata,received=int((NOW+1)*1000))

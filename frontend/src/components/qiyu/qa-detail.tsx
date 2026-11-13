@@ -2,7 +2,7 @@ import * as React from 'react'
 import { AlertCircle, Archive, ArrowUpRight, CircleCheck, CircleDashed, Layers2, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
 import { LoadingState } from './loading-state'
 import type { QAPair } from '@/lib/demo-data'
-import { ApiError, apiGet, apiPost, normalizePair, type DetailMessageImage, type DetailRepliesResponse, type DetailSenderKind, type DetailSenderMetadata } from '@/lib/api'
+import { ApiError, apiGet, apiPost, normalizePair, type ApiFilters, type DetailMessageImage, type DetailRepliesResponse, type DetailSenderKind, type DetailSenderMetadata } from '@/lib/api'
 import { customerLabel } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,9 +11,10 @@ import { ConversationMessageBody } from './conversation-image'
 import { readAdminImageFile } from './conversation-image-files'
 import { ConversationBubble, ConversationSection, ConversationSheet, ConversationTranscript } from './conversation-transcript'
 
-export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean; anchorMessageId?: string; onCloseAutoFocus?: (event: Event) => void }
+export interface QADetailProps { pair: QAPair | null; onClose: () => void; source?: 'local'; embedded?: boolean; sessionContext?: boolean; anchorMessageId?: string; onCloseAutoFocus?: (event: Event) => void }
 
 type Availability = 'available' | 'partial' | 'archived' | 'empty'
+type ContextScope = 'session_customer' | 'legacy_session' | 'source_session'
 type RawContextMessage = DetailSenderMetadata & {
   role?: unknown; content?: unknown; time?: unknown; source_message_id?: unknown; ts?: unknown; is_question?: unknown; is_answer?: unknown
   context_seq?: number; images?: DetailMessageImage[]
@@ -37,12 +38,12 @@ interface DetailResponse {
   messages?: RawContextMessage[]
   archived?: boolean
   message_count?: number
-  context_scope?: string
+  context_scope?: ContextScope
   context_revision?: string
   availability?: Availability
   can_lookup_replies?: boolean
 }
-interface DetailData { pair: QAPair; normalizedQuestion: string; messages: ContextMessage[]; archived: boolean; availability?: Availability; canLookupReplies: boolean; contextRevision?: string }
+interface DetailData { pair: QAPair; normalizedQuestion: string; messages: ContextMessage[]; archived: boolean; availability?: Availability; canLookupReplies: boolean; contextRevision?: string; contextScope?: ContextScope }
 
 const replyLookupText: Record<DetailRepliesResponse['status'] | 'loading' | 'stale', string> = {
   loading: '正在查询七鱼客服回复…',
@@ -102,12 +103,12 @@ function fullTime(value: string) {
   return match ? `${match[1]} ${match[2]}` : '时间未知'
 }
 
-function messageSender(message: ContextMessage, pair: QAPair) {
+function messageSender(message: ContextMessage, pair: QAPair, sourceSession = false) {
   if (message.senderKind === 'fuke_staff') return message.senderName || message.senderAccount || '福客 AI 员工'
   if (message.senderKind === 'group_participant') return message.senderName || '群成员'
   if (message.senderKind === 'unidentified') return ['身份未确认', message.senderName || message.senderAccount].filter(Boolean).join(' · ')
   switch (message.role) {
-    case 'user': return message.senderName || customerLabel(pair.customerName, pair.customerId)
+    case 'user': return message.senderName || (sourceSession ? '来源访客' : customerLabel(pair.customerName, pair.customerId))
     case 'staff': return message.senderName || '客服'
     case 'bot': return '机器人'
     case 'system': return '系统'
@@ -115,20 +116,20 @@ function messageSender(message: ContextMessage, pair: QAPair) {
   }
 }
 
-function ConversationMessage({ message, pair, anchored }: { message: ContextMessage; pair: QAPair; anchored: boolean }) {
+function ConversationMessage({ message, pair, anchored, sourceSession }: { message: ContextMessage; pair: QAPair; anchored: boolean; sourceSession: boolean }) {
   const isFukeStaff = message.senderKind === 'fuke_staff'
   const isGroupParticipant = message.senderKind === 'group_participant'
   const isCustomer = message.role === 'user' && !message.senderKind
   const side = message.role === 'staff' || isFukeStaff ? 'right' : isCustomer ? 'left' : 'center'
 
-  return <ConversationBubble side={side} sender={messageSender(message, pair)} time={message.time} anchored={anchored}
+  return <ConversationBubble side={side} sender={messageSender(message, pair, sourceSession)} time={message.time} anchored={anchored}
     senderNote={isFukeStaff ? '福客 AI · 七鱼未识别为客服' : isGroupParticipant && message.senderName ? '群成员' : undefined}
     question={Boolean((isCustomer || isGroupParticipant) && message.sourceMessageId && message.isQuestion)}>
     <ConversationMessageBody text={message.content} imageUrls={message.images.map(image => image.url)} readFile={readAdminImageFile} />
   </ConversationBubble>
 }
 
-export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false, anchorMessageId, onCloseAutoFocus }: QADetailProps) {
+export function QADetail({ pair: requestedPair, onClose, source = 'local', embedded = false, sessionContext = false, anchorMessageId, onCloseAutoFocus }: QADetailProps) {
   const [retry, setRetry] = React.useState(0)
   const [request, setRequest] = React.useState<{ key: string; loading: boolean; data: DetailData | null; error: string | null }>({ key: '', loading: false, data: null, error: null })
   const [lookupRequestedFor, setLookupRequestedFor] = React.useState<DetailData | null>(null)
@@ -138,18 +139,19 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   const transcript = React.useRef<HTMLOListElement>(null)
   const scrollViewport = React.useRef<HTMLDivElement>(null)
   const requestedId = requestedPair?.id
-  const requestKey = requestedPair && source ? JSON.stringify([source, requestedPair.id]) : ''
+  const context = sessionContext ? 'session' : undefined
+  const requestKey = requestedPair ? JSON.stringify({ source, id: requestedPair.id, context }) : ''
   React.useEffect(() => {
     setLookupRequestedFor(null)
     if (!requestKey) {
       setRequest({ key: '', loading: false, data: null, error: null })
       return
     }
-    const [dataSource, id] = JSON.parse(requestKey) as ['local', string]
+    const params = JSON.parse(requestKey) as ApiFilters
     const controller = new AbortController()
     const current = ++sequence.current
     setRequest({ key: requestKey, loading: true, data: null, error: null })
-    apiGet<DetailResponse>('detail', { source: dataSource, id }, controller.signal)
+    apiGet<DetailResponse>('detail', params, controller.signal)
       .then(result => {
         if (controller.signal.aborted || current !== sequence.current) return
         if (!result?.pair) throw new Error('该问答不存在或已不可用。')
@@ -162,6 +164,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
           availability: ['available', 'partial', 'archived', 'empty'].includes(String(result.availability)) ? result.availability : undefined,
           canLookupReplies: result.can_lookup_replies === true,
           contextRevision: result.context_revision,
+          contextScope: result.context_scope,
         } })
       })
       .catch(error => {
@@ -183,11 +186,12 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
     const receive = (result: DetailRepliesResponse) => {
       if (!controller.signal.aborted) setReplyLookup({ detail: lookupDetail, revision: replyRevision, result })
     }
-    apiPost<DetailRepliesResponse>('detail/replies', { source, id: requestedId }, undefined, undefined, controller.signal)
+    const params: ApiFilters = { source, id: requestedId, ...(context ? { context } : {}) }
+    apiPost<DetailRepliesResponse>('detail/replies', params, undefined, undefined, controller.signal)
       .then(receive)
       .catch(() => receive({ status: 'unavailable', messages: [] }))
     return () => controller.abort()
-  }, [lookupDetail, requestedId, replyRevision, source])
+  }, [context, lookupDetail, requestedId, replyRevision, source])
 
   const lookupResult = lookupDetail && replyLookup?.detail === lookupDetail && replyLookup.revision === replyRevision ? replyLookup.result : null
   // A sync can change sequence numbers between the detail read and reply lookup.
@@ -226,13 +230,16 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
     return () => cancelAnimationFrame(frame)
   }, [anchoredKey, anchorMessageId, embedded, requestKey])
   const availability = loaded?.availability || (archived ? 'archived' : undefined)
-  const noStaffMessages = embedded && !lookupStatus && retainedMessages.length > 0 && (availability === 'available' || availability === 'partial') && !hasRetainedStaff
+  const sourceSession = loaded?.contextScope === 'source_session'
+  const fullSession = sourceSession && availability === 'available'
+  const hasStaffInContext = sessionContext && hasRetainedStaff
+  const noStaffMessages = (embedded || sessionContext) && !lookupStatus && retainedMessages.length > 0 && (availability === 'available' || availability === 'partial') && !hasRetainedStaff
   const content = pair && <div ref={embedded ? undefined : scrollViewport} className={embedded ? 'min-w-0 [overflow-wrap:anywhere]' : 'min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-8 [overflow-wrap:anywhere]'}>
           {!embedded && <div className="flex flex-wrap gap-2 py-5">
             <Badge variant="secondary" className="rounded-md">{pair.id}</Badge>
             <Badge variant="outline" className="gap-1.5 font-normal">
-              {pair.answer.trim() || officialFound ? <CircleCheck className="size-3.5" /> : <CircleDashed className="size-3.5" />}
-              {pair.answer.trim() ? '有客服回复' : officialFound ? '已查到人工客服回复' : hasFukeStaff ? '未发现七鱼客服回复' : '未发现回复'}
+              {pair.answer.trim() || officialFound || hasStaffInContext ? <CircleCheck className="size-3.5" /> : <CircleDashed className="size-3.5" />}
+              {pair.answer.trim() ? '有客服回复' : officialFound ? '已查到人工客服回复' : hasStaffInContext ? '会话中有客服回复' : hasFukeStaff ? '未发现七鱼客服回复' : '未发现回复'}
             </Badge>
             <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground"><ShieldCheck className="size-3.5" />已脱敏</Badge>
           </div>}
@@ -249,11 +256,11 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
           </div>}
           <section className="py-6">
             <h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><ArrowUpRight className="size-3.5" />客服回复</h3>
-            <p className="whitespace-pre-wrap text-sm leading-7 [overflow-wrap:anywhere]">{pair.answer.trim() || (officialFound ? '查到的人工客服回复见下方会话记录。' : hasFukeStaff ? '福客 AI 员工的消息见下方会话记录。' : '当前抽取片段中未发现客服回复。这不代表已经确认该问题未解决。')}</p>
+            <p className="whitespace-pre-wrap text-sm leading-7 [overflow-wrap:anywhere]">{pair.answer.trim() || (officialFound ? '查到的人工客服回复见下方会话记录。' : hasStaffInContext ? '客服原话见下方会话记录。' : hasFukeStaff ? '福客 AI 员工的消息见下方会话记录。' : '当前抽取片段中未发现客服回复。这不代表已经确认该问题未解决。')}</p>
           </section>
           </>}
           <Separator />
-          <ConversationSection title={embedded ? '聊天记录' : '相关会话上下文'} count={!loading && !error && loaded ? messages.length : undefined}>
+          <ConversationSection title={fullSession ? '完整会话' : embedded ? '聊天记录' : '相关会话上下文'} count={!loading && !error && loaded ? messages.length : undefined}>
             {loading ? <LoadingState label="正在读取相关会话上下文…" rows={4} />
               : error ? <div className="rounded-lg border p-4" role="alert"><div className="flex items-center gap-2 text-sm font-medium"><AlertCircle className="size-4" />暂时无法读取会话详情</div><p className="mt-2 text-sm leading-6 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-3" onClick={() => setRetry(value => value + 1)}><RefreshCw className="size-3.5" />重新加载</Button></div>
                 : <>
@@ -267,7 +274,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
                   {availability === 'archived' && <div role="status" className="mb-4 flex items-start gap-3 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><Archive className="mt-1 size-4 shrink-0" /><p>原始聊天记录已归档。</p></div>}
                   {anchorMessageId && !anchoredKey && lookupStatus !== 'loading' && <p role="status" className="mb-4 text-sm text-muted-foreground">当前保留的会话记录中无法定位这条证据。</p>}
                   {messages.length ? <ConversationTranscript ref={transcript}>
-                    {messages.map(message => <ConversationMessage key={message.key} message={message} pair={pair} anchored={message.key === anchoredKey} />)}
+                    {messages.map(message => <ConversationMessage key={message.key} message={message} pair={pair} anchored={message.key === anchoredKey} sourceSession={sourceSession} />)}
                   </ConversationTranscript>
                     : availability !== 'archived' && <p className="rounded-lg border bg-muted/20 p-4 text-sm leading-6 text-muted-foreground">当前会话没有可展示的聊天记录。</p>}
                 </>}
@@ -276,7 +283,8 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
         </div>
 
   if (embedded) return content
-  return <ConversationSheet open={Boolean(pair)} onOpenChange={open => { if (!open) onClose() }} onCloseAutoFocus={onCloseAutoFocus}>
+  return <ConversationSheet open={Boolean(pair)} onOpenChange={open => { if (!open) onClose() }} onCloseAutoFocus={onCloseAutoFocus}
+    description={sessionContext ? '查看本次咨询所在的七鱼会话，核对原话、客服回复与时间。' : undefined}>
     {content}
   </ConversationSheet>
 }

@@ -67,6 +67,15 @@ def _str(qs: dict[str, list[str]], key: str, default: str = "") -> str:
     return (qs.get(key) or [default])[0]
 
 
+def _full_session(qs: dict[str, list[str]]) -> bool:
+    context = qs.get("context")
+    if context is None:
+        return False
+    if context != ["session"]:
+        raise ValueError("会话上下文参数无效")
+    return True
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -557,7 +566,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(api.pairs(cfg, limit=_int(qs, "limit", 25),
                                  offset=_int(qs, "offset", 0), **filters))
         elif name == "detail":
-            data = api.detail(cfg, _int(qs, "id", 0))
+            data = api.detail(cfg, _int(qs, "id", 0), full_session=_full_session(qs))
             self._json(data if data else {"error": "问答不存在或已在重新清洗中移除"}, 200 if data else 404)
         elif name == "meta":
             self._json({**api.meta(cfg), "source": _str(qs, "source", "local")})
@@ -629,15 +638,16 @@ class Handler(BaseHTTPRequestHandler):
                 qa_id = _int(qs, "id", 0)
                 if qa_id <= 0:
                     raise ValueError("问答 ID 须为正整数")
+                full_session = _full_session(qs)
                 with DB_LOCK:
-                    target = api.case_reply_target(cfg, qa_id)
+                    target = api.case_reply_target(cfg, qa_id, full_session=full_session)
                 result = {"status": "unavailable", "messages": []}
                 if target is not None:
                     result = api.case_replies.lookup(cfg, *target)
                     # The upstream request can outlive a local import or retention
                     # pass. Recheck the original case before returning any reply.
                     with DB_LOCK:
-                        if api.case_reply_target(cfg, qa_id) != target:
+                        if api.case_reply_target(cfg, qa_id, full_session=full_session) != target:
                             result = {"status": "unavailable", "messages": []}
                         else:
                             result["context_revision"] = api.case_context_revision(target[2])

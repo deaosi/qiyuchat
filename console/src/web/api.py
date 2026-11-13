@@ -15,7 +15,7 @@ from ..app import get_db
 from ..clean.rules import mask_pii
 from ..config import Settings, settings
 from ..extract.concepts import concept_signature
-from ..extract.identity import HIDDEN_ROLES, SOURCE_IDENTITY_ROLE, sender_context
+from ..extract.identity import HIDDEN_ROLES, SOURCE_IDENTITY_ROLE, decode_identity, sender_context
 from ..extract.text import clean_visible_text
 from ..local import csv_bytes
 from . import case_media, case_replies, case_senders
@@ -392,6 +392,31 @@ def _case_messages(db: Any, sid: str) -> list[dict[str, Any]]:
     )]
 
 
+def _source_session_labels(messages: list[dict[str, Any]], sid: str, labels: dict[int, dict]) -> None:
+    """Keep message roles and use only the stored sender controls for missing labels."""
+    owner = None
+    for message in messages:
+        role = message["role"]
+        if role == SOURCE_IDENTITY_ROLE:
+            owner = decode_identity(message["content"], sid)
+        elif role == "boundary":
+            owner = None
+        elif role == "user":
+            label = labels.setdefault(message["context_seq"], {})
+            if not label.get("sender_name") and owner and not owner["customer_id"].startswith("qiyu-session:"):
+                if name := case_senders.public_name(owner["customer_name"]):
+                    label["sender_name"] = name
+            if not label.get("sender_name") and not label.get("sender_kind"):
+                label["sender_name"] = "来源访客"
+
+
+def _session_reply_lookup(db: Any, sid: str, messages: list[dict], tables: set[str]) -> bool:
+    """Reply supplementation is only needed for legacy, customer-bound reads."""
+    if any(message["role"] == SOURCE_IDENTITY_ROLE for message in messages):
+        return False
+    return case_senders._saved_snapshot(db._conn, sid, messages, tables) is None
+
+
 def case_context_revision(messages: list[dict[str, Any]]) -> str:
     return hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
@@ -413,16 +438,26 @@ def _case_reply_session(db: Any, cfg: Settings, pair: dict) -> dict[str, Any] | 
     return session
 
 
-def case_reply_target(cfg: Settings, qa_id: int) -> tuple[dict, dict, list[dict]] | None:
+def case_reply_target(cfg: Settings, qa_id: int, *, full_session: bool = False) -> tuple[dict, dict, list[dict]] | None:
     """Capture the locally authorized case, independently of the network call."""
     db = get_db(cfg)
+    with db.tx():
+        return _case_reply_target(cfg, db, qa_id, full_session=full_session)
+
+
+def _case_reply_target(cfg: Settings, db: Any, qa_id: int, *, full_session: bool) -> tuple[dict, dict, list[dict]] | None:
     pair = db.get_pair(qa_id)
     if not pair or not _public(pair)["question"].strip():
         return None
     session = _case_reply_session(db, cfg, pair)
     if session is None:
         return None
-    visible = sender_context(_case_messages(db, pair["session_id"]), pair["session_id"], str(pair.get("customer_id") or ""))
+    messages = _case_messages(db, pair["session_id"])
+    if full_session:
+        tables = {row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not _session_reply_lookup(db, pair["session_id"], messages, tables):
+            return None
+    visible = sender_context(messages, pair["session_id"], str(pair.get("customer_id") or ""))
     if not any(m["role"] == "user" and _detail_content(m["content"]) for m in visible):
         return None
     if any(m["role"] == "staff" and _detail_content(m["content"]) for m in visible):
@@ -453,8 +488,13 @@ def case_reply_response(result: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
+def detail(cfg: Settings, qa_id: int, *, full_session: bool = False) -> dict[str, Any] | None:
     db = get_db(cfg)
+    with db.tx():
+        return _case_detail(cfg, db, qa_id, full_session=full_session)
+
+
+def _case_detail(cfg: Settings, db: Any, qa_id: int, *, full_session: bool) -> dict[str, Any] | None:
     raw = db.get_pair(qa_id)
     if not raw:
         return None
@@ -464,10 +504,14 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
     # Use the original session identity. The public pair's ID may be masked.
     sid = raw["session_id"]
     messages = _case_messages(db, sid)
-    scoped = sender_context(messages, sid, str(raw.get("customer_id") or ""))
+    controlled = any(message["role"] == SOURCE_IDENTITY_ROLE for message in messages)
+    scoped = [message for message in messages if message["role"] not in HIDDEN_ROLES] if full_session else (
+        sender_context(messages, sid, str(raw.get("customer_id") or "")))
     tables = {row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     question_ids, answer_ids, partial = _detail_origin(db, raw, tables)
     labels = case_senders.saved_labels(db._conn, cfg.runtime.state_dir, sid, scoped, tables)
+    if full_session:
+        _source_session_labels(messages, sid, labels)
     visible_messages = []
     for message in scoped:
         if message['role'] in HIDDEN_ROLES:
@@ -488,11 +532,12 @@ def detail(cfg: Settings, qa_id: int) -> dict[str, Any] | None:
     availability = 'archived' if archived else 'empty' if not visible_messages else 'partial' if partial else 'available'
     roles = {message["role"] for message in visible_messages}
     can_lookup = ("user" in roles and "staff" not in roles and
+                  (not full_session or _session_reply_lookup(db, sid, messages, tables)) and
                   _case_reply_session(db, cfg, raw) is not None)
     return {'pair': pair, 'messages': visible_messages, 'archived': archived,
             'message_count': len(visible_messages), 'time_zone': 'Asia/Shanghai', 'availability': availability,
             'can_lookup_replies': can_lookup, 'context_revision': case_context_revision(scoped),
-            'context_scope': 'session_customer' if any(m.get('role') == SOURCE_IDENTITY_ROLE for m in messages) else 'legacy_session'}
+            'context_scope': 'source_session' if full_session else 'session_customer' if controlled else 'legacy_session'}
 
 
 def meta(cfg: Settings | None = None) -> dict[str, Any]:

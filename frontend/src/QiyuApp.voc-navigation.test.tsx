@@ -15,6 +15,7 @@ const topic = {
 }
 const evidence: Evidence = {
   id: 'event-1', event_id: 'event-1', qa_id: 24, question: '为什么保存后没有触发？', answer: '请打开场景开关后保存。',
+  question_message_ids: ['source-question'],
   staff_source_verified: true, claims: [{ role: 'staff', quote: '请打开场景开关后保存。', start: 0, end: 11, source_refs: [] }],
 }
 const sopRef = (message_id: string, quote: string) => ({ qa_id: 24, message_id, quote, ts: 1794441600000 })
@@ -76,7 +77,19 @@ describe('VOC navigation', () => {
     expect(window.location.hash).toBe('#questions')
   })
 
-  it('loads the high-frequency ranking on the original questions route and opens the source', () => {
+  it('opens the complete source session from high-frequency ranking with the exact evidence anchored', async () => {
+    const messages = [
+      { role: 'user', content: '另一位访客补充了会话背景。', time: '2026-11-10 10:00:00', source_message_id: 'source-previous' },
+      { role: 'user', content: evidence.question, time: '2026-11-10 10:00:01', source_message_id: 'source-question',
+        sender_name: '提问店铺', is_question: true },
+      { role: 'staff', content: '请先确认店铺版本，再打开场景开关。', time: '2026-11-10 10:01:02',
+        source_message_id: 'source-reply', sender_name: '接待坐席' },
+    ]
+    const read = vi.fn(async (_url: string) => Response.json({
+      pair: { qa_id: 24, session_id: 'bound-session', question: evidence.question, answer: '', customer_name: '提问店铺' },
+      messages, archived: false, availability: 'available', context_scope: 'source_session', message_count: messages.length,
+    }))
+    vi.stubGlobal('fetch', read)
     window.history.replaceState(null, '', '#questions')
     render(<QiyuApp />)
 
@@ -88,7 +101,19 @@ describe('VOC navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: /场景未触发.*3 次咨询/ }))
     const detail = within(screen.getByRole('dialog', { name: '问题与原句依据' }))
     expect(detail.getByText(evidence.answer)).toBeTruthy()
-    expect(detail.getByRole('button', { name: '跳转到会话上下文' })).toBeTruthy()
+    fireEvent.click(detail.getByRole('button', { name: '跳转到会话上下文' }))
+    const session = within(await screen.findByRole('dialog', { name: '问答与相关会话上下文' }))
+    expect(await session.findByRole('heading', { name: /完整会话/ })).toBeTruthy()
+    const rows = within(session.getByRole('list', { name: '会话消息' })).getAllByRole('listitem')
+    expect(rows).toHaveLength(3)
+    expect(within(rows[0]).getByText('来源访客')).toBeTruthy()
+    expect(rows[1].hasAttribute('data-evidence-anchor')).toBe(true)
+    expect(rows[2].dataset.side).toBe('right')
+    expect(within(rows[2]).getByText('接待坐席')).toBeTruthy()
+    expect(within(rows[2]).getByText(messages[2].time, { selector: 'time' })).toBeTruthy()
+    expect(within(rows[2]).getByText(messages[2].content)).toBeTruthy()
+    expect(session.getByText('会话中有客服回复')).toBeTruthy()
+    expect(read.mock.calls.map(([url]) => url)).toEqual(['/api/detail?source=local&id=24&context=session'])
   })
 
   it('opens a single verified SOP list from the knowledge sidebar', () => {

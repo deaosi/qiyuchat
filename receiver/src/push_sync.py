@@ -31,6 +31,7 @@ from .qiyu.session import SessionExporter
 EVENT_TYPE = "DATA_ONLINE_SESSION_END"
 VERSION = "push-session-v2"
 LEGACY_VERSION = "push-session-v1"
+QUIET_SECONDS = 3600
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS push_sync_state (
  session_id TEXT PRIMARY KEY, event_key TEXT NOT NULL, version TEXT NOT NULL,
@@ -40,6 +41,8 @@ CREATE TABLE IF NOT EXISTS push_sync_state (
  claim_until REAL NOT NULL DEFAULT 0, source_version TEXT NOT NULL DEFAULT '',
  source_json TEXT NOT NULL DEFAULT '',archive_reason TEXT NOT NULL DEFAULT '',archived_at REAL NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS push_sync_retry ON push_sync_state(status,retry_after);
+CREATE TABLE IF NOT EXISTS push_sync_quiet (
+ session_id TEXT PRIMARY KEY, version TEXT NOT NULL, retry_after REAL NOT NULL);
 """ + SOURCE_ARCHIVE_TRIGGERS
 
 
@@ -175,6 +178,30 @@ def _project(metadata: dict, rows: list[dict], event: dict, sid: int, *, legacy:
         result.append({"role": role, "content": row["msg"], "ts": row["time"],
                        **({"source_message_id": f"source:{sid}:{row['id']}"} if not legacy else {})})
     return result
+
+
+def _quiet_until(metadata: dict, projected: list[dict]) -> float:
+    last_chat = max((row["ts"] for row in projected
+                     if row["role"] in ("user", "staff", "bot") and row["content"].strip()),
+                    default=metadata["endTime"])
+    return last_chat / 1000 + QUIET_SECONDS
+
+
+def _defer_quiet(conn: sqlite3.Connection, event: dict, old: sqlite3.Row | None,
+                 now: float, retry_after: float) -> None:
+    sid = event["sid"]
+    if old and old["status"] == "completed" and old["source_json"] and old["source_version"] == old["version"]:
+        # Keep the last published version available while a newer event waits.
+        # The quiet table only holds scheduling metadata, never a transcript.
+        conn.execute("INSERT INTO push_sync_quiet VALUES (?,?,?) ON CONFLICT(session_id) DO UPDATE "
+                     "SET version=excluded.version,retry_after=excluded.retry_after", (sid, event["version"], retry_after))
+        conn.execute("UPDATE push_sync_state SET event_key=?,version=?,status='completed',attempts=?,updated_at=?,"
+                     "retry_after=?,safe_error=?,owner=?,claim_until=? WHERE session_id=?",
+                     (old["event_key"], old["version"], old["attempts"], old["updated_at"], old["retry_after"],
+                      old["safe_error"], old["owner"], old["claim_until"], sid))
+    else:
+        conn.execute("UPDATE push_sync_state SET status='pending',attempts=attempts-1,updated_at=?,retry_after=?,"
+                     "safe_error='',owner='',claim_until=0 WHERE session_id=?", (now, retry_after, sid))
 
 
 def _legacy_origin(conn: sqlite3.Connection, old: sqlite3.Row | None) -> dict | None:
@@ -347,7 +374,7 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
     clock = lambda: time.time() if now is None else now
     db = DB(cfg.runtime.db_path)
     owner = uuid.uuid4().hex
-    result = {"scanned": 0, "invalid_events": 0, "claimed": 0, "completed": 0, "failed": 0,
+    result = {"scanned": 0, "invalid_events": 0, "claimed": 0, "completed": 0, "failed": 0, "deferred": 0,
               "skipped": 0, "archived": 0, "qa_pairs": 0, "test_marked_sessions": 0,"repaired":0}
     api = exporter or SessionExporter(cfg.qiyu)
     last_call = 0.0
@@ -391,6 +418,11 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                 if _expired(event["payload"], cfg, clock()):
                     db._conn.execute("INSERT INTO push_sync_state(session_id,event_key,version,status,updated_at,safe_error,archive_reason,archived_at) VALUES (?,?,?,'archived',?,?,'retention',?) ON CONFLICT(session_id) DO UPDATE SET event_key=excluded.event_key,version=excluded.version,status='archived',source_json='',source_version='',updated_at=excluded.updated_at,safe_error=excluded.safe_error,archive_reason='retention',archived_at=excluded.archived_at", (sid, event["event_key"], event["version"], clock(), "来源已超过原文保留期，未补采",clock()))
                     result["archived"] += 1
+                    continue
+                if not repairing and db._conn.execute("SELECT 1 FROM push_sync_quiet WHERE session_id=? "
+                                                       "AND version=? AND retry_after>?",
+                                                       (sid, event["version"], clock())).fetchone():
+                    result["skipped"] += 1
                     continue
                 legacy_origin = _legacy_origin(db._conn, old)
                 if legacy_origin and db._conn.execute("SELECT 1 FROM qa_pair WHERE session_id=? LIMIT 1", (sid,)).fetchone():
@@ -438,11 +470,17 @@ def sync_pending(cfg: Settings, limit: int = 20, *, session_id: int | None = Non
                         raise PushSyncError("同步期间收到更新的结束事件，请稍后重试")
                     if _expired(metadata, cfg, clock()) or _expired(event["payload"], cfg, clock()):
                         raise PushSyncError("来源会话已超过原文保留期，暂停同步")
+                    now_at_commit = clock()
+                    if not repairing and not replay and (quiet_until := _quiet_until(metadata, projected)) > now_at_commit:
+                        _defer_quiet(db._conn, event, old, now_at_commit, quiet_until)
+                        result["deferred"] += 1
+                        continue
                     _protect_existing(db, sid, previous_source, sorted(rows,key=lambda r:(r["time"],r["id"])), projected, migrate_legacy=legacy_origin is not None,repair_roles=repairing)
                     db.upsert_sessions([metadata], verified_source=True)
                     db.upsert_messages(sid, projected, verified_source=True)
                     count = _extract_one(db, sid)
                     db._conn.execute("UPDATE push_sync_state SET status='completed',updated_at=?,retry_after=0,safe_error='',owner='',claim_until=0,source_version=version,source_json=?,archive_reason='',archived_at=0 WHERE session_id=?", (clock(), source, sid))
+                    db._conn.execute("DELETE FROM push_sync_quiet WHERE session_id=?", (sid,))
                     if repairing:
                         db._conn.execute("INSERT INTO source_write_audit(session_id,operation,reason,incoming_count,retained_count,created_at) VALUES (?,'repair','operator_confirmed_legacy_overwrite',?,?,?)", (sid,len(rows),len(projected),int(clock()*1000)))
                 result["completed"] += 1

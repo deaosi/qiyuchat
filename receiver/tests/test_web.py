@@ -232,6 +232,14 @@ class TestWeb(LocalFixture):
         self.assertEqual(self.call(path, "POST", headers=auth)[0], 403)
         before_lookup = self.call(f"/api/detail?id={qa_id}", headers=auth)[1]
         self.assertTrue(before_lookup["can_lookup_replies"])
+        full_path = f"/api/detail?id={qa_id}&context=session"
+        self.assertEqual(self.call(full_path)[0], 401)
+        self.assertEqual(self.call(full_path + "&context=session", headers=auth)[0], 400)
+        self.assertEqual(self.call(f"/api/detail?id={qa_id}&context=other", headers=auth)[0], 400)
+        full_session = self.call(full_path, headers=auth)[1]
+        self.assertEqual(full_session["context_scope"], "source_session")
+        self.assertTrue(full_session["can_lookup_replies"])
+        self.assertEqual(full_session["context_revision"], before_lookup["context_revision"])
         started, finish = threading.Event(), threading.Event()
         upstream = {"status": "found", "messages": [
             {"role": "staff", "content": "合成客服消息 13812345678", "ts": stamp + 1,
@@ -260,6 +268,10 @@ class TestWeb(LocalFixture):
         self.assertNotIn("13812345678", str(result))
         self.assertEqual(result["messages"][0]["source_message_id"], f"source:{sid}:2")
         self.assertEqual(len(db.get_messages(str(sid))), 1)
+        with patch("src.web.api.case_replies.lookup", return_value=upstream):
+            status, explicit, _ = self.call(path + "&context=session", "POST", headers=write)
+        self.assertEqual(status, 200)
+        self.assertEqual(explicit["context_revision"], full_session["context_revision"])
 
         def archive_during_lookup(*_args):
             with db.tx() as conn:
