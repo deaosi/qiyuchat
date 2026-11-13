@@ -117,7 +117,7 @@ def _cli_environment() -> dict[str, str]:
     names = {"PATH", "HOME", "USER", "LOGNAME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
              "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL",
              "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
-             "LARKSUITE_CLI_CONFIG_DIR"}
+             "LARKSUITE_CLI_CONFIG_DIR", "LARKSUITE_CLI_DATA_DIR"}
     return {key: value for key, value in os.environ.items() if key.upper() in names}
 
 

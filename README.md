@@ -107,6 +107,10 @@ worker 与 Web 服务均需使用已安装依赖的 Python 环境，并通过 `V
 
 也可从 `console` 目录运行同一同步脚本，默认只计算预览。映射和权限核对通过后，可用 `--apply` 执行同步。定时执行沿用同一配置文件和编号规则，重复运行会按编号更新已有记录。当前接入按指定区间生成快照。
 
+服务器上的全量飞书同步由 `qiyu-feishu-sync.timer` 在北京时间每小时的 00 分和 30 分触发。它读取最近 7 天的咨询分类，增量维护现有全量表、Top 100 表和仪表盘。同步进程以 `qiyu` 用户运行，状态文件、目标表映射和飞书应用身份存放在 `/var/lib/qiyu-feishu-sync/`。迁移已有任务时，先预览并核对目标，再随现有发布状态和待恢复清单一起切换。
+
+将 `console/deploy/feishu_sync/` 安装到 `/opt/qiyu-console/deploy/feishu_sync/`，将同目录的 `qiyu-feishu-sync.service` 和 `qiyu-feishu-sync.timer` 安装到 `/etc/systemd/system/`。以服务账户配置 Linux 版 `lark-cli` 的应用身份，并放入原来的 `target-config.json`（将 `cli` 改为服务器路径）及 `target-metadata.json`。运行器省略 `--apply` 时只预览；完成切换后执行 `systemctl enable --now qiyu-feishu-sync.timer`，可用 `journalctl -u qiyu-feishu-sync.service` 核对运行记录。
+
 ```bash
 python -m src.voc_feishu_sync --kind topics --days 7
 python -m src.voc_feishu_sync --kind sops --days 7 --apply

@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync YuHai Voc to Feishu every 30 minutes in Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1s
+Unit=qiyu-feishu-sync.service
+
+[Install]
+WantedBy=timers.target
