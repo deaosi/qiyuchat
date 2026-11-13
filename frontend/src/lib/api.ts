@@ -52,7 +52,7 @@ export type VocQueryFilters = {
 }
 
 const detailRepliesStatuses = ['found', 'no_reply', 'unmatched', 'unavailable', 'busy'] as const
-const detailSenderKinds = ['fuke_staff', 'unidentified'] as const
+const detailSenderKinds = ['fuke_staff', 'group_participant', 'unidentified'] as const
 export type DetailSenderKind = typeof detailSenderKinds[number]
 export interface DetailSenderMetadata {
   sender_name?: string

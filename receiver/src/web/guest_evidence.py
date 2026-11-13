@@ -278,11 +278,15 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
                                                                     selected_rows=selected_rows)
                                                  if len(rows) <= _MAX_SOURCE_MESSAGES else ([], False, None, {}))
             nicknames = case_senders.saved_source_nicknames(db, sid, selected_rows, tables) if selected_rows else {}
+            groups = (case_senders.saved_guest_groups(db, cfg.runtime.state_dir, sid, selected_rows, tables)
+                      if selected_rows else {})
+            limit = _FULL_MESSAGE_LIMIT if full else _MAX_CONTEXT_TEXT
+            legacy = (_legacy_messages(cfg, db, pair, rows, names, limit, tables)
+                      if include_sender_names and not context and len(rows) <= _MAX_SOURCE_MESSAGES else [])
     except (sqlite3.Error, OSError):
         return None
     scope = ("limited" if limited else "context") if context else "pair"
     if not context:
-        limit = _FULL_MESSAGE_LIMIT if full else _MAX_CONTEXT_TEXT
         question = _message("user", pair.get("asked_at"), pair.get("question"), names, limit)
         answer = _message("staff", 0, pair.get("answer"), names, limit)
         if question is None:
@@ -296,24 +300,37 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
         origin.get("revision"), scope, context,
     ])
     # Display metadata is outside the fingerprint of an existing link.
-    if include_sender_names and scope == "pair" and len(rows) <= _MAX_SOURCE_MESSAGES:
-        if legacy := _legacy_messages(cfg, pair, rows, names, limit):
-            return fingerprint, legacy, scope, names, media
+    if legacy:
+        return fingerprint, legacy, scope, names, media
+    if include_sender_names and scope == "pair":
+        for message in context:
+            field = "answer" if message["role"] == "staff" else "question"
+            if "\n" in clean_visible_text(pair.get(field) or ""):
+                message["role"] = "combined_transcript"
+    aliases: dict[str, str] = {}
     for message, row in zip(context, selected_rows or ()):
         if nickname := _clean(nicknames.get(row["context_seq"]))[:300]:
             message["sender_name"] = nickname
+        if identity := groups.get(row["context_seq"]):
+            message["sender_label"] = _group_alias(aliases, identity)
     if position is not None:
         context[position]["anchor"] = True
     return fingerprint, context, scope, names, media
 
 
-def _legacy_messages(cfg: Settings, pair: dict, rows: list[dict], names: re.Pattern[str] | None,
-                     limit: int) -> list[dict]:
+def _group_alias(aliases: dict[str, str], identity: str) -> str:
+    return aliases.setdefault(identity, f"群成员 {len(aliases) + 1}")
+
+
+def _legacy_messages(cfg: Settings, db, pair: dict, rows: list[dict], names: re.Pattern[str] | None,
+                     limit: int, tables: set[str]) -> list[dict]:
     labels = case_senders.saved_legacy_labels(cfg.runtime.state_dir, pair["session_id"], rows)
     match = guest_legacy_transcript.match_pair(pair, rows) if labels else None
     if not match:
         return []
     originals, question_seq = match
+    groups = case_senders.saved_guest_groups(db, cfg.runtime.state_dir, pair["session_id"], originals, tables)
+    aliases: dict[str, str] = {}
     limits = {"user": limit, "staff": limit}
     result = []
     for row in originals[:_FULL_CONTEXT_MESSAGES]:
@@ -329,6 +346,10 @@ def _legacy_messages(cfg: Settings, pair: dict, rows: list[dict], names: re.Patt
             message["role"] = "unidentified"
         elif nickname := _clean(label.get("sender_name"))[:300]:
             message["sender_name"] = nickname
+        if identity := groups.get(seq):
+            message["sender_label"] = _group_alias(aliases, identity)
+            if message["role"] == "unidentified":
+                message["role"] = "group_participant"
         if seq == question_seq:
             message["anchor"] = True
         result.append(message)

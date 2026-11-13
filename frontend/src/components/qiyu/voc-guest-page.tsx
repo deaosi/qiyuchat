@@ -13,7 +13,7 @@ import { TopicDetailPanel, TopicWorkbench } from './voc-topic-detail'
 import type { OpenTopicEvidence } from './voc-topic-evidence'
 
 type GuestSection = { title: string; lines: string[] }
-type GuestMessage = { role: string; time: string; text: string; sender_name?: string; anchor?: boolean; id?: string; images?: string[] }
+type GuestMessage = { role: string; time: string; text: string; sender_name?: string; sender_label?: string; anchor?: boolean; id?: string; images?: string[] }
 type GuestCase = {
   title: string
   category: string
@@ -176,12 +176,15 @@ const chatRoles = {
   user: { side: 'left', label: '客户' },
   customer: { side: 'left', label: '客户' },
   staff: { side: 'right', label: '客服' },
+  group_participant: { side: 'center', label: '群成员' },
+  combined_transcript: { side: 'center', label: '合并记录' },
   unidentified: { side: 'center', label: '身份未确认' },
   bot: { side: 'center', label: '机器人' },
   system: { side: 'center', label: '系统' },
 } as const
 const guestEvidencePath = /^\/guest\/evidence\/[A-Za-z0-9_-]{43}$/
 const guestImageId = /^(?:[0-9]|1[0-9])-[a-f0-9]{64}$/
+const anonymousGroupLabel = /^群成员 [1-9][0-9]*$/
 
 function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boolean | string; title?: string }) {
   const transcript = useRef<HTMLOListElement>(null)
@@ -193,7 +196,9 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
     return () => cancelAnimationFrame(frame)
   }, [item, locate])
 
-  const note = item.scope === 'pair' ? '以下为该条目关联的脱敏问答。'
+  const hasCombinedTranscript = item.messages.some(message => message.role === 'combined_transcript')
+  const note = hasCombinedTranscript ? '历史记录只保留了合并文本，无法区分每条消息的发送者。'
+    : item.scope === 'pair' ? '以下为该条目关联的脱敏问答。'
     : item.scope === 'limited' ? '会话较长，当前展示与本次咨询相关的片段。'
       : '已脱敏 · 北京时间'
   const guestPath = window.location.pathname
@@ -205,10 +210,14 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
         {item.messages.map((message, index) => {
           const role = Object.hasOwn(chatRoles, message.role)
             ? chatRoles[message.role as keyof typeof chatRoles] : { side: 'center', label: '消息' } as const
+          const anonymousSender = message.sender_label && anonymousGroupLabel.test(message.sender_label) ? message.sender_label : ''
+          let sender = message.sender_name || anonymousSender || role.label
+          if (message.role === 'combined_transcript') sender = role.label
+          if (message.role === 'group_participant') sender = anonymousSender || role.label
           const anchored = typeof locate === 'string' ? message.id === locate : message.anchor
           const imageUrls = imageBase && Array.isArray(message.images)
             ? message.images.filter(id => typeof id === 'string' && guestImageId.test(id)).map(id => imageBase + id) : []
-          return <ConversationBubble key={index} side={role.side} sender={message.sender_name || role.label} time={message.time} question={message.anchor && role.side === 'left'} anchored={anchored}>
+          return <ConversationBubble key={index} side={role.side} sender={sender} time={message.time} question={message.anchor && (role.side === 'left' || message.role === 'group_participant')} anchored={anchored}>
             <ConversationMessageBody text={message.text} imageUrls={imageUrls} />
           </ConversationBubble>
         })}

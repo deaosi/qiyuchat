@@ -108,14 +108,16 @@ class TestGuestEvidence(LocalFixture):
             db.executemany("INSERT INTO raw_message(session_id,seq,role,content,ts) VALUES(?,?,?,?,?)",
                            [(sid, m["context_seq"], m["role"], m["content"], m["ts"]) for m in messages])
         token = self._token(guest.issue_url(self.cfg, qa, entry=self.entry))
-        self.assertEqual(len(guest.resolve_payload(self.cfg, token)["cases"][0]["messages"]), 2)
+        before, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertEqual(len(before["messages"]), 2)
+        self.assertEqual(before["messages"][0]["role"], "combined_transcript")
 
         originals = [
             {"id": seq + 1, "sessionId": int(sid), "time": message["ts"], "status": 1, "mType": 1,
              "msg": message["content"], "staffId": 8, "from": int(message["role"] == "user"), **sender}
             for seq, (message, sender) in enumerate(zip(messages, [
                 {"externalUserId": "wmExampleCustomer001", "userName": "店主昵称"},
-                {"externalUserId": "StaffLogin", "userName": ""},
+                {"externalUserId": "StaffLogin", "userName": "未接入坐席的群友昵称"},
                 {"staffName": "七鱼坐席昵称", "staffAccount": "QiyuLogin"},
             ]))
         ]
@@ -126,9 +128,13 @@ class TestGuestEvidence(LocalFixture):
 
         rendered, = guest.resolve_payload(self.cfg, token)["cases"]
         self.assertEqual([(row["role"], row.get("sender_name")) for row in rendered["messages"]],
-                         [("user", "店主昵称"), ("unidentified", None), ("staff", "七鱼坐席昵称")])
+                         [("user", "店主昵称"), ("group_participant", None), ("staff", "七鱼坐席昵称")])
+        self.assertEqual([row.get("sender_label") for row in rendered["messages"]], ["群成员 1", "群成员 2", None])
         self.assertTrue(rendered["messages"][0]["anchor"])
-        self.assertNotIn("QiyuLogin", guest.resolve(self.cfg, token).decode())
+        public_page = guest.resolve(self.cfg, token).decode()
+        self.assertIn("群成员 2", public_page)
+        for value in ("QiyuLogin", "StaffLogin", "未接入坐席的群友昵称", "sender_key"):
+            self.assertNotIn(value, public_page)
 
     def test_controlled_context_does_not_cross_visitor_or_case_boundary(self):
         qa = self._seed_case(controlled=True)
@@ -235,7 +241,8 @@ class TestGuestEvidence(LocalFixture):
         case, = guest.resolve_payload(self.cfg, token)["cases"]
         self.assertEqual([message.get("sender_name") for message in case["messages"]],
                          [None, "客户昵称 <小店> 138****5678", "七鱼昵称 <值班> [链接已隐藏]"])
-        self.assertEqual([{k: v for k, v in message.items() if k != "sender_name"} for message in case["messages"]],
+        self.assertEqual([message.get("sender_label") for message in case["messages"]], ["群成员 1", "群成员 2", None])
+        self.assertEqual([{k: v for k, v in message.items() if k not in ("sender_name", "sender_label")} for message in case["messages"]],
                          original_case["messages"])
         page = guest.resolve(self.cfg, token).decode()
         self.assertIn("<strong>客户昵称 &lt;小店&gt; 138****5678</strong>", page)
@@ -344,7 +351,11 @@ class TestGuestEvidence(LocalFixture):
             "cases": [primary, primary, {**primary, "variant": 1}, second, {**primary, "variant": False}],
         }
         token = self._token(guest.issue_url(self.cfg, qa, "own-question", entry=self.entry, view=view))
-        public = guest.resolve_payload(self.cfg, token)
+        with (
+            patch.object(case_senders, "saved_source_nicknames", return_value={4: "仅后台可见的来源昵称"}),
+            patch.object(case_senders, "saved_guest_groups", return_value={4: "fixture-opaque-sender-key"}),
+        ):
+            public = guest.resolve_payload(self.cfg, token)
         self.assertEqual(public["topic_detail"]["topic"]["consultation_count"], 6)
         self.assertEqual(len(public["cases"]), 2)
         first, second, empty = public["topic_variants"]
@@ -361,8 +372,11 @@ class TestGuestEvidence(LocalFixture):
         self.assertEqual(event["source_kind"], "source-anchored")
         self.assertEqual(second["topic_detail"]["events"][0]["answer"], "")
         self.assertEqual(second["topic_detail"]["events"][0]["qa_id"], 2)
+        self.assertEqual(next(message for message in public["cases"][0]["messages"] if message.get("anchor"))["sender_label"],
+                         "群成员 1")
         serialized = json.dumps(public, ensure_ascii=False)
         for private in ("own-question", "其他统计范围", "未出现的回复", "/login", "/api/voc2/topics",
+                        "仅后台可见的来源昵称", "fixture-opaque-sender-key",
                         f"t_{1:024x}", f"t_{3:024x}"):
             self.assertNotIn(private, serialized)
 

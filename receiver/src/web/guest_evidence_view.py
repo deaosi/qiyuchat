@@ -9,6 +9,8 @@ import re
 _KINDS = {"topics": "高频问题", "sops": "处理 SOP"}
 _ROLES = {
     "unidentified": ("身份未确认", "neutral"),
+    "group_participant": ("群成员", "neutral"),
+    "combined_transcript": ("合并记录 · 发送人未确认", "neutral"),
     "user": ("客户", "customer"),
     "customer": ("客户", "customer"),
     "staff": ("客服", "staff"),
@@ -203,7 +205,10 @@ def _chat(case: dict) -> str:
         if not body:
             continue
         label, side = _ROLES.get(_text(message.get("role")), ("消息", "neutral"))
-        label = _text(message.get("sender_name")) or label
+        alias = _text(message.get("sender_label"))
+        if message.get("role") != "combined_transcript":
+            label = (_text(message.get("sender_name"))
+                     or (alias if re.fullmatch(r"群成员 [1-9][0-9]*", alias) else label))
         stamp = _text(message.get("time"))
         time_markup = f"<time>{escape(stamp)}</time>" if stamp else ""
         rows.append(

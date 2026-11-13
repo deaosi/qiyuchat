@@ -104,6 +104,7 @@ function fullTime(value: string) {
 
 function messageSender(message: ContextMessage, pair: QAPair) {
   if (message.senderKind === 'fuke_staff') return message.senderName || message.senderAccount || '福客 AI 员工'
+  if (message.senderKind === 'group_participant') return message.senderName || '群成员'
   if (message.senderKind === 'unidentified') return ['身份未确认', message.senderName || message.senderAccount].filter(Boolean).join(' · ')
   switch (message.role) {
     case 'user': return message.senderName || customerLabel(pair.customerName, pair.customerId)
@@ -116,12 +117,13 @@ function messageSender(message: ContextMessage, pair: QAPair) {
 
 function ConversationMessage({ message, pair, anchored }: { message: ContextMessage; pair: QAPair; anchored: boolean }) {
   const isFukeStaff = message.senderKind === 'fuke_staff'
+  const isGroupParticipant = message.senderKind === 'group_participant'
   const isCustomer = message.role === 'user' && !message.senderKind
   const side = message.role === 'staff' || isFukeStaff ? 'right' : isCustomer ? 'left' : 'center'
 
   return <ConversationBubble side={side} sender={messageSender(message, pair)} time={message.time} anchored={anchored}
-    senderNote={isFukeStaff ? '福客 AI · 七鱼未识别为客服' : undefined}
-    question={Boolean(isCustomer && message.sourceMessageId && message.isQuestion)}>
+    senderNote={isFukeStaff ? '福客 AI · 七鱼未识别为客服' : isGroupParticipant && message.senderName ? '群成员' : undefined}
+    question={Boolean((isCustomer || isGroupParticipant) && message.sourceMessageId && message.isQuestion)}>
     <ConversationMessageBody text={message.content} imageUrls={message.images.map(image => image.url)} readFile={readAdminImageFile} />
   </ConversationBubble>
 }
@@ -204,7 +206,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
   const messages = officialFound ? mergeOfficialReplies(identifiedMessages, officialResult.messages) : identifiedMessages
   const hasFukeStaff = identifiedMessages.some(message => message.senderKind === 'fuke_staff')
   const questionSender = identifiedMessages.find(message => message.isQuestion)
-  const internalOrigin = questionSender?.senderKind === 'fuke_staff' ? questionSender : null
+  const namedOrigin = questionSender?.senderKind === 'fuke_staff' || questionSender?.senderKind === 'group_participant' ? questionSender : null
   const anchoredKey = anchorMessageId ? messages.find(message => message.sourceMessageId === anchorMessageId)?.key : undefined
   React.useEffect(() => {
     if (!anchoredKey) return
@@ -236,7 +238,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
           </div>}
 
           <dl className={`grid min-w-0 grid-cols-2 gap-x-5 gap-y-5 pb-6 text-sm [&>div]:min-w-0 ${embedded ? 'pt-2' : ''}`}>
-            <div><dt className="mb-1.5 text-xs text-muted-foreground">{internalOrigin ? '来源人员' : '咨询客户'}</dt><dd className="font-medium">{internalOrigin ? messageSender(internalOrigin, pair) : customerLabel(pair.customerName, pair.customerId)}</dd></div>
+            <div><dt className="mb-1.5 text-xs text-muted-foreground">{namedOrigin ? '来源人员' : '咨询客户'}</dt><dd className="font-medium">{namedOrigin ? messageSender(namedOrigin, pair) : customerLabel(pair.customerName, pair.customerId)}</dd></div>
             <div><dt className="mb-1.5 text-xs text-muted-foreground">{embedded ? '接待客服' : '客户群 / 接待客服'}</dt><dd>{embedded ? pair.staffName : pair.groupName}</dd>{!embedded && <dd className="mt-1 text-xs text-muted-foreground">{pair.staffName}</dd>}</div>
             <div><dt className="mb-1.5 text-xs text-muted-foreground">提问时间</dt><dd className="tabular-nums">{fullTime(pair.askedAt)}</dd></div>
             <div><dt className="mb-1.5 text-xs text-muted-foreground">会话 ID</dt><dd className="break-all text-xs leading-6">{pair.sessionId}</dd></div>

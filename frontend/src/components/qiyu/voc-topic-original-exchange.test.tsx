@@ -45,6 +45,17 @@ it('uses verified staff claims when the source answer is empty, excluding non-st
   expect(screen.queryByText('客户后续反馈')).toBeNull()
 })
 
+it('does not present a legacy mixed transcript as the original words of one customer', () => {
+  const question = '场景什么时候能用？\n我这边查一下。\n再试一次看看。'
+  const item: Evidence = { id: 'legacy-group', event_id: 'legacy-group', question, question_quote: question,
+    source_kind: 'legacy-reference', answer: '', staff_source_verified: false, claims: [] }
+  render(<OriginalExchange item={item} exactQuestion />)
+  expect(screen.getByText('场景什么时候能用？')).toBeTruthy()
+  expect(screen.queryByText('我这边查一下。', { exact: false })).toBeNull()
+  expect(screen.queryByText('客户问题原文')).toBeNull()
+  expect(screen.getByText('这里只摘录开头。点击「跳转」查看逐条会话。')).toBeTruthy()
+})
+
 it('keeps the verified representative and jumps from other questions without replacing it', () => {
   const empty: Evidence = { id: 'empty', event_id: 'empty', qa_id: 1, question: '较早问题', question_quote: '较早问题', answer: '', staff_source_verified: true, claims: [] }
   const answered: Evidence = { ...empty, id: 'answered', event_id: 'answered', qa_id: 2, question: '有回复的问题', question_quote: '有回复的问题', source_kind: 'source-anchored', answer: '真实客服回复' }

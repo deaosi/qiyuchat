@@ -189,6 +189,32 @@ describe('embedded case conversation details', () => {
     expect(screen.queryByText('咨询客户', { selector: 'dt' })).toBeNull()
   })
 
+  it('shows named group participants in separate neutral bubbles', async () => {
+    const messages = [
+      { ...message(0, '@小吴 麻烦检查这个设置'), sender_kind: 'group_participant', sender_name: '小顾' },
+      { ...message(2, '我在看日志'), sender_kind: 'group_participant', sender_name: '小吴' },
+      { ...message(4, '@赵工 这个我也遇到过'), sender_kind: 'unidentified' },
+      { ...message(5, '已经补充处理步骤'), sender_name: '在线客服' },
+    ]
+    vi.mocked(apiGet).mockResolvedValue(response('21', messages, { availability: 'available' }))
+    render(<QADetail pair={pair()} embedded onClose={vi.fn()} />)
+
+    const transcript = await screen.findByRole('list', { name: '会话消息' })
+    const rows = within(transcript).getAllByRole('listitem')
+    expect(rows.map(row => row.dataset.side)).toEqual(['center', 'center', 'center', 'right'])
+    expect(within(rows[0]).getByText('小顾')).toBeTruthy()
+    expect(within(rows[0]).getByText('群成员')).toBeTruthy()
+    expect(within(rows[0]).getByText('本次咨询')).toBeTruthy()
+    expect(within(rows[0]).queryByText('小吴')).toBeNull()
+    expect(within(rows[1]).getByText('小吴')).toBeTruthy()
+    expect(within(rows[1]).getByText('2026-11-11 09:00:02')).toBeTruthy()
+    expect(within(rows[2]).getByText('身份未确认')).toBeTruthy()
+    expect(within(rows[2]).queryByText('赵工')).toBeNull()
+    expect(screen.getByText('来源人员', { selector: 'dt' })).toBeTruthy()
+    expect(screen.getByText('小顾', { selector: 'dd' })).toBeTruthy()
+    expect(screen.queryByText('咨询客户', { selector: 'dt' })).toBeNull()
+  })
+
   it('distinguishes an employee bubble from a verified Qiyu staff reply', async () => {
     const messages = [message(0), { ...message(2, '福客员工消息'), sender_kind: 'fuke_staff' }]
     vi.mocked(apiGet).mockResolvedValue(response('21', messages, { availability: 'available' }))

@@ -154,7 +154,10 @@ describe('official reply lookup transport', () => {
   })
 
   it('accepts identified senders without any supplemental staff replies', async () => {
-    const data = { status: 'no_reply', context_revision: 'same-context', messages: [], senders: [{ context_seq: 7, sender_kind: 'fuke_staff', sender_name: '技术支持王小明' }] }
+    const data = { status: 'no_reply', context_revision: 'same-context', messages: [], senders: [
+      { context_seq: 7, sender_kind: 'fuke_staff', sender_name: '技术支持王小明' },
+      { context_seq: 8, sender_kind: 'group_participant', sender_name: '小顾' },
+    ] }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(data)))
     await expect(apiPost('detail/replies', filters)).resolves.toEqual(data)
   })
@@ -184,6 +187,7 @@ describe('retained transcript sender metadata', () => {
   it('accepts old and individually labeled messages in the same transcript', async () => {
     const data = { ...detail, messages: [visitorMessage,
       { ...visitorMessage, context_seq: 1, sender_kind: 'fuke_staff', sender_name: '技术支持王小明' },
+      { ...visitorMessage, context_seq: 2, sender_kind: 'group_participant', sender_name: '小顾' },
       { ...visitorMessage, sender_kind: 'unidentified', sender_account: 'unknown-user' },
     ] }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(data)))

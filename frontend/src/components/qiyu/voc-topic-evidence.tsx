@@ -81,11 +81,17 @@ export function OriginalExchange({ item, exactQuestion = false }: { item: Eviden
   const missing = item.answer.trim() || claims.length
     ? '回复来源尚未核验，请查看会话上下文确认。'
     : '当前问答片段未提取到客服回复，请查看会话上下文。'
-  const question = exactQuestion ? item.question_quote?.trim() : item.question || item.question_quote
-  const questionLabel = exactQuestion && item.source_kind !== 'source-anchored' ? '会话片段（发言人待核对）' : '客户问题原文'
+  const sourceQuestion = (exactQuestion ? item.question_quote : item.question || item.question_quote)?.trim()
+  const combined = item.source_kind !== 'source-anchored' && Boolean(sourceQuestion?.includes('\n'))
+  const firstLine = sourceQuestion?.split(/\r?\n/, 1)[0].trim()
+  const question = combined && firstLine
+    ? firstLine.length > 180 ? firstLine.slice(0, 180) + '…' : firstLine
+    : sourceQuestion
+  const questionLabel = (exactQuestion || combined) && item.source_kind !== 'source-anchored' ? '会话片段（发言人待核对）' : '客户问题原文'
   return <div className="space-y-3 rounded-lg border bg-muted/20 p-4 text-sm">
     <div className="space-y-1"><h5 className="font-medium">{questionLabel}</h5>
-      <p className="whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]">{question || (exactQuestion ? '未提取到当前会话片段，请查看会话上下文。' : '未提取到当前客户问题原文，请查看会话上下文。')}</p></div>
+      <p className="whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]">{question || (exactQuestion ? '未提取到当前会话片段，请查看会话上下文。' : '未提取到当前客户问题原文，请查看会话上下文。')}</p>
+      {combined && <p className="text-xs text-muted-foreground">这里只摘录开头。点击「跳转」查看逐条会话。</p>}</div>
     <div className="space-y-1"><h5 className="font-medium">客服回复原文</h5>
       {reply && <p className="text-xs text-muted-foreground">同一问答中的原始回复，可能包含其他咨询内容。</p>}
       <p className={`whitespace-pre-wrap leading-6 [overflow-wrap:anywhere]${reply ? '' : ' text-muted-foreground'}`}>{reply || missing}</p></div>
