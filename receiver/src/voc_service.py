@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import closing, contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,10 @@ except ZoneInfoNotFoundError:
 ACTIVE = ('queued', 'running')
 STATES = frozenset((*ACTIVE, 'completed', 'partial', 'failed', 'skipped'))
 WORKBENCH_TRENDS = frozenset(('all', 'new', 'rising', 'persistent'))
+_VIEW_LOCK = threading.Lock()
+_VIEW_CACHE = OrderedDict()
+_VIEW_TTL = 20
+_VIEW_LIMIT = 12
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS voc_service_job (
  id TEXT PRIMARY KEY,status TEXT NOT NULL,total INTEGER NOT NULL DEFAULT 0,
@@ -193,6 +198,61 @@ def _worker_ready(cfg: Settings) -> bool:
         return bool(row and time.time()-row['updated_at']<20 and _alive(row['pid']))
 
 
+def _workbench_status(cfg: Settings) -> dict:
+    from . import voc_assets
+
+    path = _path(cfg)
+    latest, ready = None, False
+    if path.is_file():
+        with voc_assets.connection(path) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'voc_service_job' in tables:
+                row = db.execute('SELECT * FROM voc_service_job ORDER BY created_at DESC LIMIT 1').fetchone()
+                latest = _public(row) if row else None
+            if 'voc_service_worker' in tables:
+                row = db.execute('SELECT pid,updated_at FROM voc_service_worker WHERE id=1').fetchone()
+                ready = bool(row and time.time() - row['updated_at'] < 20 and _alive(row['pid']))
+    return {'latest_job': latest, 'worker_ready': ready, 'semantics': _engine()._semantic(cfg).availability()}
+
+
+def _view_revision(paths: tuple[Path, ...]) -> tuple:
+    """Detect writes, WAL checkpoints and replacements without holding a read transaction."""
+    stamps = []
+    for path in paths:
+        for file in (path, path.with_name(path.name + '-wal')):
+            try:
+                status = file.stat()
+            except FileNotFoundError:
+                stamps.append(None)
+            else:
+                stamps.append((status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns))
+    return tuple(stamps)
+
+
+def _snapshot_view(cfg: Settings, name: str, filters: dict, load):
+    from .voc_topic_insights import periods
+
+    paths = (Path(cfg.runtime.db_path).resolve(), _path(cfg))
+    current, _ = periods(filters)
+    scope = tuple(sorted(filters.items()))
+    key = (*paths, cfg.runtime.voc_domain, cfg.runtime.mock, name, current.start, current.end, scope)
+    revision = _view_revision(paths)
+    with _VIEW_LOCK:
+        entry = _VIEW_CACHE.get(key)
+        if entry and entry[0] == revision and time.monotonic() < entry[1]:
+            _VIEW_CACHE.move_to_end(key)
+            return entry[2]
+
+    result = load()
+    if revision == _view_revision(paths):
+        with _VIEW_LOCK:
+            _VIEW_CACHE[key] = (revision, time.monotonic() + _VIEW_TTL, result)
+            _VIEW_CACHE.move_to_end(key)
+            while len(_VIEW_CACHE) > _VIEW_LIMIT:
+                _VIEW_CACHE.popitem(last=False)
+    return result
+
+
 def start(cfg: Settings, filters: dict, body: object, *, launch=True) -> dict:
     if cfg.runtime.mock or cfg.llm.dry_run or not cfg.llm.api_key:
         raise ServiceError('请先启用业务模型网关。')
@@ -340,10 +400,20 @@ def execute(cfg: Settings, job_id: str) -> dict:
 
 
 def get(cfg: Settings, name: str, filters: dict, identity: str = '', *,
-        workbench: bool = False, trend: str = 'all') -> dict:
+        workbench: bool = False, trend: str = 'all', exchange_only: bool = False) -> dict:
     engine=_engine()
-    if workbench and name=='topics':return engine.topics(cfg,filters,workbench=True,trend=trend)
-    if workbench and name=='topic':return engine.topic_detail(cfg,filters,identity,workbench=True)
+    if workbench and name == 'topics':
+        ranked = _snapshot_view(cfg, 'rank', filters, lambda: engine.topics(cfg, filters, workbench=True))
+        items = ranked['items']
+        if trend != 'all':
+            items = [item for item in items if item['trend']['status'] == trend]
+        return {**ranked, 'items': items, 'total': len(items), 'status': _workbench_status(cfg)}
+    if workbench and name == 'topic':
+        if exchange_only:
+            return engine.topic_detail(cfg, filters, identity, workbench=True, exchange_only=True)
+        return engine.topic_detail(cfg, filters, identity, workbench=True)
+    if name == 'complete-sops':
+        return _snapshot_view(cfg, name, filters, lambda: engine.complete_sops(cfg, filters))
     if name=='summary':
         result=engine.summary(cfg,filters)
         all_jobs=jobs(cfg)['items']
@@ -354,7 +424,6 @@ def get(cfg: Settings, name: str, filters: dict, identity: str = '', *,
                'sops':lambda:engine.sops(cfg,filters,identity),
                'issue-pilot':lambda:engine.issue_pilot(cfg,filters),
                'playbooks':lambda:engine.playbooks(cfg,filters),
-               'complete-sops':lambda:engine.complete_sops(cfg,filters),
                'exceptions':lambda:engine.exceptions(cfg,filters),
                'defects':lambda:engine.defects(cfg,filters),
                'topic':lambda:engine.topic_detail(cfg,filters,identity),

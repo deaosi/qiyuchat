@@ -46,3 +46,15 @@ it('keeps the selected SOP page when the full scoped list arrives', async () => 
   expect(screen.getByRole('button', { name: '查看 SOP · 退款流程 1' })).toBeTruthy()
   expect(calls('voc2/complete-sops')).toHaveLength(2)
 })
+
+it('searches the first SOP response locally if it already includes the complete list', async () => {
+  const items = sops.items.slice(0, 4)
+  vi.mocked(apiGet).mockResolvedValue({ items, total: items.length, first_page_total: items.length })
+  render(<VocKnowledgeLibrary filters={{ ...filters, group: '全部在首页' }} onOpenPair={vi.fn()} />)
+
+  await screen.findByRole('button', { name: '查看 SOP · 退款流程 1' })
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理 SOP' }), { target: { value: '退款流程 4' } })
+  expect(screen.getByRole('button', { name: '查看 SOP · 退款流程 4' })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '查看 SOP · 退款流程 1' })).toBeNull()
+  expect(calls('voc2/complete-sops')).toEqual([{ ...filters, group: '全部在首页', first_page: 1 }])
+})

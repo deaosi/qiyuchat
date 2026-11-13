@@ -484,6 +484,9 @@ class Handler(BaseHTTPRequestHandler):
                     if not 1 <= limit <= 20 or offset < 0:
                         raise ValueError("高频问题每页须为 1–20 条，起始位置须为非负整数。")
                 voc_filters = self._voc_filters(qs)
+                exchange_only = "exchange_only" in qs
+                if exchange_only and (name != "voc2/topic" or qs["exchange_only"] != ["1"] or qs.get("workbench") != ["1"]):
+                    raise ValueError("问答视图参数无效。")
                 if name in ("voc2/topics", "voc2/topic") and ("workbench" in qs or "trend" in qs):
                     workbench = _str(qs, "workbench", "0")
                     trend = _str(qs, "trend", "all")
@@ -492,8 +495,9 @@ class Handler(BaseHTTPRequestHandler):
                     if (len(qs.get("trend", [])) > 1 or trend not in voc_service.WORKBENCH_TRENDS
                             or trend != "all" and (name != "voc2/topics" or workbench != "1")):
                         raise ValueError("高频问题趋势筛选无效。")
+                    projection = {"exchange_only": True} if exchange_only else {}
                     result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"),
-                                             workbench=workbench == "1", trend=trend)
+                                             workbench=workbench == "1", trend=trend, **projection)
                 else:
                     result = voc_service.get(cfg, name[5:], voc_filters, _str(qs, "id"))
                 if paged:

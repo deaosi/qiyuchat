@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 from datetime import datetime
+from functools import lru_cache
 import importlib.util
 from itertools import zip_longest
 import json
@@ -113,7 +114,18 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
                 official_sessions = {row[0] for row in conn.execute("""SELECT session_id FROM push_sync_state
                     WHERE status='completed' AND source_json<>'' AND source_version=version""")}
         anchored_column = "raw_message" in tables and "source_message_id" in {row[1] for row in conn.execute("PRAGMA table_info(raw_message)")}
-        mixed_visitor_sessions = {}
+        identity_sessions = {}
+        source_columns = "seq,role,content,ts,source_message_id" if anchored_column else "role,content,ts"
+
+        @lru_cache(maxsize=32)
+        def session_messages(session_id: str) -> list[dict]:
+            return [dict(message) for message in conn.execute(
+                f"SELECT {source_columns} FROM raw_message WHERE session_id=? ORDER BY seq", (session_id,))]
+
+        @lru_cache(maxsize=32)
+        def visible_messages(session_id: str, customer_id: str) -> list[dict]:
+            return sender_context(session_messages(session_id), session_id, customer_id)
+
         for qa_id in list(source):
             row = source[qa_id]
             row["_domain_mode"] = variants.mode(cfg)
@@ -153,13 +165,16 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
                 row["_known_merchant"] = assets.digest(["verified-merchant", raw_customer]) if known else ""
             row["_answer_parts"] = []
             row["_staff_verified"] = False
-            raw_context = []
+            has_identity = False
             if row["_domain_mode"] and anchored_column and row["_question_parts"]:
-                raw_context = [dict(message) for message in conn.execute(
-                    "SELECT seq,role,content,ts,source_message_id FROM raw_message WHERE session_id=? ORDER BY seq", (raw_sid,))]
-                if raw_sid not in mixed_visitor_sessions:
-                    mixed_visitor_sessions[raw_sid] = len(_visitor_owners(raw_context, raw_sid)) > 1
-            mixed_visitors = mixed_visitor_sessions.get(raw_sid, False)
+                if raw_sid not in identity_sessions:
+                    messages = session_messages(raw_sid)
+                    identity_sessions[raw_sid] = (
+                        any(message["role"] == SOURCE_IDENTITY_ROLE for message in messages),
+                        len(_visitor_owners(messages, raw_sid)) > 1,
+                    )
+                has_identity = identity_sessions[raw_sid][0]
+            mixed_visitors = identity_sessions.get(raw_sid, (False, False))[1]
             if mixed_visitors:
                 # Keep the official conversation intact. Its ambiguous replies cannot support VOC claims.
                 row["answer"] = ""
@@ -169,14 +184,12 @@ def _sources(cfg: Settings, filters: dict, *, only_qa_id: int | None = None,
                 if answer == row["answer"] and answer_parts:
                     row["_answer_parts"], row["_staff_verified"] = answer_parts, True
             elif row["answer"] and origin is None and "raw_message" in tables:
-                messages = [dict(message) for message in conn.execute(
-                    "SELECT role,content,ts FROM raw_message WHERE session_id=? ORDER BY seq", (raw_sid,))]
-                visible = sender_context(messages, raw_sid, raw_customer)
+                visible = visible_messages(raw_sid, raw_customer)
                 staff = "\n".join(_staff_answer(message.get("content")) for message in visible if message.get("role") == "staff")
                 row["_staff_verified"] = row["answer"] in staff
             row["_context"] = []
-            if any(message["role"] == SOURCE_IDENTITY_ROLE for message in raw_context):
-                visible = sender_context(raw_context, raw_sid, raw_customer)
+            if has_identity:
+                visible = visible_messages(raw_sid, raw_customer)
                 if mixed_visitors:
                     visible = [message for message in visible if message["role"] == "user"]
                 anchors = {part["message_id"] for part in row["_question_parts"] + row["_answer_parts"]}
@@ -395,7 +408,7 @@ def _source_filters(filters: dict) -> dict:
     return {key: filters[key] for key in ("group", "staff", "q", "replied", "cluster", "customer") if filters.get(key)}
 
 
-def _workbench_data(cfg: Settings, filters: dict) -> tuple[list[dict], list[dict], set[str], dict]:
+def _workbench_data(cfg: Settings, filters: dict, *, definitions: dict | None = None) -> tuple[list[dict], list[dict], set[str], dict]:
     current, previous = insights.periods(filters)
     start, stop = current.bounds()
     comparison_start = previous.bounds()[0] if previous else start
@@ -404,15 +417,18 @@ def _workbench_data(cfg: Settings, filters: dict) -> tuple[list[dict], list[dict
     previous_sources = previous.rows(sources) if previous else {}
     store = path(cfg)
     events, states, observed_before = [], {}, set()
-    if store.is_file():
+    domain = variants.mode(cfg) == "zhihuige"
+    if sources and store.is_file():
         with assets.connection(store) as conn:
             conn.execute("BEGIN")
             if "v2_source" in _tables(conn):
                 states = {row["qa_id"]: row["state"] for row in conn.execute(
-                    "SELECT qa_id,fingerprint,state FROM v2_source WHERE pipeline=?", (variants.pipeline(cfg),))
-                    if row["qa_id"] in sources and row["fingerprint"] == sources[row["qa_id"]]["_fingerprint"]}
-                read_filters = episode_projection.source_filters(filters) if variants.mode(cfg) == "zhihuige" else filters
-                events = _read_events(cfg, read_filters, sources, conn)
+                    """SELECT qa_id,fingerprint,state FROM v2_source
+                        WHERE pipeline=? AND qa_id IN (SELECT value FROM json_each(?))""",
+                    (variants.pipeline(cfg), assets.dump(sorted(sources))))
+                    if row["fingerprint"] == sources[row["qa_id"]]["_fingerprint"]}
+                read_filters = episode_projection.source_filters(filters) if domain else filters
+                events = _read_events(cfg, read_filters, sources, conn, restrict_qa_ids=True)
                 if previous and events:
                     # Historical snapshots can suppress a false "first seen" label, but only
                     # current fingerprints contribute to counts, evidence, or answers.
@@ -421,11 +437,11 @@ def _workbench_data(cfg: Settings, filters: dict) -> tuple[list[dict], list[dict
                         WHERE i.active=1 AND s.state='done' AND s.pipeline=? AND
                         CASE WHEN json_valid(s.snapshot) THEN CAST(json_extract(s.snapshot,'$.asked_at') AS INTEGER) END
                         BETWEEN 1 AND ?""", (variants.pipeline(cfg), start - 1))}
-    domain = variants.mode(cfg) == "zhihuige"
     if domain:
         legacy_events = events
         view_filters = {key: value for key, value in filters.items() if key != "focus_topic"}
-        events = episode_projection.project(cfg, sources, events, view_filters, set(_topic_definitions(cfg)))
+        active_topics = _topic_definitions(cfg) if definitions is None else definitions
+        events = episode_projection.project(cfg, sources, events, view_filters, set(active_topics))
         states.update({row["qa_id"]: "done" for row in events if row.get("episode_id")})
     current_events = [row for row in events if row["qa_id"] in current_sources]
     previous_events = [row for row in events if row["qa_id"] in previous_sources]
@@ -511,8 +527,8 @@ def _rank_categories(definitions: dict, items: list[dict], rows: list[dict], pri
 
 def topics(cfg: Settings, filters: dict, *, workbench: bool = False, trend: str = "all") -> dict:
     if workbench:
-        rows, previous, earlier, comparison = _workbench_data(cfg, filters)
         definitions = _topic_definitions(cfg)
+        rows, previous, earlier, comparison = _workbench_data(cfg, filters, definitions=definitions)
         items = _topic_items(cfg, rows, definitions)
         if filters.get("focus_topic"):
             grouped, prior = defaultdict(list), defaultdict(list)
@@ -529,7 +545,8 @@ def topics(cfg: Settings, filters: dict, *, workbench: bool = False, trend: str 
         if trend != "all":
             items = [item for item in items if item["trend"]["status"] == trend]
         return {"items": items, "total": len(items), "category_total": category_total,
-                "category_consultation_count": category_consultation_count, "comparison": comparison}
+                "category_consultation_count": category_consultation_count, "comparison": comparison,
+                "event_count": len(rows)}
     items = _topic_items(cfg, _topic_view(cfg, filters))
     return {"items": items, "total": len(items)}
 
@@ -571,24 +588,30 @@ def feishu_topics(cfg: Settings, filters: dict, *, topic_ids: set[str] | None = 
             "guest_rows": groups, "guest_topics": details}
 
 
-def topic_detail(cfg: Settings, filters: dict, topic_id: str, *, workbench: bool = False) -> dict:
+def topic_detail(cfg: Settings, filters: dict, topic_id: str, *, workbench: bool = False,
+                 exchange_only: bool = False) -> dict:
     if filters.get("focus_topic") and filters["focus_topic"] != topic_id:
         raise EngineError("当前范围内没有该问题。", 404)
-    topic = _topic_definitions(cfg).get(topic_id)
+    definitions = _topic_definitions(cfg)
+    topic = definitions.get(topic_id)
     if workbench:
         if topic is None:
             raise EngineError("当前范围内没有该问题。", 404)
-        rows, previous, earlier, comparison = _workbench_data(cfg, {**filters, "focus_topic": topic_id})
+        rows, previous, earlier, comparison = _workbench_data(
+            cfg, {**filters, "focus_topic": topic_id}, definitions=definitions)
         if not rows:
             raise EngineError("当前范围内没有该问题。", 404)
+        evidence = [{**_topic_evidence(row), "workbench": insights.case_details(row)} for row in rows]
+        public = _topic_insight(_public_topic(topic, rows), rows, previous, topic_id in earlier, comparison)
+        if exchange_only:
+            return {"topic": public, "events": evidence, "total": len(rows),
+                    "workbench": {"comparison": comparison, "knowledge": [], "gaps": []}}
         global_sources = _sources(cfg, {})
         all_events = _events(cfg, {}, _current=global_sources)
         original = _original_topic_events(rows, all_events)
         latest = _topic_knowledge_assets(cfg, global_sources, all_events, original)
         knowledge = _knowledge_for_events(cfg, latest, original, all_events)
         knowledge = [{**item, "reuse_level": insights.reuse_level(item)} for item in knowledge]
-        evidence = [{**_topic_evidence(row), "workbench": insights.case_details(row)} for row in rows]
-        public = _topic_insight(_public_topic(topic, rows), rows, previous, topic_id in earlier, comparison)
         return {"topic": public, "events": evidence, "evidence": evidence, "total": len(rows),
                 "workbench": {"comparison": comparison, "knowledge": knowledge,
                               "gaps": insights.gaps(rows, knowledge, latest)}}
@@ -850,7 +873,7 @@ def _recheck_playbook_branches(scoped: dict, global_result: dict) -> dict:
     return {**scoped, "items": updated}
 
 
-def playbooks(cfg: Settings, filters: dict) -> dict:
+def _build_playbooks(cfg: Settings, filters: dict, *, include_case_paths: bool = True) -> dict:
     from . import voc_case_paths, voc_issue_pilot, voc_playbooks, voc_solution_sop, voc_solution_store
 
     if variants.mode(cfg) != "zhihuige" or cfg.runtime.mock:
@@ -858,6 +881,8 @@ def playbooks(cfg: Settings, filters: dict) -> dict:
     current = _sources(cfg, episode_projection.source_filters(filters), identify_merchants=True)
     events = _topic_view(cfg, filters, current=current)
     issues = voc_issue_pilot.build(events)["items"]
+    if not issues and not include_case_paths:
+        return {"items": [], "total": 0, "case_paths": []}
     path_sources = current
     if any(filters.get(key) not in (None, "", "all") for key in ("focus_topic", "support_intent", "diagnosis_status")):
         matching = {event["qa_id"] for event in events}
@@ -872,16 +897,23 @@ def playbooks(cfg: Settings, filters: dict) -> dict:
     superseded = {voc_solution_sop.case_key(case) for case in extra_sops}
     retained = [case for case in current_sops if voc_solution_sop.case_key(case) not in superseded]
     result = voc_playbooks.build(issues, [*retained, *extra_sops])
+    return {**result, "case_paths": case_paths if include_case_paths else []}
+
+
+def _check_playbook_conflicts(cfg: Settings, filters: dict, result: dict) -> dict:
     if any(item["branches"] for item in result["items"]) and any(
             value not in (None, "", 0, "all", "local") for value in filters.values()):
-        result = _recheck_playbook_branches(result, playbooks(cfg, {}))
-    return {**result, "case_paths": case_paths}
+        return _recheck_playbook_branches(result, _build_playbooks(cfg, {}, include_case_paths=False))
+    return result
 
 
-def complete_sops(cfg: Settings, filters: dict) -> dict:
-    """Publish only procedures with all of their evidence in a completed case."""
-    items = []
-    for item in playbooks(cfg, filters)["items"]:
+def playbooks(cfg: Settings, filters: dict) -> dict:
+    return _check_playbook_conflicts(cfg, filters, _build_playbooks(cfg, filters))
+
+
+def _complete_sop_candidates(items: list[dict]) -> list[dict]:
+    candidates = []
+    for item in items:
         branches = []
         for branch in item["branches"]:
             if branch["status"] != "verified" or not branch["condition"] or not branch["steps"] or not branch["retest"]:
@@ -906,10 +938,26 @@ def complete_sops(cfg: Settings, filters: dict) -> dict:
                              "escalation": branch["escalation"] if escalation else "",
                              "escalation_evidence": escalation})
         if branches:
-            checked = {ref["qa_id"] for branch in branches for ref in branch["result_evidence"]}
-            items.append({key: item[key] for key in ("id", "issue_id", "title", "family", "platform", "module", "condition")}
-                         | {"status": "verified", "checked_cases": len(checked), "branches": branches,
-                            "triage": [], "missing": [], "evidence": []})
+            candidates.append({**item, "branches": branches})
+    return candidates
+
+
+def complete_sops(cfg: Settings, filters: dict) -> dict:
+    """Publish only procedures with a complete witness and no conflicting case."""
+    scoped = _build_playbooks(cfg, filters, include_case_paths=False)
+    candidates = _complete_sop_candidates(scoped["items"])
+    if not candidates:
+        return {"items": [], "total": 0}
+    current = _check_playbook_conflicts(cfg, filters, {"items": candidates, "total": len(candidates)})
+    items = []
+    for item in current["items"]:
+        branches = [branch for branch in item["branches"] if branch["status"] == "verified"]
+        if not branches:
+            continue
+        checked = {ref["qa_id"] for branch in branches for ref in branch["result_evidence"]}
+        items.append({key: item[key] for key in ("id", "issue_id", "title", "family", "platform", "module", "condition")}
+                     | {"status": "verified", "checked_cases": len(checked), "branches": branches,
+                        "triage": [], "missing": [], "evidence": []})
     return {"items": items, "total": len(items)}
 
 

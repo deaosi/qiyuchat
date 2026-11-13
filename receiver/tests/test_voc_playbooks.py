@@ -45,9 +45,9 @@ class TestPlaybooks(unittest.TestCase):
         raw = build([issue(verified, unconfirmed, other_scope)], [verified, unconfirmed, other_scope])
         raw["case_paths"] = [{"id": "partial"}]
         scopes = {"days": 7}
-        with patch("src.voc_engine.playbooks", return_value=raw) as playbooks:
+        with patch("src.voc_engine._build_playbooks", return_value=raw) as playbooks:
             library = voc_engine.complete_sops(None, scopes)
-        playbooks.assert_called_once_with(None, scopes)
+        self.assertEqual([call.args[1] for call in playbooks.call_args_list], [scopes, {}])
         self.assertNotIn("case_paths", library)
         [entry] = library["items"]
         [branch] = entry["branches"]
@@ -60,8 +60,35 @@ class TestPlaybooks(unittest.TestCase):
         broken = deepcopy(raw)
         broken_branch = broken["items"][0]["branches"][0]
         broken_branch["retest_evidence"] = [ref for ref in broken_branch["retest_evidence"] if ref["qa_id"] == 2]
-        with patch("src.voc_engine.playbooks", return_value=broken):
+        with patch("src.voc_engine._build_playbooks", return_value=broken) as playbooks:
             self.assertEqual(voc_engine.complete_sops(None, scopes), {"items": [], "total": 0})
+        playbooks.assert_called_once_with(None, scopes, include_case_paths=False)
+
+    def test_guidance_still_rechecks_playbooks_but_skips_knowledge_counterevidence(self):
+        guidance = case(1, result=False)
+        raw = build([issue(guidance)], [guidance])
+        scopes = {"days": 7}
+        with patch("src.voc_engine._build_playbooks", return_value=raw) as playbooks:
+            self.assertEqual(voc_engine.complete_sops(None, scopes), {"items": [], "total": 0})
+        playbooks.assert_called_once_with(None, scopes, include_case_paths=False)
+
+        with patch("src.voc_engine._build_playbooks", return_value=raw) as playbooks:
+            ordinary = voc_engine.playbooks(None, scopes)
+        self.assertEqual([call.args[1] for call in playbooks.call_args_list], [scopes, {}])
+        self.assertEqual(ordinary["items"][0]["branches"][0]["status"], "guidance")
+
+    def test_complete_local_witness_cannot_publish_against_global_counterevidence(self):
+        success, failure = case(1), case(2, result=False)
+        failure["status"] = "incomplete"
+        failure["steps"][1].update(outcome="failed", feedback=ref("f2", "重新设置并保存后，退款场景还是没有触发。", 30))
+        scoped = build([issue(success)], [success])
+        global_result = build([issue(success, failure)], [success, failure])
+        self.assertEqual(scoped["items"][0]["branches"][0]["status"], "verified")
+        self.assertIn("conflicting_case", global_result["items"][0]["missing"])
+        scopes = {"days": 7, "group": "测试群"}
+        with patch("src.voc_engine._build_playbooks", side_effect=[scoped, global_result]) as playbooks:
+            self.assertEqual(voc_engine.complete_sops(None, scopes), {"items": [], "total": 0})
+        self.assertEqual([call.args[1] for call in playbooks.call_args_list], [scopes, {}])
 
     def test_complete_evidence_keeps_chronology_and_combines_only_identical_scope(self):
         first, second, other_scope = case(1), case(2, result=False), case(3, condition="仅限主账号", result=False)

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useRef, useState } from 'react'
+import { Fragment, useCallback, useMemo, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Copy, Search } from 'lucide-react'
 import { toast } from 'sonner'
 import { useBackgroundRefresh } from '@/hooks/use-background-refresh'
@@ -126,7 +126,8 @@ function CompleteSopResults({ data, fullList, onOpenPair }: { data: CompleteSopL
   const rowTrigger = useRef<HTMLButtonElement | null>(null)
   const searchInput = useRef<HTMLInputElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
-  const entries = data.items.map(item => ({ item, branches: item.branches.filter(completeBranch) })).filter(entry => entry.branches.length)
+  const entries = useMemo(() => data.items.map(item => ({ item, branches: item.branches.filter(completeBranch) }))
+    .filter(entry => entry.branches.length), [data.items])
   const terms = search.normalize('NFKC').toLowerCase().split(/\s+/).filter(Boolean)
   const matches = entries.filter(({ item, branches }) => {
     if (!terms.length) return true
@@ -218,8 +219,9 @@ export function VocKnowledgeLibrary({ filters, refreshKey = 0, onOpenPair }: Pro
   const key = refreshKey + revision
   const sops = useVocFirstPageList<CompleteSopList>('voc2/complete-sops', filters, key, revision === 0)
   const refresh = useCallback(() => setRevision(value => value + 1), [])
-  useBackgroundRefresh(refresh, false, sops.fetching, key)
+  useBackgroundRefresh(refresh, false, sops.fetching, key, 120_000)
+  const fullList = sops.data && sops.fullList && sops.fullList.total > sops.data.items.length ? sops.fullList : undefined
   return <QueryPanel hasData={sops.data !== null} loading={sops.loading} error={sops.error} retry={sops.retry}>
-    {sops.data && <CompleteSopResults key={JSON.stringify(filters)} data={sops.data} fullList={sops.fullList} onOpenPair={onOpenPair} />}
+    {sops.data && <CompleteSopResults key={JSON.stringify(filters)} data={sops.data} fullList={fullList} onOpenPair={onOpenPair} />}
   </QueryPanel>
 }

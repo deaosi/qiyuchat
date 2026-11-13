@@ -38,6 +38,19 @@ it('accepts a mapped category with one member only when its stable key and repre
   for (let index = 0; index < 4; index++) await expect(apiGet('voc2/topics', workbench)).rejects.toMatchObject({ status: 502 })
 })
 
+it('reads ranking metrics and job status together without weakening the job contract', async () => {
+  const ranking = { items: [], total: 0, event_count: 23, category_total: 0, category_consultation_count: 0,
+    status: { worker_ready: true, semantics: { ready: false, error: '语义模型尚未就绪' },
+      latest_job: { id: 'job-1', status: 'running', total: 10, processed: 2, failed: 0, skipped: 0, usage_tokens: 32, error: '' } },
+    comparison: { current: { start: '', end: '', source_pairs: 23, processed_pairs: 2 }, previous: null,
+      comparable: false, note: '', last_synced_at: '' },
+  }
+  const malformed = { ...ranking, status: { ...ranking.status, latest_job: { ...ranking.status.latest_job, processed: '2' } } }
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json(ranking)).mockResolvedValueOnce(json(malformed)))
+  await expect(apiGet('voc2/topics', { ...filters, workbench: 1 })).resolves.toEqual(ranking)
+  await expect(apiGet('voc2/topics', { ...filters, workbench: 1 })).rejects.toMatchObject({ status: 502 })
+})
+
 describe('VOC knowledge reuse response', () => {
   const item = {
     id: 'knowledge-1', topic_id: 'topic-1', question: '如何启用规则？', answer: '在后台启用规则。', scope: '',

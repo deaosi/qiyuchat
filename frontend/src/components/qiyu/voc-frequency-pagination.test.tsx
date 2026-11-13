@@ -45,7 +45,7 @@ describe('VOC frequency ranking pagination', () => {
     ]
     const grouped = { ...topics[0], id: 'child-1', category_key: 'reply-anomaly', theme: '回复异常', question: members[0].question, consultation_count: 6, members }
     vi.mocked(apiGet).mockImplementation(async (name, filters) => {
-      if (name === 'voc2/topics') return { items: [grouped], total: 1, category_total: 1, category_consultation_count: 6 }
+      if (name === 'voc2/topics') return { items: [grouped], total: 1, category_total: 1, category_consultation_count: 6, event_count: 5 }
       if (name === 'voc2/topic') {
         const member = members.find(value => value.id === filters.id)!
         const event: Evidence = { id: `event-${member.id}`, event_id: `event-${member.id}`, qa_id: member.id === 'child-1' ? 41 : 42,
@@ -62,6 +62,8 @@ describe('VOC frequency ranking pagination', () => {
     expect(within(row).queryByText(members[0].question)).toBeNull()
     expect(screen.getByText('高频分类')).toBeTruthy()
     expect(within(screen.getByText('咨询次数').parentElement!).getByText('6')).toBeTruthy()
+    expect(within(screen.getByText('咨询片段').parentElement!).getByText('5')).toBeTruthy()
+    expect(vi.mocked(apiGet).mock.calls.map(([name]) => name)).toEqual(['voc2/topics'])
     expect(screen.getByText('共 1 个分类')).toBeTruthy()
     fireEvent.click(row)
     const drawer = within(await screen.findByRole('dialog', { name: '问题与原句依据' }))
@@ -122,6 +124,7 @@ describe('VOC frequency ranking pagination', () => {
     expect(await drawer.findByText('示例主题 21')).toBeTruthy()
     const detailFilters = vi.mocked(apiGet).mock.calls.find(([name]) => name === 'voc2/topic')?.[1]
     expect(detailFilters?.id).toBe('topic-21')
+    expect(detailFilters?.exchange_only).toBe(1)
     expect(detailFilters).not.toHaveProperty('offset')
     expect(detailFilters).not.toHaveProperty('limit')
     fireEvent.click(drawer.getByRole('button', { name: 'Close' }))
@@ -132,6 +135,30 @@ describe('VOC frequency ranking pagination', () => {
     expect(screen.getByRole('button', { name: /^排名\s*45.*示例主题 45/ })).toBeTruthy()
     expect(nextPage().disabled).toBe(true)
     expect(topicCalls().map(({ limit, offset }) => [limit, offset])).toEqual([[20, 0], [20, 20], [20, 40]])
+  })
+
+  it('polls active jobs from the ranking response and slows down when the job completes', async () => {
+    vi.useFakeTimers()
+    const job = { id: 'job-1', status: 'running', total: 3, processed: 1, failed: 0, skipped: 0,
+      usage_tokens: 0, error: '', created_at: '', updated_at: '' }
+    vi.mocked(apiGet).mockImplementation(async (_name, filters) => ({ ...pageResult(filters.offset ?? 0, 20),
+      status: { latest_job: job, worker_ready: true }, event_count: 10, comparison }))
+    try {
+      await act(async () => { render(<VocFrequencyWorkspace filters={{ ...initialScope, group: 'polling' }} {...handlers} />) })
+      expect(screen.getByRole('button', { name: '正在整理' })).toHaveProperty('disabled', true)
+      expect(screen.getByRole('progressbar', { name: '已尝试 1/3 条问答' })).toBeTruthy()
+      expect(topicCalls()).toHaveLength(1)
+
+      job.status = 'completed'
+      job.processed = 3
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(topicCalls()).toHaveLength(2)
+      expect(screen.getByRole('button', { name: 'AI 整理当前范围' })).toHaveProperty('disabled', false)
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(topicCalls()).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('resets to the first page and closes the old drawer when date, group or staff scope changes', async () => {

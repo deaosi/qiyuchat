@@ -28,6 +28,7 @@ export interface ApiFilters {
   topic_id?: number
   focus_topic?: string
   workbench?: 1
+  exchange_only?: 1
   trend?: 'all' | 'new' | 'rising' | 'persistent'
   support_intent?: 'all' | 'configuration_guidance' | 'functional_anomaly' | 'unclear'
   diagnosis_status?: 'all' | 'reported' | 'pending' | 'config_cause_confirmed' | 'platform_limit_confirmed' | 'defect_confirmed' | 'not_applicable'
@@ -437,6 +438,11 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     case 'voc2/topics': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(workbench ? enrichedTopic : topic)
       && (data.category_total === undefined || isCount(data.category_total) && Number(data.category_total) >= Number(data.total))
       && (data.category_consultation_count === undefined || isCount(data.category_consultation_count))
+      && (data.event_count === undefined || isCount(data.event_count))
+      && (data.status === undefined || isRecord(data.status) && typeof data.status.worker_ready === 'boolean'
+        && (data.status.latest_job === null || job(data.status.latest_job))
+        && (data.status.semantics === undefined || isRecord(data.status.semantics) && typeof data.status.semantics.ready === 'boolean'
+          && (data.status.semantics.error === undefined || typeof data.status.semantics.error === 'string')))
       && (!workbench || comparison(data.comparison)); break
     case 'voc2/knowledge': valid = data.item !== undefined ? knowledge(data.item) : isCount(data.total) && Array.isArray(data.items) && data.items.every(knowledge); break
     case 'voc2/sops': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(sop); break

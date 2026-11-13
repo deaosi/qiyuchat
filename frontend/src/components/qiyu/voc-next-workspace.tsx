@@ -29,9 +29,14 @@ export type KnowledgeReuse = 'direct' | 'reference' | 'history' | 'blocked'
 export type Knowledge = { reuse_level?: KnowledgeReuse; id: string; topic_id: string; variant_id?: string; kind?: VocKnowledgeKind; diagnosis_status?: DiagnosisStatus; effect_status?: 'suggested' | 'verified'; applicability?: Ref[]; confirmed_cause?: Ref | null; conversation_verification?: VocConversationVerification; knowledge_reuse?: VocKnowledgeReuse; question: string; answer: string; scope: string; steps: string[]; cautions: string[]; reply_patterns: string[]; evidence_count: number; status: 'ready'; version: number; updated_at: string; evidence: Evidence[] }
 export type Evidence = { id: string; event_id: string; qa_id?: number | string; question: string; answer: string; question_quote?: string; source_kind?: string; customer_name?: string; customer_id?: string; group_name?: string; staff_name?: string; asked_at?: string | number; asked_at_text?: string; session_id?: string; domain?: Domain; staff_source_verified: boolean; question_message_ids?: (string | number)[]; workbench?: { commerce_settings: Ref[]; scenario_conditions: Ref[]; actual: Ref[]; question_message_id?: string; suspected_report_ready?: boolean }; claims: { role: string; quote: string; start: number; end: number; source_refs: SourceRef[] }[] }
 type ResultList<T> = { items: T[]; total: number }
-type TopicList = ResultList<Topic> & { comparison?: TrendComparisonData; category_total?: number; category_consultation_count?: number }
 type Job = { id: string; status: string; total: number; failed: number; skipped: number; processed: number; error: string; created_at: string; updated_at: string; usage_tokens: number }
-type Summary = { source_pairs: number; total_events: number; consultation_count?: number; topic_count: number; coverage: { processed_pairs: number; pending_pairs: number }; semantics: { ready: boolean; error?: string }; latest_job: Job | null }
+type TopicList = ResultList<Topic> & {
+  comparison?: TrendComparisonData
+  category_total?: number
+  category_consultation_count?: number
+  event_count?: number
+  status?: { latest_job: Job | null; worker_ready: boolean; semantics?: { ready: boolean; error?: string } }
+}
 export type OpenEvidencePair = (pair: QAPair, messageId?: string) => void
 type WorkspaceProps = { filters: ApiFilters; refreshKey?: number; onOpenPair: OpenEvidencePair }
 export type TopicDetail = { topic: Topic; events: Evidence[]; workbench?: { comparison: TrendComparisonData; knowledge: Knowledge[]; gaps: { code: string; count: number }[] } }
@@ -73,18 +78,19 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const offset = page * topicPageSize
   const key = refreshKey + revision
   const usePrefetch = revision === 0 && supportIntent === 'all' && diagnosisStatus === 'all'
-  const summary = useApi<Summary>('voc2/summary', resultFilters, key, true, usePrefetch)
   const topics = useApi<TopicList>('voc2/topics', vocTopicPageFilters(resultFilters, trend, offset), key, true,
     usePrefetch && trend === 'all' && offset === 0)
   const selectedMembers = members ?? topics.data?.items.find(item => item.members?.some(member => member.id === selectedId))?.members
-  const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, workbench: 1, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
+  const detail = useApi<TopicDetail>('voc2/topic', { ...resultFilters, workbench: 1, exchange_only: 1, id: selectedId ?? undefined }, refreshKey, selectedId !== null)
   const comparison = topics.data?.comparison
   const lastPage = topics.data ? Math.max(0, Math.ceil(topics.data.total / topicPageSize) - 1) : null
   const pageLoading = topics.loading || (lastPage !== null && page > lastPage)
-  const job = summary.data?.latest_job
+  const status = topics.data?.status
+  const job = status?.latest_job
+  const semantics = status?.semantics
   const refreshResults = useCallback(() => setRevision(value => value + 1), [])
-  const fetching = summary.loading || summary.refreshing || topics.loading || topics.refreshing
-  useBackgroundRefresh(refreshResults, active(job), fetching, key)
+  const fetching = topics.loading || topics.refreshing || detail.loading || detail.refreshing
+  useBackgroundRefresh(refreshResults, active(job), fetching, key, 60_000)
   useEffect(() => {
     setRanking(current => current.scopeKey === scopeKey ? current : { scopeKey, page: 0, selectedId: null })
   }, [scopeKey])
@@ -111,9 +117,9 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
 
   const rankedByCategory = topics.data?.category_total !== undefined
   const metrics = [
-    { label: rankedByCategory ? '高频分类' : '高频主题', value: topics.data?.category_total ?? summary.data?.topic_count },
-    { label: '咨询次数', value: topics.data?.category_consultation_count ?? summary.data?.consultation_count },
-    { label: '咨询片段', value: summary.data?.total_events },
+    { label: rankedByCategory ? '高频分类' : '高频主题', value: topics.data?.category_total ?? topics.data?.total },
+    { label: '咨询次数', value: topics.data?.category_consultation_count },
+    { label: '咨询片段', value: topics.data?.event_count },
   ]
   return <div className="space-y-6">
     <div className="flex flex-wrap items-center justify-between gap-4">
@@ -139,10 +145,9 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
       </Select>
     </div>
     <div className="grid gap-3 sm:grid-cols-3">{metrics.map(({ label, value }) => <Card key={label}>
-      <CardHeader><CardDescription>{label}</CardDescription><CardTitle className="text-2xl tabular-nums">{summary.loading ? <LoadingValue /> : count(value)}</CardTitle></CardHeader>
+      <CardHeader><CardDescription>{label}</CardDescription><CardTitle className="text-2xl tabular-nums">{topics.loading ? <LoadingValue /> : count(value)}</CardTitle></CardHeader>
     </Card>)}</div>
-    {summary.error && <QueryPanel hasData={summary.data !== null} loading={false} error={summary.error} retry={summary.retry}>{null}</QueryPanel>}
-    {summary.data && !summary.data.semantics.ready && <div role="status" className="flex items-start gap-2 rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground"><CircleAlert className="mt-0.5 size-4 shrink-0" /><span>语义整理暂不可用{summary.data.semantics.error ? `：${summary.data.semantics.error}` : '，请检查模型网关配置。'}</span></div>}
+    {semantics && !semantics.ready && <div role="status" className="flex items-start gap-2 rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground"><CircleAlert className="mt-0.5 size-4 shrink-0" /><span>语义整理暂不可用{semantics.error ? `：${semantics.error}` : '，请检查模型网关配置。'}</span></div>}
     {job && <Card className="gap-3">
       <CardHeader><CardTitle className="text-sm">最近整理任务 <Badge variant="outline" className="ml-2 gap-1.5 font-normal">{active(job) && <LoadingMark className="size-3" />}{labels[job.status] || job.status}</Badge></CardTitle><CardDescription>按任务提交时的范围统计。</CardDescription></CardHeader>
       <CardContent>
@@ -161,7 +166,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
           {(Object.entries(trendLabels) as [TrendFilter, string][]).map(([value, label]) => <Button key={value} type="button" size="sm" variant={trend === value ? 'default' : 'ghost'} aria-pressed={trend === value}
             onClick={() => setTrend(value)}>{label}</Button>)}
         </div>
-        {comparison ? <TrendComparison comparison={comparison} /> : summary.data && <p className="text-xs text-muted-foreground">当前范围已整理 {count(summary.data.coverage.processed_pairs)} / {count(summary.data.source_pairs)} 条问答，待整理 {count(summary.data.coverage.pending_pairs)} 条。</p>}
+        {comparison && <TrendComparison comparison={comparison} />}
         <QueryPanel hasData={topics.data !== null} loading={pageLoading} error={topics.error} retry={topics.retry}>
           {topics.data?.items.length ? <div className="divide-y">{topics.data.items.map((item, index) => {
             const badge = trendBadgeText(item.trend)

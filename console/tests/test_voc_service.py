@@ -548,6 +548,17 @@ class TestVocHttp(LocalFixture):
                 self.assertEqual(self.call("/api/voc2/topics?" + query, headers=self.headers())[0], 400)
             get.assert_not_called()
 
+    def test_workbench_exchange_only_is_validated_and_forwarded(self):
+        with patch("src.web.server.voc_service.get", return_value={"events": []}) as get:
+            route = "/api/voc2/topic?workbench=1&exchange_only=1"
+            self.assertEqual(self.call(route, headers=self.headers())[0], 200)
+            self.assertEqual(get.call_args.kwargs, {"workbench": True, "trend": "all", "exchange_only": True})
+            get.reset_mock()
+            for route in ("/api/voc2/topic?exchange_only=1", "/api/voc2/topics?workbench=1&exchange_only=1",
+                          "/api/voc2/topic?workbench=1&exchange_only=2", "/api/voc2/topic?workbench=1&exchange_only=1&exchange_only=1"):
+                self.assertEqual(self.call(route, headers=self.headers())[0], 400)
+            get.assert_not_called()
+
     def test_assistant_carries_only_a_single_valid_focus_topic(self):
         topic = "t_" + "a" * 24
         with patch("src.web.server.voc_assistant.answer", return_value={}) as answer:

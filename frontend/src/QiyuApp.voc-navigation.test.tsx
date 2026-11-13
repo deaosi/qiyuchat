@@ -43,8 +43,7 @@ beforeEach(() => {
       customers: { items: [{ customer_id: 'fixture-shop', customer_name: '测试商家', group_name: '测试群', group_names: ['测试群'], group_count: 1,
         total_questions: 3, distinct_clusters: 1, unanswered: 1, first_seen: '2026-11-09', last_seen: '2026-11-10', top: [] }],
         total: 1, offset: 0, limit: 20, totals: { questions: 3, unanswered: 1 } },
-      'voc2/summary': { source_pairs: 6, total_events: 5, consultation_count: 3, topic_count: 1, coverage: { processed_pairs: 5, pending_pairs: 1 }, semantics: { ready: true }, latest_job: null },
-      'voc2/topics': { items: [topic], total: 1 },
+      'voc2/topics': { items: [topic], total: 1, event_count: 5, status: { latest_job: null, worker_ready: true } },
       'voc2/topic': { topic, events: [evidence] },
       'voc2/complete-sops': { items: completeSops, total: completeSops.length, first_page_total: completeSops.length },
       'voc2/issue-pilot': { items: [], total: 0, coverage: { source_events: 0, matched_consultations: 0, classified_consultations: 0, needs_context: 0 } },
@@ -84,7 +83,7 @@ describe('VOC navigation', () => {
     expect(screen.getByRole('heading', { name: 'VOC高频问题' })).toBeTruthy()
     expect(screen.getByText('咨询主题排行')).toBeTruthy()
     expect(screen.queryByText(completeSop.title)).toBeNull()
-    expect(query.mock.calls.some(([endpoint]) => endpoint === 'voc2/knowledge')).toBe(false)
+    expect(query.mock.calls.some(([endpoint]) => ['voc2/knowledge', 'voc2/summary'].includes(endpoint))).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: /场景未触发.*3 次咨询/ }))
     const detail = within(screen.getByRole('dialog', { name: '问题与原句依据' }))
