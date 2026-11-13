@@ -26,7 +26,7 @@ class TestGuestEvidenceView(TestCase):
             "sections": [{"title": "处理办法", "lines": ["先核对平台配置。"]}],
         }
         cases = [
-            {"title": "关联案例", "category": "配置与使用", "scope": "context",
+            {"title": "关联案例", "category": "配置与使用", "scope": "context", "customer_name": "客户 <门店>",
              "sections": [{"title": "实际触发结果", "lines": ["规则未命中"]}],
              "messages": [{"role": "user", "time": "2026-11-08 11:30:00", "text": "客户问候\n<iframe src=x>"},
                           {"role": "staff", "time": "2026-11-08 11:31:00", "text": "客服说明"}]},
@@ -39,6 +39,7 @@ class TestGuestEvidenceView(TestCase):
             self.assertIn(f"子类 {index:02d}", page)
         self.assertIn("&lt;script&gt;", page)
         self.assertIn("&lt;iframe src=x&gt;", page)
+        self.assertIn('<span class="meta">客户 &lt;门店&gt;</span>', page)
         self.assertLess(page.index("客户问候"), page.index("客服说明"))
         tags = _Tags()
         tags.feed(page)

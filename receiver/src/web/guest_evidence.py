@@ -54,6 +54,7 @@ _PRIVATE_VALUE = re.compile(
 )
 _KIND = {"topics": "高频问题", "sops": "知识 SOP"}
 _ROLE = {"user": "客户", "staff": "客服"}
+_UNKNOWN_CUSTOMER = re.compile(r"(?:匿名(?:客户|商家)(?:\s*\d+)?|身份未知访客|身份待核实|未识别(?:商家|客户)|未分组)")
 _ZONE = timezone(timedelta(hours=8))
 _ENTRY_LIMITS = {"title": 800, "summary": 1600, "detail": 16000}
 
@@ -240,7 +241,8 @@ def _controlled_context(pair: dict, origin: dict, rows: list[dict], anchor: str,
 
 
 def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
-          include_sender_names: bool = False) -> tuple[str, list[dict], str, re.Pattern[str] | None, dict] | None:
+          include_sender_names: bool = False, display: dict | None = None
+          ) -> tuple[str, list[dict], str, re.Pattern[str] | None, dict] | None:
     source = Path(cfg.runtime.db_path)
     if not source.is_file() or type(qa_id) is not int or qa_id <= 0:
         return None
@@ -300,6 +302,8 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
         origin.get("revision"), scope, context,
     ])
     # Display metadata is outside the fingerprint of an existing link.
+    if display is not None:
+        display["customer_name"] = _customer_display_name(pair, dict(session_row))
     if legacy:
         return fingerprint, legacy, scope, names, media
     if include_sender_names and scope == "pair":
@@ -316,6 +320,22 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
     if position is not None:
         context[position]["anchor"] = True
     return fingerprint, context, scope, names, media
+
+
+def _customer_display_name(pair: dict, session: dict) -> str:
+    identifiers = (pair.get("customer_id"), pair.get("session_id"), session.get("user_id"))
+    candidate = case_senders._guest_nickname(pair.get("customer_name"), identifiers)
+    if _UNKNOWN_CUSTOMER.fullmatch(candidate):
+        return ""
+    # The recorded label may legitimately be a shop or group name. Only
+    # identity values and transport artifacts are excluded here.
+    safe_ids = [re.escape(str(identifier)) for identifier in identifiers
+                if identifier and len(str(identifier)) >= 4]
+    private = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(sorted(safe_ids, key=len, reverse=True))
+                         + r")(?![A-Za-z0-9])", re.I) if safe_ids else None
+    name = _clean_projection(candidate, private)
+    visible = re.sub(r"\[(?:链接|标识)已隐藏\]|\[已脱敏\]", "", name)
+    return name if visible.strip() and case_senders._guest_nickname(visible, identifiers) else ""
 
 
 def _group_alias(aliases: dict[str, str], identity: str) -> str:
@@ -605,10 +625,12 @@ def upgrade_url(cfg: Settings, token: str, *, entry: dict, view: dict) -> str:
     return _save(cfg, payload, replace_token=token) if payload else ""
 
 
-def _verified_case(cfg: Settings, binding: dict, *, full: bool, include_sender_names: bool = False):
+def _verified_case(cfg: Settings, binding: dict, *, full: bool, include_sender_names: bool = False,
+                   display: dict | None = None):
     if not isinstance(binding, dict) or not isinstance(binding.get("anchor"), str):
         return None
-    case = _case(cfg, binding.get("qa"), binding["anchor"], full=full, include_sender_names=include_sender_names)
+    case = _case(cfg, binding.get("qa"), binding["anchor"], full=full,
+                 include_sender_names=include_sender_names, display=display)
     fingerprint = binding.get("fingerprint")
     if case is None or not isinstance(fingerprint, str) or not _MEDIA_DIGEST.fullmatch(fingerprint):
         return None
@@ -692,7 +714,8 @@ def resolve_image(cfg: Settings, token: str, image_id: str) -> str | None:
 
 
 def _render_case(cfg: Settings, binding: dict, *, token: str, ordinal: int, full: bool) -> dict | None:
-    case = _verified_case(cfg, binding, full=full, include_sender_names=True)
+    display = {}
+    case = _verified_case(cfg, binding, full=full, include_sender_names=True, display=display)
     if case is None:
         return None
     for digest in _media_digests(binding):
@@ -703,7 +726,8 @@ def _render_case(cfg: Settings, binding: dict, *, token: str, ordinal: int, full
             "category": _clean_projection(binding.get("category"), case[3]),
             "time": _clean_projection(binding.get("time"), case[3]),
             "sections": _sections(binding.get("sections"), case[3]),
-            "messages": case[1], "scope": case[2]}
+            "messages": case[1], "scope": case[2],
+            **({"customer_name": display["customer_name"]} if display.get("customer_name") else {})}
 
 
 def resolve_payload(cfg: Settings, token: str) -> dict | None:

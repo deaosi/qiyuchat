@@ -11,6 +11,7 @@ afterEach(() => {
 const day = '2026-11-10'
 const time = `${day} 12:34:56`
 const quote = '商品状态设为在售'
+const customer = '明禾官方旗舰店'
 
 function evidence(index: number, question: string): Evidence {
   return {
@@ -20,6 +21,7 @@ function evidence(index: number, question: string): Evidence {
 }
 
 const first = evidence(0, '为什么配置没有触发？')
+first.customer_name = customer
 first.staff_source_verified = true
 first.workbench = {
   commerce_settings: [{
@@ -33,7 +35,7 @@ const second = evidence(1, '另一场会话的咨询')
 const payload: GuestPayload = {
   entry: { kind: 'topics', title: '配置未触发', summary: '', detail: '', start: day, end: day },
   cases: [
-    { title: first.question, category: '', time, sections: [], scope: 'context', messages: [
+    { title: first.question, category: '', time, customer_name: customer, sections: [], scope: 'context', messages: [
       { id: 'guest-message-0', role: 'user', text: '之前的客户消息', time, anchor: true },
       { id: 'guest-message-1', role: 'user', text: quote, time, sender_name: '客户来源昵称' },
       { id: 'guest-message-2', role: 'staff', text: '请重新测试命中条件。', time, sender_name: '七鱼坐席昵称' },
@@ -64,7 +66,9 @@ it('shows the regular topic detail and switches to another scoped case without a
   expect(screen.getByRole('heading', { name: '问题与原句依据' })).toBeTruthy()
   expect(screen.getByText('2 次咨询 · 已整理 8 / 10 条问答')).toBeTruthy()
   expect(screen.getByText('处理判断 · 代表案例')).toBeTruthy()
+  expect(screen.getByText(`${customer} · ${time}`)).toBeTruthy()
   expect(screen.getByText('缺少人工客服回复 1 次咨询')).toBeTruthy()
+  expect(screen.queryByText(/匿名(?:商家|客户)/)).toBeNull()
   expect(screen.queryByRole('button', { name: '追问这个问题' })).toBeNull()
   expect(screen.queryByText(/问答 [12] ·/)).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '查看处理判断' }))
@@ -98,6 +102,7 @@ it('switches concrete questions and opens only the selected guest case on the sa
   const variants = within(screen.getByRole('group', { name: '选择具体问法' }))
   expect(variants.getByRole('button', { name: `${firstQuestion} · 2 次咨询` }).getAttribute('aria-pressed')).toBe('true')
   expect(screen.getByRole('heading', { name: '代表问答' })).toBeTruthy()
+  expect(screen.getByText(`${customer} · ${time}`)).toBeTruthy()
   expect(screen.getByText(quote)).toBeTruthy()
   expect(screen.getByText(firstAnswer)).toBeTruthy()
 
@@ -107,6 +112,7 @@ it('switches concrete questions and opens only the selected guest case on the sa
   expect(screen.getByText('1 次咨询 · 已整理 8 / 10 条问答')).toBeTruthy()
   expect(screen.getByText(second.question)).toBeTruthy()
   expect(screen.queryByText(firstAnswer)).toBeNull()
+  expect(screen.queryByText(customer, { exact: false })).toBeNull()
   expect(screen.queryByRole('button', { name: '追问这个问题' })).toBeNull()
   expect(screen.queryByRole('link')).toBeNull()
 
@@ -131,13 +137,17 @@ it('opens the same chat drawer at the exact shared source when locating a quotat
   expect(within(target).getByText('客户来源昵称')).toBeTruthy()
   expect(within(reply).getByText('七鱼坐席昵称')).toBeTruthy()
   expect(within(before).getByText('客户')).toBeTruthy()
+  expect(within(sheet).getByText(customer)).toBeTruthy()
+  expect(within(before).queryByText(customer)).toBeNull()
 })
 
-it('shows the same sender nicknames in a shared SOP case', () => {
+it('shows the recorded customer separately from sender nicknames in a shared SOP case', () => {
   const entry = { ...payload.entry, kind: 'sops' as const }
   render(<VocGuestPage entry={entry} cases={[payload.cases[0]]} total_cases={1} />)
+  expect(screen.getByText(customer)).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '跳转到会话上下文' }))
   const sheet = screen.getByRole('dialog')
+  expect(within(sheet).getByText(customer)).toBeTruthy()
   expect(within(sheet).getByText('客户来源昵称').closest('li')?.dataset.side).toBe('left')
   expect(within(sheet).getByText('七鱼坐席昵称').closest('li')?.dataset.side).toBe('right')
 })

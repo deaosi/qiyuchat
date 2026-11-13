@@ -242,7 +242,9 @@ def _cases(items: list[dict], total: int) -> str:
         idx = len(result) + 1
         title = _text(case.get("title")) or f"会话 {idx}"
         stamp, category = _text(case.get("time")), _text(case.get("category"))
+        customer = _text(case.get("customer_name"))
         meta = (f'<span class="chip">{escape(category)}</span>' if category else "")
+        meta += f'<span class="meta">{escape(customer)}</span>' if customer else ""
         meta += f'<time class="meta">{escape(stamp)}</time>' if stamp else ""
         facts = _sections(case.get("sections"), case=True)
         group = f'<span class="case-meta">{meta}</span>' if meta else ""

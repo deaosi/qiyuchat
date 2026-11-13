@@ -6,7 +6,7 @@ import { DecisionCaseCard, DecisionCaseSection, TopicSummary } from './voc-detai
 import { Button } from '@/components/ui/button'
 import { SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import type { Evidence, Knowledge, KnowledgeReuse, Ref, TopicDetail } from './voc-next-workspace'
-import { diagnosisLabels, displayTime, EvidenceList, KnowledgeContent, knowledgeReuse, knowledgeReuseLevel, messageIdentifier, OriginalExchange, questionAnchor, type OpenTopicEvidence } from './voc-topic-evidence'
+import { caseMetadata, diagnosisLabels, displayTime, EvidenceList, KnowledgeContent, knowledgeReuse, knowledgeReuseLevel, messageIdentifier, OriginalExchange, questionAnchor, type OpenTopicEvidence } from './voc-topic-evidence'
 
 export const trendLabels = { all: '全部', new: '新出现', rising: '明显上升', persistent: '持续高频' } as const
 export type TrendFilter = keyof typeof trendLabels
@@ -152,7 +152,7 @@ function DecisionCase({ item, title, onOpenEvidence, readOnly }: { item: Evidenc
   }
 
   return <DecisionCaseCard diagnosis={diagnosis} intro={<OriginalExchange item={item} />}
-    metadata={[item.customer_name || '匿名商家', displayTime(item.asked_at)].filter(Boolean).join(' · ')}
+    metadata={caseMetadata(item, readOnly)}
     action={<>
         {item.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>跳转</Button>}
         {suspected && !readOnly && <Button variant="outline" size="sm" onClick={copyReport}><Copy />复制疑似异常摘要</Button>}
@@ -258,7 +258,7 @@ export function TopicWorkbench({ detail, onOpenEvidence, onAskTopic, readOnly = 
     {workbench && <TrendComparison comparison={workbench.comparison} currentConsultations={topic.consultation_count} trend={topic.trend} />}
     {workbench && activeCase && <section className="space-y-3">
       <h4 ref={caseHeading} tabIndex={-1} className="scroll-mt-4 font-medium">{exchangeOnly ? '代表问答' : `处理判断 · ${selectedCase ? '当前案例' : '代表案例'}`}</h4>
-      {exchangeOnly ? <DecisionCaseCard metadata={[activeCase.customer_name || '匿名商家', displayTime(activeCase.asked_at)].filter(Boolean).join(' · ')}
+      {exchangeOnly ? <DecisionCaseCard metadata={caseMetadata(activeCase, readOnly)}
         intro={<OriginalExchange item={activeCase} exactQuestion />} facts={[]}
         action={activeCase.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(activeCase, questionAnchor(activeCase))}>跳转</Button>} />
         : <DecisionCase item={activeCase} title={title} onOpenEvidence={onOpenEvidence} readOnly={readOnly} />}

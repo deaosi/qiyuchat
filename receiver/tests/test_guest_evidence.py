@@ -91,6 +91,7 @@ class TestGuestEvidence(LocalFixture):
         self.assertNotIn("internal.example.com", page)
         self.assertNotIn("href=", page)
         self.assertNotIn("<script", page)
+        self.assertEqual(guest.resolve_payload(self.cfg, token)["cases"], [])
         with patch.object(guest.time, "time", return_value=time.time() + 95 * 86400):
             self.assertIsNone(guest.resolve(self.cfg, token))
 
@@ -151,7 +152,9 @@ class TestGuestEvidence(LocalFixture):
         self.assertIn("&lt;script&gt;", page)
         self.assertIn("138****5678", page)
         self.assertNotIn("<script>", page)
-        self.assertNotIn("朱测试店主", page)
+        case, = guest.resolve_payload(self.cfg, token)["cases"]
+        self.assertEqual(case["customer_name"], "朱测试店主")
+        self.assertNotIn("朱测试店主", str(case["messages"]))
         self.assertNotIn("另一位访客", page)
         self.assertNotIn("同一客户下一次无关咨询", page)
         self.assertNotIn("hidden-session-fixture", page)
@@ -190,7 +193,8 @@ class TestGuestEvidence(LocalFixture):
         self.assertEqual(set(payload), {"entry", "cases", "total_cases", "topic_detail"})
         self.assertEqual(payload["total_cases"], 1)
         case, = payload["cases"]
-        self.assertEqual(set(case), {"title", "category", "time", "sections", "messages", "scope"})
+        self.assertEqual(set(case), {"title", "category", "time", "sections", "messages", "scope", "customer_name"})
+        self.assertEqual(case["customer_name"], "朱测试店主")
         self.assertEqual(case["scope"], "context")
         question, = [message for message in case["messages"] if message.get("anchor")]
         self.assertEqual(question, {"role": "user", "time": "2026-11-12 10:00:04",
@@ -255,7 +259,7 @@ class TestGuestEvidence(LocalFixture):
         self.assertIn("<strong>七鱼昵称 &lt;值班&gt; [链接已隐藏]</strong>", page)
         self.assertIn("<strong>群内来源昵称</strong>", page)
         for hidden in ("范围外的客户昵称", "unverified-login", "内部通讯录姓名", "staff-login",
-                       "internal.example.com", "朱测试店主", "唐测试客服", "13812345678"):
+                       "internal.example.com", "唐测试客服", "13812345678"):
             self.assertNotIn(hidden, page)
 
         source_rows[-1]["msg"] = "消息原文不匹配"
@@ -272,6 +276,7 @@ class TestGuestEvidence(LocalFixture):
         }))
         public = guest.resolve_payload(self.cfg, grouped)
         self.assertEqual(public["topic_variants"][0]["case_indices"], [0])
+        self.assertEqual(public["topic_variants"][0]["topic_detail"]["events"][0]["customer_name"], "朱测试店主")
         self.assertEqual(public["cases"][0]["messages"][0]["sender_name"], "群内来源昵称")
         grouped_page = guest.resolve(self.cfg, grouped).decode()
         self.assertIn("<strong>群内来源昵称</strong>", grouped_page)
@@ -430,6 +435,28 @@ class TestGuestEvidence(LocalFixture):
         archived = guest.resolve(self.cfg, token).decode()
         self.assertIn("完整的已同步内容", archived)
         self.assertNotIn("这一条如何处理", archived)
+
+    def test_case_customer_uses_recorded_display_name_only_and_keeps_sop_evidence_bound(self):
+        qa = self._seed_case(controlled=False)
+        display = "示例店铺群 13812345678"
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("UPDATE qa_pair SET customer_name=?,group_name=? WHERE qa_id=?", (display, display, qa))
+        token = self._token(guest.issue_url(self.cfg, qa, entry={**self.entry, "kind": "sops"}))
+        payload = guest.resolve_payload(self.cfg, token)
+        case, = payload["cases"]
+        self.assertEqual(case["customer_name"], "示例店铺群 138****5678")
+        self.assertEqual(case["scope"], "pair")
+        self.assertNotIn("示例店铺群", str(case["messages"]))
+        self.assertNotIn("13812345678", json.dumps(payload))
+        self.assertNotIn(self.customer, json.dumps(payload))
+        for name in ("匿名商家", "身份未知访客", "来源账号 1", self.customer, self.source, "source:123:456",
+                     "wxid_a_test", "777123456789", "https://internal.example.com"):
+            with self.subTest(name=name), app.get_db(self.cfg).tx() as db:
+                db.execute("UPDATE qa_pair SET customer_name=? WHERE qa_id=?", (name, qa))
+            self.assertNotIn("customer_name", guest.resolve_payload(self.cfg, token)["cases"][0])
+        with app.get_db(self.cfg).tx() as db:
+            db.execute("UPDATE qa_pair SET customer_name=?,customer_id=? WHERE qa_id=?", (display, self.visitor, qa))
+        self.assertEqual(guest.resolve_payload(self.cfg, token)["cases"], [])
 
     def test_images_pin_exact_visible_human_attachments_on_existing_links(self):
         qa = self._seed_case(controlled=True, extended=True)

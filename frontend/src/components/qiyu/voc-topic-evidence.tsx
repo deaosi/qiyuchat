@@ -50,6 +50,15 @@ export function displayTime(input?: string | number): string {
   return !date || Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date).replaceAll('/', '-')
 }
 
+export function caseMetadata(item: Evidence, readOnly: boolean, includeRecordId = false): string {
+  const customer = readOnly ? item.customer_name?.trim() : item.customer_name || '匿名商家'
+  return [
+    includeRecordId && !readOnly && item.qa_id && `问答 ${item.qa_id}`,
+    customer,
+    displayTime(item.asked_at),
+  ].filter(Boolean).join(' · ')
+}
+
 function SourceQuotes({ label, refs }: { label: string; refs: (Ref | null | undefined)[] }) {
   const present = refs.filter((ref): ref is Ref => Boolean(ref?.quote))
   if (!present.length) return null
@@ -109,7 +118,7 @@ export function EvidenceList({ evidence, onOpenEvidence, onSelectCase, readOnly 
   return <div className="space-y-3">{evidence.map(item => {
     return <div key={item.id} className="rounded-lg border bg-muted/20 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>{!readOnly && item.qa_id ? `问答 ${item.qa_id} · ` : ''}{item.customer_name || '匿名商家'}{displayTime(item.asked_at) ? ` · ${displayTime(item.asked_at)}` : ''}</span>
+        <span>{caseMetadata(item, readOnly, true)}</span>
         <div className="flex flex-wrap gap-1">
           {onSelectCase && <Button variant="outline" size="xs" onClick={() => onSelectCase(item.id)}>查看处理判断</Button>}
           {item.qa_id && <Button type="button" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpenEvidence(item, readOnly ? undefined : questionAnchor(item))}>跳转</Button>}

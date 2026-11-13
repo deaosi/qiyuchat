@@ -18,6 +18,7 @@ type GuestCase = {
   title: string
   category: string
   time: string
+  customer_name?: string
   sections: GuestSection[]
   messages: GuestMessage[]
   scope: 'context' | 'limited' | 'pair'
@@ -121,7 +122,7 @@ function GuestCases({ cases, total, onOpen }: {
       </span>}
     </div>
     {cases.length ? cases.map((item, index) =>
-      <EvidenceCaseCard key={index} label={item.category} time={item.time} question={item.title || `会话 ${index + 1}`}
+      <EvidenceCaseCard key={index} label={[item.customer_name?.trim(), item.category].filter(Boolean).join(' · ')} time={item.time} question={item.title || `会话 ${index + 1}`}
         footer={<Button type="button" className="ml-auto" variant="outline" size="xs" aria-label="跳转到会话上下文" onClick={() => onOpen(index)}>跳转</Button>} />
     ) : <p className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">当前条目暂无可公开查看的会话上下文。</p>}
   </section>
@@ -231,6 +232,7 @@ export function VocGuestPage({ entry, cases, total_cases, topic_detail, topic_va
   const trigger = useRef<HTMLElement | null>(null)
   const item = selection && cases[selection.index]
   const caseTime = item?.time || item?.messages.find(message => message.anchor)?.time
+  const caseCustomer = item?.customer_name?.trim()
   const isSop = entry.kind === 'sops'
   const activeVariant = topic_variants?.[variantIndex]
   const topicDetail = activeVariant?.topic_detail ?? topic_detail
@@ -252,7 +254,8 @@ export function VocGuestPage({ entry, cases, total_cases, topic_detail, topic_va
     onCloseAutoFocus: (event: Event) => { event.preventDefault(); trigger.current?.focus() },
   }
   const conversation = item && selection && <>
-    {(item.category || caseTime) && <div className="flex flex-wrap items-center gap-2 border-b pb-4 text-xs text-muted-foreground">
+    {(item.category || caseCustomer || caseTime) && <div className="flex flex-wrap items-center gap-2 border-b pb-4 text-xs text-muted-foreground">
+      {caseCustomer && <span className="min-w-0 font-medium text-foreground [overflow-wrap:anywhere]"><span className="sr-only">咨询客户 </span>{caseCustomer}</span>}
       {item.category && <Badge variant="secondary" className="font-normal">{item.category}</Badge>}
       {caseTime && <time className="tabular-nums">{caseTime}</time>}
     </div>}

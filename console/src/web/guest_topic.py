@@ -308,6 +308,7 @@ def _event(case: dict, detail: dict, index: int) -> dict:
             and any(message["role"] == "user" and message.get("anchor") and question in message["text"] for message in messages)):
         event["source_kind"] = "source-anchored"
     return {**event, "id": key, "event_id": key, "qa_id": index + 1,
+            **({"customer_name": case["customer_name"]} if case.get("customer_name") else {}),
             "question": question, "question_quote": question, "answer": reply,
             "asked_at": case["time"] or next((item["time"] for item in messages if item.get("anchor")), ""),
             "claims": [{"role": "staff", "quote": quote, "start": 0, "end": len(quote), "source_refs": []}
