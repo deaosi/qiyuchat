@@ -8,6 +8,7 @@ import gzip
 import json
 import mimetypes
 import re
+import secrets
 import socket
 import threading
 import time
@@ -22,12 +23,17 @@ from .. import voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
-from . import api, case_media, guest_evidence
+from . import admin_keys, api, case_media, guest_evidence
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
 LOGIN_PAGE = Path(__file__).with_name("login.html")
 LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
+PANEL_PAGE = Path(__file__).with_name("panel.html")
+PANEL_SCRIPT = Path(__file__).with_name("panel.js")
+PANEL_PATHS = frozenset(("/panel", "/panel.js", "/api/panel/keys"))
+SESSION_AGE = 30 * 86400
+MANAGED_SESSION = re.compile(r"s1\.([a-f0-9]{32})\.([0-9]{1,12})\.([a-f0-9]{32})\.([a-f0-9]{64})")
 # app.get_db() 切库时会关闭旧连接；查询和写入必须持有同一把锁。
 DB_LOCK = threading.RLock()
 IMAGE_SLOTS = threading.BoundedSemaphore(3)
@@ -90,8 +96,9 @@ class DashboardServer(ThreadingHTTPServer):
         # 反代部署时额外放行的 Host / Origin；默认空 = 只认本机回环。
         self.allowed_hosts = frozenset(h.lower() for h in allowed_hosts)
         self.allowed_origins = frozenset(o.lower() for o in allowed_origins)
-        # 单管理员密钥；空 = 不启用应用层鉴权
+        # The configured permanent key alone can manage other credentials.
         self.admin_key = admin_key or ""
+        self.key_store = admin_keys.KeyStore(Path(cfg.runtime.state_dir) / "voc-admin-keys.db")
         # 失败计数：{(ip): [时间戳, ...]}，用于简单限速
         self.fails: dict[str, list[float]] = {}
         self.fails_lock = threading.Lock()
@@ -197,17 +204,33 @@ class Handler(BaseHTTPRequestHandler):
             filters["focus_topic"] = topic
         return {**filters,"support_intent":support,"diagnosis_status":diagnosis}
 
-    # ---------- 单管理员密钥鉴权 ----------
+    # ---------- 管理员密钥鉴权 ----------
     COOKIE = "qy_admin"
 
     def _need_auth(self) -> bool:
         return bool(getattr(self.server, "admin_key", ""))
 
-    def _key_ok(self, value: str) -> bool:
+    def _permanent_key_ok(self, value: str) -> bool:
         if not value:
             return False
         expected = self.server.admin_key
         return hmac.compare_digest(value.encode("utf-8"), expected.encode("utf-8"))
+
+    def _sign_managed_session(self, payload: str) -> str:
+        return hmac.new(self.server.admin_key.encode("utf-8"),
+                        b"voc-managed-session\0" + payload.encode("ascii"), hashlib.sha256).hexdigest()
+
+    def _managed_session(self, key_id: str) -> str:
+        payload = f"s1.{key_id}.{int(time.time()) + SESSION_AGE}.{secrets.token_hex(16)}"
+        return f"{payload}.{self._sign_managed_session(payload)}"
+
+    def _managed_session_ok(self, value: str) -> bool:
+        match = MANAGED_SESSION.fullmatch(value)
+        if not match or int(match[2]) <= time.time():
+            return False
+        payload, _, signature = value.rpartition(".")
+        return (hmac.compare_digest(self._sign_managed_session(payload), signature)
+                and self.server.key_store.active_id(match[1]))
 
     def _cookie_value(self, name: str) -> str:
         for part in self.headers.get("Cookie", "").split(";"):
@@ -221,7 +244,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cookie_header(self, value: str) -> str:
         parts = [f"{self.COOKIE}={value}", "Path=/", "HttpOnly",
-                 "SameSite=Lax", "Max-Age=2592000"]
+                 "SameSite=Lax", f"Max-Age={SESSION_AGE}"]
         if self._is_https():
             parts.append("Secure")
         return "; ".join(parts)
@@ -254,15 +277,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _login_html(self, error: str = "") -> bytes:
+    def _login_html(self, error: str = "", panel: bool = False) -> bytes:
         template = LOGIN_PAGE.read_text(encoding="utf-8")
-        return template.replace("<!--LOGIN_ERROR-->", escape(error)).encode("utf-8")
+        next_field = '      <input type="hidden" name="next" value="/panel">\n' if panel else ""
+        return template.replace("<!--LOGIN_ERROR-->", escape(error)).replace("      <!--LOGIN_NEXT-->\n", next_field).encode("utf-8")
 
-    def _send_login(self, error: str = "", status: int = 401) -> None:
-        self._send(self._login_html(error), "text/html; charset=utf-8", status)
+    def _send_login(self, error: str = "", status: int = 401, *, panel: bool = False) -> None:
+        self._send(self._login_html(error, panel), "text/html; charset=utf-8", status)
+
+    def _panel_gate(self, path: str) -> bool:
+        if not self._need_auth():
+            self._json({"error": "管理员密钥管理未启用。"}, 403)
+            return False
+        presented = self.headers.get("X-Admin-Key", "").strip() or self._cookie_value(self.COOKIE)
+        if self._permanent_key_ok(presented):
+            return True
+        if presented and not self._managed_session_ok(presented):
+            self._note_fail()
+            if self._rate_limited():
+                self._json({"error": "尝试次数过多，请 10 分钟后再试"}, 429)
+                return False
+        if path == "/panel":
+            self._send_login("请使用恒密钥登录密钥管理。", panel=True)
+        else:
+            self._json({"error": "密钥管理需要使用恒密钥登录。"}, 403)
+        return False
 
     def _gate(self, path: str, qs: dict[str, list[str]]) -> bool:
         """返回 True = 放行；False = 已经回过响应，调用方直接返回。"""
+        if path in PANEL_PATHS:
+            return self._panel_gate(path)
         if not self._need_auth():
             return True
 
@@ -271,10 +315,15 @@ class Handler(BaseHTTPRequestHandler):
         if not presented and qs.get("key"):
             presented = (qs["key"][0] or "").strip()
             from_query = True
-        if not presented:
+        from_cookie = not presented
+        if from_cookie:
             presented = self._cookie_value(self.COOKIE)
 
-        if self._key_ok(presented):
+        permanent = self._permanent_key_ok(presented)
+        key_id = None
+        if not permanent and not from_cookie and not from_query:
+            key_id = self.server.key_store.identify(presented)
+        if permanent or key_id or (from_cookie and self._managed_session_ok(presented)):
             if from_query:
                 # 地址栏里的密钥换成 Cookie，避免留在历史记录/日志里
                 self._redirect(path, self._cookie_header(presented))
@@ -319,7 +368,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self._gate(path, qs):
                 return
-            if path == "/api/detail/image":
+            if path == "/panel":
+                self._send(PANEL_PAGE.read_bytes(), "text/html; charset=utf-8")
+            elif path == "/panel.js":
+                self._send(PANEL_SCRIPT.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/api/panel/keys":
+                self._json({"keys": self.server.key_store.list()})
+            elif path == "/api/detail/image":
                 self._case_image(qs)
             elif path.startswith("/api/voc2/"):
                 # VOC queries own their SQLite connections. A slow ranking or
@@ -593,18 +648,50 @@ class Handler(BaseHTTPRequestHandler):
             self._send_login("请求无效", 400)
             return
         data = self.rfile.read(length).decode("utf-8", "replace")
-        key = (parse_qs(data, max_num_fields=10).get("key") or [""])[0].strip()
+        form = parse_qs(data, max_num_fields=10)
+        key = (form.get("key") or [""])[0].strip()
+        panel = form.get("next") == ["/panel"]
         if not self._need_auth():
             self._redirect("/")
             return
-        if self._key_ok(key):
-            self._redirect("/", self._cookie_header(key))
+        if self._permanent_key_ok(key):
+            self._redirect("/panel" if panel else "/", self._cookie_header(key))
+            return
+        if key_id := self.server.key_store.identify(key):
+            if panel:
+                self._send_login("请使用恒密钥登录密钥管理。", 403, panel=True)
+            else:
+                self._redirect("/", self._cookie_header(self._managed_session(key_id)))
             return
         self._note_fail()
         if self._rate_limited():
-            self._send_login("尝试次数过多，请 10 分钟后再试", 429)
+            self._send_login("尝试次数过多，请 10 分钟后再试", 429, panel=panel)
             return
-        self._send_login("密钥不正确")
+        self._send_login("密钥不正确", panel=panel)
+
+    def _panel_write(self, data: bytes) -> None:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            raise ValueError("密钥管理请求须为 JSON。")
+        try:
+            body = json.loads(data.decode("utf-8"))
+        except (ValueError, RecursionError):
+            raise ValueError("密钥管理请求格式无效。") from None
+        action = body.get("action") if isinstance(body, dict) else None
+        store = self.server.key_store
+        try:
+            if action == "create":
+                self._json(store.create(body), 201)
+            elif action == "update":
+                self._json(store.update(body))
+            elif action == "revoke":
+                self._json(store.revoke(body))
+            else:
+                raise ValueError("未知密钥管理操作。")
+        except admin_keys.MissingKey as exc:
+            self._json({"error": str(exc)}, 404)
+        except admin_keys.InactiveKey as exc:
+            self._json({"error": str(exc)}, 409)
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._host_ok():
@@ -633,11 +720,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 self._json({"error": "上传文件最多 8 MB"}, 413)
                 return
+            if path == "/api/panel/keys" and length > 8192:
+                self.close_connection = True
+                self._json({"error": "密钥管理请求最多 8 KB。"}, 413)
+                return
             data = self.rfile.read(length)
             if len(data) != length:
                 raise ValueError("上传未完成，请重新选择文件")
             cfg = self._cfg(qs)
-            if path == "/api/detail/replies":
+            if path == "/api/panel/keys":
+                self._panel_write(data)
+            elif path == "/api/detail/replies":
                 if data:
                     raise ValueError("客服回复查询不接受请求正文")
                 qa_id = _int(qs, "id", 0)

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f7f7">
+  <title>管理员密钥 · 语海 Voc</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #171717;
+      --muted: #626262;
+      --line: #e5e5e5;
+      --danger: #a5232c;
+      font-family: Geist, Inter, system-ui, "Microsoft YaHei UI", sans-serif;
+      color: var(--ink);
+      background: #f7f7f7;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: linear-gradient(155deg, #fff 0%, #f8f8f8 46%, #f2f2f2 100%); }
+    h1, h2, p { margin: 0; }
+    a { color: inherit; }
+    button, input { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    [hidden] { display: none !important; }
+    .wrap { width: min(1080px, 100% - 64px); margin-inline: auto; }
+    .bar { border-bottom: 1px solid var(--line); background: #ffffffc9; }
+    .bar .wrap { display: flex; align-items: center; justify-content: space-between; min-height: 62px; gap: 16px; }
+    .back { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; text-decoration: none; }
+    .back:hover { text-decoration: underline; text-underline-offset: 4px; }
+    .owner { color: var(--muted); font-size: 12px; }
+    main { padding-block: 56px 80px; animation: appear 180ms ease-out; }
+    .heading { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 18px; margin-bottom: 28px; }
+    h1 { font-size: clamp(26px, 4vw, 36px); line-height: 1.25; font-weight: 650; letter-spacing: -.04em; }
+    .description { margin-top: 8px; font-size: 14px; line-height: 1.65; color: var(--muted); }
+    .button { min-height: 38px; display: inline-flex; align-items: center; justify-content: center; padding: 7px 14px; border: 1px solid #dedede; border-radius: 8px; background: #fff; color: var(--ink); text-decoration: none; white-space: nowrap; font-size: 13px; font-weight: 550; line-height: 1.4; cursor: pointer; transition: background-color 130ms ease, border-color 130ms ease, box-shadow 130ms ease; }
+    .button:hover { background: #f3f3f3; }
+    .button:disabled { opacity: .5; cursor: default; }
+    .button.primary { color: #fff; background: linear-gradient(#292929, #171717); border-color: #171717; box-shadow: 0 1px 2px #0002; }
+    .button.primary:hover:not(:disabled) { background: #333; }
+    .button.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+    .button.danger:hover:not(:disabled) { background: #881923; }
+    :focus-visible { outline: 2px solid #595959; outline-offset: 3px; }
+    .card { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fff; box-shadow: 0 2px 4px #00000006; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+    th, td { padding: 14px 16px; vertical-align: middle; }
+    th { color: var(--muted); font-weight: 550; background: #fafafa; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    td { border-bottom: 1px solid #ededed; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #fcfcfc; }
+    .key-label { max-width: 235px; display: block; overflow-wrap: anywhere; font-size: 14px; font-weight: 600; }
+    .key-preview { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .state { display: inline-block; border: 1px solid var(--line); border-radius: 5px; padding: 3px 7px; white-space: nowrap; font-size: 12px; color: var(--muted); }
+    .state[data-status="active"] { color: #1d6346; border-color: #dcebe3; background: #f1f8f4; }
+    .state[data-status="scheduled"] { color: #454545; background: #f4f4f4; }
+    .date { white-space: nowrap; color: #454545; font-variant-numeric: tabular-nums; }
+    .actions { white-space: nowrap; text-align: right; }
+    .action { min-height: 32px; padding-inline: 9px; border: 0; background: transparent; box-shadow: none; }
+    .action.remove { color: var(--danger); }
+    .placeholder { display: grid; place-items: center; gap: 13px; min-height: 150px; padding: 26px; text-align: center; color: var(--muted); font-size: 14px; }
+    .notice { margin: 0 0 14px; color: #414141; font-size: 13px; }
+    .error { color: var(--danger); }
+    dialog { width: min(480px, 100% - 28px); max-height: calc(100% - 32px); padding: 24px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: #fff; box-shadow: 0 24px 80px #0003; }
+    dialog[open] { animation: appear 150ms ease-out; }
+    dialog::backdrop { background: #10101058; }
+    dialog h2 { font-size: 20px; font-weight: 650; }
+    .form { display: grid; gap: 14px; margin-top: 19px; }
+    .form label { display: grid; gap: 6px; min-width: 0; font-size: 13px; font-weight: 550; }
+    .form input, .secret { width: 100%; min-width: 0; min-height: 40px; padding: 7px 9px; border: 1px solid #ddd; border-radius: 7px; background: #fff; color: inherit; font-size: 14px; }
+    .form small { font-size: 12px; color: var(--muted); font-weight: 400; }
+    .dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+    .dialog-actions button { min-width: 70px; }
+    .feedback { margin-top: 10px; font-size: 13px; }
+    .secret { margin-top: 17px; background: #f7f7f7; font: 13px ui-monospace, Consolas, monospace; }
+    @keyframes appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    @media (max-width: 660px) {
+      .wrap { width: calc(100% - 32px); }
+      main { padding-block: 34px 50px; }
+      .heading { margin-bottom: 20px; }
+      table { min-width: 620px; }
+      th, td { padding-inline: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+  <script src="/panel.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="wrap">
+      <a class="back" href="/">← 返回语海 Voc</a>
+      <span class="owner">恒密钥 · 管理权限</span>
+    </div>
+  </header>
+  <main class="wrap">
+    <header class="heading">
+      <div>
+        <h1>管理员密钥</h1>
+        <p class="description">为语海 Voc 后台生成登录密钥。时间以北京时间显示。</p>
+      </div>
+      <button class="button primary" id="create-key" type="button" disabled>生成密钥</button>
+    </header>
+    <p class="notice" id="notice" role="status" hidden></p>
+    <section class="card" aria-label="管理员密钥列表">
+      <div class="placeholder" id="placeholder">
+        <span id="placeholder-text" role="status">正在加载密钥…</span>
+        <button class="button" id="retry" type="button" hidden>重新加载</button>
+        <a class="button" id="sign-in" href="/panel" hidden>重新登录</a>
+      </div>
+      <div class="table-wrap" id="table-wrap" hidden>
+        <table>
+          <thead><tr><th scope="col">名称</th><th scope="col">状态</th><th scope="col">生效时间</th><th scope="col">到期时间</th><th scope="col" class="actions">操作</th></tr></thead>
+          <tbody id="key-list"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="editor" aria-labelledby="editor-title">
+    <h2 id="editor-title">生成密钥</h2>
+    <p class="description">时间使用北京时间（UTC+8）。</p>
+    <form id="editor-form" class="form">
+      <label>名称<input id="key-label" maxlength="80" required autocomplete="off" placeholder="例如：运营值班" autofocus></label>
+      <label>生效时间<input id="starts-at" type="datetime-local" step="1"><small id="start-help">留空则立即生效</small></label>
+      <label>到期时间<input id="expires-at" type="datetime-local" step="1"><small>留空则长期有效</small></label>
+      <p class="feedback error" id="editor-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button" type="button" data-close>取消</button>
+        <button class="button primary" id="save-key" type="submit">生成密钥</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="revoke" aria-labelledby="revoke-title">
+    <h2 id="revoke-title">撤销密钥</h2>
+    <p class="description" id="revoke-detail"></p>
+    <p class="feedback error" id="revoke-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button class="button" type="button" data-close autofocus>取消</button>
+      <button class="button danger" id="confirm-revoke" type="button">确认撤销</button>
+    </div>
+  </dialog>
+
+  <dialog id="issued" aria-labelledby="issued-title">
+    <h2 id="issued-title">密钥已生成</h2>
+    <p class="description">密钥只在此处显示一次，请复制并妥善保存。</p>
+    <input class="secret" id="issued-key" aria-label="新管理员密钥" readonly autocomplete="off" spellcheck="false">
+    <p class="feedback" id="copy-status" role="status" hidden></p>
+    <div class="dialog-actions">
+      <button class="button" type="button" data-close>完成</button>
+      <button class="button primary" id="copy-key" type="button" autofocus>复制密钥</button>
+    </div>
+  </dialog>
+</body>
+</html>

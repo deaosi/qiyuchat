@@ -655,6 +655,60 @@ class TestAdminKey(LocalFixture):
         status, _, _ = self.call("/api/summary", headers={"X-Admin-Key": self.KEY})
         self.assertEqual(status, 200)
 
+    def panel_write(self, body, *, headers=None):
+        auth = {"X-Admin-Key": self.KEY, "Origin": self.origin, "X-Local-Request": "1",
+                "Content-Type": "application/json"}
+        auth.update(headers or {})
+        status, raw, _ = self.call("/api/panel/keys", "POST", json.dumps(body).encode(), auth)
+        return status, json.loads(raw)
+
+    def test_managed_keys_and_permanent_panel_access(self):
+        import time
+        from urllib.parse import urlencode
+
+        status, body, _ = self.call("/panel")
+        self.assertEqual(status, 401)
+        self.assertIn(b'name="next" value="/panel"', body)
+        self.assertEqual(self.call("/api/panel/keys")[0], 403)
+        self.assertEqual(self.call("/panel.js")[0], 403)
+        owner = {"X-Admin-Key": self.KEY}
+        status, body, _ = self.call("/panel", headers=owner)
+        self.assertEqual(status, 200)
+        self.assertNotIn(self.KEY.encode(), body)
+        self.assertEqual(self.call("/panel.js", headers=owner)[0], 200)
+
+        now = int(time.time())
+        schedule = {"label": "数据整理", "starts_at": now + 300, "expires_at": now + 600}
+        status, result = self.panel_write({"action": "create", **schedule})
+        self.assertEqual(status, 201)
+        key, key_id = result["key"], result["record"]["id"]
+        self.assertEqual(result["record"]["status"], "scheduled")
+        self.assertEqual(self.call("/api/summary", headers={"X-Admin-Key": key})[0], 401)
+        self.assertEqual(self.panel_write({"action": "update", "id": key_id, **schedule, "starts_at": now - 5})[0], 200)
+        self.assertEqual(self.call("/api/summary", headers={"X-Admin-Key": key})[0], 200)
+        status, raw, _ = self.call("/api/panel/keys", headers=owner)
+        self.assertEqual(status, 200)
+        self.assertNotIn(key.encode(), raw)
+        self.assertNotIn(self.KEY.encode(), raw)
+        self.assertNotIn(b"digest", raw)
+
+        status, _, headers = self.call("/login", "POST", urlencode({"key": key}).encode())
+        self.assertEqual(status, 302)
+        self.assertNotIn(key, headers["Set-Cookie"])
+        cookie = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+        self.assertEqual(self.call("/", headers=cookie)[0], 200)
+        self.assertEqual(self.call("/api/panel/keys", headers=cookie)[0], 403)
+        self.assertEqual(self.panel_write({"action": "revoke", "id": key_id},
+                                          headers={**cookie, "X-Admin-Key": ""})[0], 403)
+        self.assertEqual(self.panel_write({"action": "revoke", "id": key_id}, headers={"Origin": "https://elsewhere.example"})[0], 403)
+        self.assertEqual(self.panel_write({"action": "revoke", "id": "0" * 32})[0], 404)
+        self.assertEqual(self.panel_write({"action": "revoke", "id": key_id})[0], 200)
+        self.assertEqual(self.call("/api/summary", headers=cookie)[0], 401)
+        self.assertEqual(self.call("/api/summary", headers={"X-Admin-Key": key})[0], 401)
+        self.assertEqual(self.panel_write({"action": "update", "id": key_id, **schedule})[0], 409)
+        status, _, headers = self.call("/login", "POST", urlencode({"key": self.KEY, "next": "/panel"}).encode())
+        self.assertEqual((status, headers["Location"]), (302, "/panel"))
+
     def test_login_form(self):
         body = ("key=" + self.KEY).encode()
         status, _, headers = self.call("/login", "POST", body,
