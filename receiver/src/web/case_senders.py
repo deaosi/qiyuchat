@@ -16,6 +16,18 @@ from ..qiyu.message import source_auto_reply, source_integer
 _FUKE_CHANNEL = re.compile(r"^福客\s*AI(?:$|[\s_·—-])", re.I)
 _ACCOUNT = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{1,63}")
 _EXTERNAL_CONTACT = re.compile(r"w[mo][A-Za-z0-9_-]{16,}")
+_SOURCE_PLACEHOLDER = re.compile(
+    r"(?:客户|客服|访客|用户|顾客|匿名(?:客户|用户|访客)?|来源访客|未知(?:客户|用户|访客)?|身份未确认|"
+    r"未记录客服|未命名(?:客户|用户|访客|来源)|群成员(?:\s*\d+)?|来源账号(?:\s*\d+)?|"
+    r"(?:customer|visitor|user|staff|unknown|anonymous)(?:\s*[-_]?\s*\d+)?|null|none|n/?a)",
+    re.I,
+)
+_SOURCE_ACCOUNT = re.compile(
+    r"(?:[+-]?\d+|qiyu-[a-z-]+:.*|source:.*|wxid_[a-z0-9_-]+|w[mo][a-z0-9_-]{16,}|"
+    r"(?:anonymous|customer)-[a-f0-9]{16,64}|[a-f0-9]{16,64})",
+    re.I,
+)
+_INVISIBLE_NAME = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
 
 
 def _object(text: str) -> dict:
@@ -169,9 +181,8 @@ def saved_source_nicknames(db, sid: str, retained: list[dict], tables: set[str])
     snapshot = _saved_snapshot(db, sid, retained, tables)
     if snapshot is None:
         return {}
-    company = fuke_channel(snapshot[0])
     return {seq: name for seq, row in _source_matches(*snapshot, retained)
-            if (name := _source_nickname(row, company))}
+            if (name := _guest_source_nickname(snapshot[0], row))}
 
 
 def _external_contact(row: dict) -> bool:
@@ -198,6 +209,34 @@ def _source_nickname(row: dict, company: bool) -> str:
     if not source_auto_reply(row):
         return _nickname(row.get("staffName"), (row.get("staffAccount"), row.get("staffId")))
     return ""
+
+
+def _identity_text(value: object) -> str:
+    return "".join(_INVISIBLE_NAME.sub("", normalize("NFKC", str(value))).split()).casefold()
+
+
+def _guest_nickname(value: object, identifiers: tuple = ()) -> str:
+    if not isinstance(value, str):
+        return ""
+    name = _INVISIBLE_NAME.sub("", " ".join(value.split())).strip()
+    normalized = normalize("NFKC", name)
+    if (not name or len(name) > 300 or _SOURCE_PLACEHOLDER.fullmatch(normalized)
+            or _SOURCE_ACCOUNT.fullmatch(normalized) or _EXTERNAL_CONTACT.fullmatch(normalized)
+            or any(_identity_text(normalized) == _identity_text(identifier)
+                   for identifier in identifiers if identifier is not None)):
+        return ""
+    return name
+
+
+def _guest_source_nickname(metadata: dict, row: dict) -> str:
+    if row["from"] == 1:
+        identifiers = tuple(record.get(key) for record in (row, metadata)
+                            for key in ("externalUserId", "userId", "escrowAccount"))
+        return _guest_nickname(row.get("userName"), (*identifiers, metadata.get("fromGroup")))
+    if source_auto_reply(row):
+        return ""
+    identifiers = tuple(record.get(key) for record in (row, metadata) for key in ("staffAccount", "staffId"))
+    return _guest_nickname(row.get("staffName"), identifiers)
 
 
 def _legacy_digest(message: dict) -> str:
@@ -313,6 +352,16 @@ def saved_legacy_labels(state_dir: str, sid: str, retained: list[dict], *, admin
             name = public_name(record.get("name"))
             result[seq] = {"sender_name": name} if name else (
                 {"sender_name": "来源访客"} if message["role"] == "user" else {})
+    return result
+
+
+def saved_legacy_nicknames(state_dir: str, sid: str, retained: list[dict], *, group_name: str = "") -> dict[int, str]:
+    """Read only exact source nicknames from the original-message cache."""
+    result = {}
+    for message, record in _legacy_records(state_dir, sid, retained):
+        field = "participant_name" if message["role"] == "user" and record.get("unidentified") is True else "name"
+        if name := _guest_nickname(record.get(field), (record.get("participant_account"), group_name)):
+            result[message["context_seq"]] = name
     return result
 
 

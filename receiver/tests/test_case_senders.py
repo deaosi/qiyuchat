@@ -128,6 +128,8 @@ class SenderLabels(unittest.TestCase):
         self.assertEqual(authenticated[2], {'sender_kind': 'fuke_staff', 'sender_name': '李示例'})
         self.assertEqual(authenticated[5], {'sender_kind': 'group_participant', 'sender_name': '访客原昵称'})
         self.assertEqual(authenticated[7], authenticated[5])
+        self.assertEqual(case_senders.saved_legacy_nicknames(self.state_dir, sid, retained),
+                         {1: '测试客户', 4: '吴示例', 5: '访客原昵称', 6: '访客原昵称', 7: '访客原昵称'})
         groups = case_senders.saved_guest_groups(None, self.state_dir, sid, retained, set())
         self.assertEqual(set(groups), {1, 2, 5, 6, 7})
         self.assertEqual(groups[5], groups[6])
@@ -135,6 +137,7 @@ class SenderLabels(unittest.TestCase):
         self.assertNotIn('OtherGroupMember', str(groups))
         altered = [{**message, 'content': '改过的消息'} if message['context_seq'] == 5 else message for message in retained]
         self.assertNotIn(5, case_senders.saved_legacy_labels(self.state_dir, sid, altered, admin=True))
+        self.assertNotIn(5, case_senders.saved_legacy_nicknames(self.state_dir, sid, altered))
         self.assertNotIn(5, case_senders.saved_guest_groups(None, self.state_dir, sid, altered, set()))
 
         for record in records.values():
@@ -144,6 +147,14 @@ class SenderLabels(unittest.TestCase):
         self.assertEqual(case_senders.saved_legacy_labels(self.state_dir, sid, retained, admin=True)[5],
                          {'sender_kind': 'unidentified'})
         self.assertEqual(case_senders.saved_guest_groups(None, self.state_dir, sid, retained, set()), {})
+
+    def test_guest_nicknames_reject_account_text_and_generated_placeholders(self):
+        for value in ('群成员 ２', '来源账号 ２', '来源访客', '０１２３４５', 'wxid_example_id', 'qiyu-user:301', 'Ｓｔａｆｆ　Ｌｏｇｉｎ'):
+            with self.subTest(value=value):
+                self.assertEqual(case_senders._guest_nickname(value, ('stafflogin',)), '')
+        self.assertEqual(case_senders._guest_nickname('  原昵称\t小雨  '), '原昵称 小雨')
+        self.assertEqual(case_senders._guest_source_nickname({**self.metadata, 'fromGroup': '企业群名'},
+                                                             {**self.customer, 'userName': '企业群名'}), '')
 
     def test_saved_labels_never_borrow_names_from_unrelated_or_stale_source(self):
         db = sqlite3.connect(':memory:')

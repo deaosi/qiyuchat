@@ -210,10 +210,9 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
         {item.messages.map((message, index) => {
           const role = Object.hasOwn(chatRoles, message.role)
             ? chatRoles[message.role as keyof typeof chatRoles] : { side: 'center', label: '消息' } as const
-          const anonymousSender = message.sender_label && anonymousGroupLabel.test(message.sender_label) ? message.sender_label : ''
-          let sender = message.sender_name || anonymousSender || role.label
-          if (message.role === 'combined_transcript') sender = role.label
-          if (message.role === 'group_participant') sender = anonymousSender || role.label
+          const anonymousSender = typeof message.sender_label === 'string' && anonymousGroupLabel.test(message.sender_label) ? message.sender_label : ''
+          const senderName = typeof message.sender_name === 'string' ? message.sender_name.trim() : ''
+          const sender = message.role === 'combined_transcript' ? role.label : senderName || anonymousSender || role.label
           const anchored = typeof locate === 'string' ? message.id === locate : message.anchor
           const imageUrls = imageBase && Array.isArray(message.images)
             ? message.images.filter(id => typeof id === 'string' && guestImageId.test(id)).map(id => imageBase + id) : []

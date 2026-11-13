@@ -124,17 +124,23 @@ class TestGuestEvidence(LocalFixture):
         metadata = {"id": int(sid), "fromType": "wx_cs", "fromSubType": "福客AI-企业群"}
         path = case_senders.legacy_source_file(self.cfg.runtime.state_dir, sid)
         path.parent.mkdir()
-        path.write_text(json.dumps(case_senders.legacy_source_records(metadata, originals, messages)), encoding="utf-8")
+        records = case_senders.legacy_source_records(metadata, originals, messages)
+        path.write_text(json.dumps(records), encoding="utf-8")
 
         rendered, = guest.resolve_payload(self.cfg, token)["cases"]
         self.assertEqual([(row["role"], row.get("sender_name")) for row in rendered["messages"]],
-                         [("user", "店主昵称"), ("group_participant", None), ("staff", "七鱼坐席昵称")])
+                         [("user", "店主昵称"), ("group_participant", "未接入坐席的群友昵称"), ("staff", "七鱼坐席昵称")])
         self.assertEqual([row.get("sender_label") for row in rendered["messages"]], ["群成员 1", "群成员 2", None])
         self.assertTrue(rendered["messages"][0]["anchor"])
         public_page = guest.resolve(self.cfg, token).decode()
-        self.assertIn("群成员 2", public_page)
-        for value in ("QiyuLogin", "StaffLogin", "未接入坐席的群友昵称", "sender_key"):
+        self.assertIn("未接入坐席的群友昵称", public_page)
+        for value in ("QiyuLogin", "StaffLogin", "sender_key"):
             self.assertNotIn(value, public_page)
+        records["1"].pop("participant_name")
+        path.write_text(json.dumps(records), encoding="utf-8")
+        with_alias = guest.resolve(self.cfg, token).decode()
+        self.assertIn("<strong>群成员 2</strong>", with_alias)
+        self.assertNotIn("未接入坐席的群友昵称", with_alias)
 
     def test_controlled_context_does_not_cross_visitor_or_case_boundary(self):
         qa = self._seed_case(controlled=True)
@@ -222,7 +228,7 @@ class TestGuestEvidence(LocalFixture):
 
         source_names = {
             1: {"userName": "范围外的客户昵称", "externalUserId": "wmAnotherExternalContact"},
-            3: {"userName": "身份不明的姓名", "externalUserId": "unverified-login"},
+            3: {"userName": "群内来源昵称", "externalUserId": "unverified-login"},
             4: {"userName": "客户昵称 <小店> 13812345678", "externalUserId": "wmVerifiedExternalContact"},
             5: {"staffName": "七鱼昵称 <值班> https://internal.example.com/profile", "staffAccount": "staff-login"},
         }
@@ -240,14 +246,15 @@ class TestGuestEvidence(LocalFixture):
 
         case, = guest.resolve_payload(self.cfg, token)["cases"]
         self.assertEqual([message.get("sender_name") for message in case["messages"]],
-                         [None, "客户昵称 <小店> 138****5678", "七鱼昵称 <值班> [链接已隐藏]"])
+                         ["群内来源昵称", "客户昵称 <小店> 138****5678", "七鱼昵称 <值班> [链接已隐藏]"])
         self.assertEqual([message.get("sender_label") for message in case["messages"]], ["群成员 1", "群成员 2", None])
         self.assertEqual([{k: v for k, v in message.items() if k not in ("sender_name", "sender_label")} for message in case["messages"]],
                          original_case["messages"])
         page = guest.resolve(self.cfg, token).decode()
         self.assertIn("<strong>客户昵称 &lt;小店&gt; 138****5678</strong>", page)
         self.assertIn("<strong>七鱼昵称 &lt;值班&gt; [链接已隐藏]</strong>", page)
-        for hidden in ("范围外的客户昵称", "身份不明的姓名", "unverified-login", "内部通讯录姓名", "staff-login",
+        self.assertIn("<strong>群内来源昵称</strong>", page)
+        for hidden in ("范围外的客户昵称", "unverified-login", "内部通讯录姓名", "staff-login",
                        "internal.example.com", "朱测试店主", "唐测试客服", "13812345678"):
             self.assertNotIn(hidden, page)
 
@@ -256,6 +263,20 @@ class TestGuestEvidence(LocalFixture):
             db.execute("UPDATE push_sync_state SET source_json=? WHERE session_id=?", (json.dumps(snapshot), self.source))
         case, = guest.resolve_payload(self.cfg, token)["cases"]
         self.assertNotIn("sender_name", case["messages"][-1])
+        variant = {"topic_id": "t_" + "1" * 24,
+                   "topic": {"question": "原问题", "theme": "来源昵称", "consultation_count": 6},
+                   "comparison": {"current": {"start": self.entry["start"], "end": self.entry["end"],
+                                               "source_pairs": 9, "processed_pairs": 8}}}
+        grouped = self._token(guest.issue_url(self.cfg, qa, entry=self.entry, view={
+            "topic_variants": [variant], "cases": [{"qa_id": qa, "variant": 0}],
+        }))
+        public = guest.resolve_payload(self.cfg, grouped)
+        self.assertEqual(public["topic_variants"][0]["case_indices"], [0])
+        self.assertEqual(public["cases"][0]["messages"][0]["sender_name"], "群内来源昵称")
+        grouped_page = guest.resolve(self.cfg, grouped).decode()
+        self.assertIn("<strong>群内来源昵称</strong>", grouped_page)
+        for hidden in ("范围外的客户昵称", "内部通讯录姓名", "unverified-login", "staff-login", "internal.example.com"):
+            self.assertNotIn(hidden, grouped_page)
 
     def test_workspace_upgrade_only_enriches_existing_bound_cases(self):
         qa = self._seed_case(controlled=True)
@@ -352,7 +373,7 @@ class TestGuestEvidence(LocalFixture):
         }
         token = self._token(guest.issue_url(self.cfg, qa, "own-question", entry=self.entry, view=view))
         with (
-            patch.object(case_senders, "saved_source_nicknames", return_value={4: "仅后台可见的来源昵称"}),
+            patch.object(case_senders, "saved_source_nicknames", return_value={4: "已核验来源昵称"}),
             patch.object(case_senders, "saved_guest_groups", return_value={4: "fixture-opaque-sender-key"}),
         ):
             public = guest.resolve_payload(self.cfg, token)
@@ -372,11 +393,12 @@ class TestGuestEvidence(LocalFixture):
         self.assertEqual(event["source_kind"], "source-anchored")
         self.assertEqual(second["topic_detail"]["events"][0]["answer"], "")
         self.assertEqual(second["topic_detail"]["events"][0]["qa_id"], 2)
-        self.assertEqual(next(message for message in public["cases"][0]["messages"] if message.get("anchor"))["sender_label"],
-                         "群成员 1")
+        anchor = next(message for message in public["cases"][0]["messages"] if message.get("anchor"))
+        self.assertEqual(anchor["sender_label"], "群成员 1")
+        self.assertEqual(anchor["sender_name"], "已核验来源昵称")
         serialized = json.dumps(public, ensure_ascii=False)
         for private in ("own-question", "其他统计范围", "未出现的回复", "/login", "/api/voc2/topics",
-                        "仅后台可见的来源昵称", "fixture-opaque-sender-key",
+                        "fixture-opaque-sender-key",
                         f"t_{1:024x}", f"t_{3:024x}"):
             self.assertNotIn(private, serialized)
 

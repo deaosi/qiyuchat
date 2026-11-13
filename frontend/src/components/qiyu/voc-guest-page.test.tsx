@@ -192,14 +192,14 @@ it('keeps message sides and previews only scoped images without fetching through
   }
 })
 
-it('shows anonymous group turns separately and labels a historical combined transcript without attributing it', () => {
+it('uses recorded group nicknames before anonymous labels and leaves a historical combined transcript unattributed', () => {
   const item = payload.cases[0]
   render(<VocGuestPage {...payload} cases={[{
     ...item, scope: 'pair', messages: [
-      { role: 'group_participant', time, text: '请看这个设置', sender_name: '不公开的姓名', sender_label: '群成员 1' },
-      { role: 'group_participant', time, text: '稍等，我在核对', sender_label: '群成员 2' },
+      { role: 'group_participant', time, text: '请看这个设置', sender_name: '七鱼群成员昵称', sender_label: '群成员 1' },
+      { role: 'group_participant', time, text: '稍等，我在核对', sender_name: ' ', sender_label: '群成员 2' },
       { role: 'group_participant', time, text: '目前还没生效', sender_label: '无效的姓名' },
-      { role: 'combined_transcript', time, text: '@小吴 请查看\n可以，我再试一次', sender_name: '不该归属的姓名' },
+      { role: 'combined_transcript', time, text: '@小吴 请查看\n可以，我再试一次', sender_name: '不该归属的姓名', sender_label: '群成员 8' },
       { role: 'user', time, text: '该咨询有来源身份', sender_label: '群成员 1', anchor: true },
       { role: 'staff', time, text: '已确认来源的客服', sender_name: '公开坐席', sender_label: '群成员 2' },
     ],
@@ -211,7 +211,8 @@ it('shows anonymous group turns separately and labels a historical combined tran
   const transcript = within(conversation.getByRole('list', { name: '会话消息' }))
   const rows = transcript.getAllByRole('listitem')
   expect(rows.map(row => row.dataset.side)).toEqual(['center', 'center', 'center', 'center', 'left', 'right'])
-  expect(within(rows[0]).getByText('群成员 1')).toBeTruthy()
+  expect(within(rows[0]).getByText('七鱼群成员昵称')).toBeTruthy()
+  expect(within(rows[0]).queryByText('群成员 1')).toBeNull()
   expect(within(rows[1]).getByText('群成员 2')).toBeTruthy()
   expect(within(rows[2]).getByText('群成员')).toBeTruthy()
   expect(within(rows[3]).getByText('合并记录')).toBeTruthy()
@@ -219,5 +220,5 @@ it('shows anonymous group turns separately and labels a historical combined tran
   expect(within(rows[4]).getByText('本次咨询')).toBeTruthy()
   expect(within(rows[5]).getByText('公开坐席')).toBeTruthy()
   expect(conversation.getByText('历史记录只保留了合并文本，无法区分每条消息的发送者。')).toBeTruthy()
-  expect(transcript.queryByText(/不公开的姓名|无效的姓名|不该归属的姓名/)).toBeNull()
+  expect(transcript.queryByText(/无效的姓名|不该归属的姓名|群成员 8/)).toBeNull()
 })

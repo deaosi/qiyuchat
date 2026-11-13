@@ -281,7 +281,7 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
             groups = (case_senders.saved_guest_groups(db, cfg.runtime.state_dir, sid, selected_rows, tables)
                       if selected_rows else {})
             limit = _FULL_MESSAGE_LIMIT if full else _MAX_CONTEXT_TEXT
-            legacy = (_legacy_messages(cfg, db, pair, rows, names, limit, tables)
+            legacy = (_legacy_messages(cfg, db, pair, rows, names, limit, tables, session_row["from_group"] or "")
                       if include_sender_names and not context and len(rows) <= _MAX_SOURCE_MESSAGES else [])
     except (sqlite3.Error, OSError):
         return None
@@ -309,7 +309,7 @@ def _case(cfg: Settings, qa_id: int, anchor: str, *, full: bool = False,
                 message["role"] = "combined_transcript"
     aliases: dict[str, str] = {}
     for message, row in zip(context, selected_rows or ()):
-        if nickname := _clean(nicknames.get(row["context_seq"]))[:300]:
+        if nickname := _clean_projection(nicknames.get(row["context_seq"]))[:300]:
             message["sender_name"] = nickname
         if identity := groups.get(row["context_seq"]):
             message["sender_label"] = _group_alias(aliases, identity)
@@ -323,12 +323,14 @@ def _group_alias(aliases: dict[str, str], identity: str) -> str:
 
 
 def _legacy_messages(cfg: Settings, db, pair: dict, rows: list[dict], names: re.Pattern[str] | None,
-                     limit: int, tables: set[str]) -> list[dict]:
+                     limit: int, tables: set[str], group_name: str) -> list[dict]:
     labels = case_senders.saved_legacy_labels(cfg.runtime.state_dir, pair["session_id"], rows)
     match = guest_legacy_transcript.match_pair(pair, rows) if labels else None
     if not match:
         return []
     originals, question_seq = match
+    nicknames = case_senders.saved_legacy_nicknames(cfg.runtime.state_dir, pair["session_id"], originals,
+                                                  group_name=group_name)
     groups = case_senders.saved_guest_groups(db, cfg.runtime.state_dir, pair["session_id"], originals, tables)
     aliases: dict[str, str] = {}
     limits = {"user": limit, "staff": limit}
@@ -344,7 +346,7 @@ def _legacy_messages(cfg: Settings, db, pair: dict, rows: list[dict], names: re.
         label = labels.get(seq)
         if label is None or label.get("sender_kind") == "unidentified":
             message["role"] = "unidentified"
-        elif nickname := _clean(label.get("sender_name"))[:300]:
+        if nickname := _clean_projection(nicknames.get(seq))[:300]:
             message["sender_name"] = nickname
         if identity := groups.get(seq):
             message["sender_label"] = _group_alias(aliases, identity)
@@ -737,10 +739,6 @@ def resolve_payload(cfg: Settings, token: str) -> dict | None:
             cases.append(case)
             for message in case["messages"]:
                 message["text"] = _clean_projection(message["text"])
-                if variants:
-                    message.pop("sender_name", None)
-                elif "sender_name" in message:
-                    message["sender_name"] = _clean_projection(message["sender_name"])
             if entry["kind"] == "topics":
                 for index, message in enumerate(case["messages"]):
                     message["id"] = f"guest-message-{index}"
