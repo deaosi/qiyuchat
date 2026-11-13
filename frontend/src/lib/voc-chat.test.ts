@@ -137,12 +137,12 @@ describe('conversation state and evidence', () => {
   })
 
   it('restores response modes, warnings and context metadata without breaking legacy history', async () => {
-    const response: ChatAnswer = { ...thirtyDayAnswer(), answer_mode: 'grounded_model', warnings: ['当前来源未覆盖全部会话'] }
+    const response: ChatAnswer = { ...thirtyDayAnswer(), answer_mode: 'grounded_selection', warnings: ['当前来源未覆盖全部会话'] }
     const { store, storage } = factory(vi.fn().mockResolvedValue(response)), thread = store.ensureScope(a)
     await store.send(thread.id, '可追溯回答')
     const transport = vi.fn().mockResolvedValue(answer()), restored = createChatStore({ storage, transport })
     const restoredThread = restored.ensureScope(a)
-    expect(restoredThread.messages.at(-1)).toMatchObject({ answerMode: 'grounded_model', warnings: ['当前来源未覆盖全部会话'] })
+    expect(restoredThread.messages.at(-1)).toMatchObject({ answerMode: 'grounded_selection', warnings: ['当前来源未覆盖全部会话'] })
     await restored.send(restoredThread.id, '上面的依据是什么？')
     expect(transport.mock.calls[0][1].context.query_filters.start).toBe('2026-10-12')
 
@@ -285,11 +285,13 @@ describe('conversation state and evidence', () => {
 })
 
 describe('assistant response metadata contract', () => {
-  it('accepts optional answer modes and warnings while preserving citations and scope', async () => {
-    const response: ChatAnswer = { ...answer(), answer_mode: 'grounded_model', warnings: ['资料范围有限'] }
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(response)))
-    expect(await apiPost<ChatAnswer>('voc2/assistant', a, '{}')).toEqual(response)
-  })
+  it.each([undefined, 'grounded_model', 'grounded_selection', 'computed', 'source_reference', 'insufficient'] as const)(
+    'accepts answer mode %s while preserving citations, scope and warnings', async answer_mode => {
+      const response: ChatAnswer = { ...answer(), answer_mode, warnings: ['资料范围有限'] }
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(response)))
+      expect(await apiPost<ChatAnswer>('voc2/assistant', a, '{}')).toEqual(response)
+    },
+  )
 
   it.each([
     { answer_mode: 'invented_mode' },

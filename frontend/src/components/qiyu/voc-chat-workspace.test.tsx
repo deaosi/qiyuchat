@@ -151,11 +151,12 @@ it('submits the guided evidence question and lists only the queries returned for
   expect(transport.mock.calls[0][1].message).toBe(question)
   expect(screen.getByText('正在查询数据并整理回答…')).toBeTruthy()
 
-  await act(async () => finish({ answer: '已查到问法和一条原会话。', answer_mode: 'grounded_model',
+  await act(async () => finish({ answer: '已查到问法和一条原会话。', answer_mode: 'grounded_selection',
     citations: [], scope: { label: '近 7 天' }, model: 'test',
     tools: [{ name: 'rank', label: '统计高频问题' }, { name: 'cases', label: '查看相关会话' }],
   }))
   fireEvent.click(screen.getByText('查询范围与模型'))
+  expect(screen.getByText('模型选取重点，按原始依据呈现')).toBeTruthy()
   const queries = within(screen.getByRole('list', { name: '本次已执行的查询' }))
   expect(queries.getAllByRole('listitem').map(item => item.textContent)).toEqual(['统计高频问题', '查看相关会话'])
 })

@@ -1,5 +1,6 @@
 import type { QAPair } from '@/lib/demo-data'
 import { withRequestActivity } from '@/lib/request-activity'
+import { isChatAnswerMode } from '@/lib/voc-answer-mode'
 
 export interface ApiFilters {
   source: 'local'
@@ -467,7 +468,7 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
       && (data.count === undefined || isCount(data.count)); break
     case 'voc2/assistant': valid = typeof data.answer === 'string' && typeof data.model === 'string'
       && isRecord(data.scope) && typeof data.scope.label === 'string'
-      && (data.answer_mode === undefined || typeof data.answer_mode === 'string' && ['grounded_model', 'computed', 'source_reference', 'insufficient'].includes(data.answer_mode))
+      && (data.answer_mode === undefined || isChatAnswerMode(data.answer_mode))
       && (data.warnings === undefined || isStringArray(data.warnings))
       && Array.isArray(data.tools) && data.tools.every(item => isRecord(item) && typeof item.name === 'string' && typeof item.label === 'string')
       && Array.isArray(data.citations) && data.citations.every(item => isRecord(item)
