@@ -236,3 +236,55 @@ class TestAssistantInsights(unittest.TestCase):
                 self.assertEqual([read['name'] for read in plan['reads']], tools)
                 self.assertEqual(plan['rank_followups'], ('evidence',))
         self.assertIsNone(assistant._direct_plan('最近7天请分析回复错误是否增加，再核对抖音的客服回复。'))
+
+    def test_troubleshooting_preset_reads_same_scope_without_model_calls(self):
+        event = {'id': 'episode_reply', 'question': '机器人没回复', 'answer': '请先看接待状态。'}
+        ref = {'kind': 'event', 'id': event['id'], 'title': event['question']}
+        self.engine.event_detail.return_value = {'event': event}
+        with (
+            patch.object(assistant, '_plan') as planner,
+            patch.object(assistant.voc_agent, 'choose_followup') as followup,
+            patch.object(assistant.voc_agent_summary, 'summarize') as summarize,
+            patch.object(assistant, '_read_insight', side_effect=[
+                ('当前范围未查到符合条件的完整 SOP。', [], '', [], []),
+                ('客服原话：请先看接待状态。', [ref], '', [], []),
+            ]) as read,
+        ):
+            result = assistant.answer(self.cfg, {'days': 7, 'group': '测试群', 'staff': '测试客服'},
+                                      {'message': '机器人不回复时应先检查哪些设置？请附上案例依据。'})
+        for model in (planner, followup, summarize):
+            model.assert_not_called()
+        self.assertEqual(result['answer_mode'], 'source_reference')
+        self.assertEqual(result['usage_tokens'], 0)
+        self.assertEqual(result['citations'], [ref])
+        self.assertIn('未查到符合条件的完整 SOP', result['answer'])
+        self.assertIn(event['answer'], result['answer'])
+        self.assertEqual([tool['name'] for tool in result['tools']], ['sops', 'reply_patterns'])
+        for call in read.call_args_list:
+            self.assertEqual(call.args[2]['group'], '测试群')
+            self.assertEqual(call.args[2]['staff'], '测试客服')
+            self.assertEqual(call.args[5]['query'], '机器人不回复')
+
+    def test_planning_timeout_preserves_scope_and_returns_clarification_in_chat(self):
+        filters = {'days': 7, 'group': '测试群'}
+        for status in (502, 504):
+            with self.subTest(status=status), patch.object(assistant, '_plan', side_effect=
+                    assistant.ModelProtocolError('上游内部错误', status)):
+                result = assistant.answer(self.cfg, filters, {'message': '查抖音上周的特定异常原因'})
+            self.assertEqual(result['answer_mode'], 'insufficient')
+            self.assertEqual(result['scope']['query_filters']['group'], '测试群')
+            self.assertEqual(result['citations'], [])
+            self.assertEqual(result['tools'], [])
+            self.assertIn('请补充具体平台', result['answer'])
+            self.assertNotIn('上游内部错误', result['answer'])
+        self.engine.search.assert_not_called()
+
+    def test_source_presets_keep_date_or_explicit_topic_and_request_only_relevant_tools(self):
+        plan = assistant._direct_plan('最近14天，场景没触发怎么排查？')
+        self.assertEqual(plan['days'], 14)
+        self.assertEqual([read['query'] for read in plan['reads']], ['场景没触发'] * 2)
+        self.assertIsNone(assistant._direct_plan('抖音场景未触发怎么排查？'))
+        plan = assistant._direct_plan('找出与场景未触发相关的已核验 SOP')
+        self.assertEqual(plan['reads'], [{'name': 'sops', 'query': '场景未触发'}])
+        self.assertEqual(assistant._direct_plan('列出这个问题的代表案例，并附上会话依据。', has_topic=True)['intent'],
+                         'case_examples')

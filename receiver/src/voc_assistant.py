@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 
 from .clean.rules import mask_pii
 from .config import Settings
-from .model_protocol import complete_json
+from .model_protocol import ModelProtocolError, complete_json
 from .voc_service import DISPLAY_ZONE, ServiceError
 from .voc_context import apply_dates, context_scope, query_projection
 from .voc_search import staff_claims, verified_pair_reply
@@ -73,6 +73,19 @@ _CASE_FOLLOWUP = re.compile(
 )
 _CASE_REQUEST = re.compile(r'真实(?:会话|聊天|客服)?(?:案例|例子)|实际(?:会话|聊天|客服)?(?:案例|例子)|举例|举个例|举一例|结合案例')
 _AGENT_EXAMPLE = '找出当前范围最常见的一类问题，查看具体问法、已核验 SOP 和真实会话，并指出还缺哪些证据'
+_TROUBLESHOOT_PRESET = '机器人不回复时应先检查哪些设置？请附上案例依据'
+_EVIDENCE_PRESETS = {
+    _TROUBLESHOOT_PRESET: (('sops', '机器人不回复'), ('reply_patterns', '机器人不回复')),
+    '找出与场景未触发相关的已核验 SOP': (('sops', '场景未触发'),),
+    '查找场景未触发的问题处理手册': (('playbooks', '场景未触发'),),
+    '有哪些客户问题还缺少明确的处理办法': (('gaps', ''),),
+}
+_TROUBLESHOOT_REQUEST = re.compile(
+    r'(?:请|帮我)?\s*(?:(?:最近|近)\s*(?P<days>[1-9][0-9]{0,2})\s*天[，,\s]*)?'
+    r'(?P<subject>机器人不回复|机器人没回复|场景未触发|场景没触发)'
+    r'(?:时)?(?:怎么排查|如何排查|该检查什么|应先检查哪些设置)'
+    r'(?:[？?。；，,\s]*(?:请)?(?:附上案例依据|给个真实案例|给出适用条件和来源))?'
+)
 _AGENT_TOOLS = ('top_topics', 'compare', 'daily_trend', 'sops', 'evidence', 'reply_patterns')
 _AGENT_READ_LIMIT = 5
 _AGENT_SECONDS = 35
@@ -161,13 +174,28 @@ def _plan(cfg: Settings, message: str, history: list, filters: dict) -> tuple[di
     return plan,result['usage_tokens']
 
 
-def _direct_plan(message: str, *, has_references: bool = False) -> dict | None:
+def _direct_plan(message: str, *, has_references: bool = False, has_topic: bool = False) -> dict | None:
     """Route explicit data questions to the read tools without a model call."""
     text = message.rstrip('？?。！! ').strip()
     plan = {'query': '', 'days': None, 'limit': 5, 'support_intent': None,
             'diagnosis_status': None, 'explain': False}
     if has_references and _CASE_FOLLOWUP.fullmatch(text):
         return {**plan, 'intent': 'case_examples', 'use_context': True}
+    if has_topic and text == '列出这个问题的代表案例，并附上会话依据':
+        return {**plan, 'intent': 'case_examples'}
+    reads = _EVIDENCE_PRESETS.get(text)
+    if not reads and (match := _TROUBLESHOOT_REQUEST.fullmatch(text)):
+        days = int(match['days']) if match['days'] else None
+        if days is not None and days > 365:
+            return None
+        plan['days'] = days
+        reads = (('sops', match['subject']), ('reply_patterns', match['subject']))
+    if reads:
+        return {**plan, 'intent': 'insights', 'limit': 3, 'local_evidence': True,
+                'reads': [{'name': name, 'query': query} for name, query in reads]}
+    if has_topic and text == '这个问题怎么排查？给出适用条件和来源':
+        return {**plan, 'intent': 'insights', 'limit': 3, 'local_evidence': True,
+                'reads': [{'name': 'sops', 'query': ''}, {'name': 'evidence', 'query': ''}]}
     if text == _AGENT_EXAMPLE:
         return {**plan, 'intent': 'insights', 'limit': 1, 'explain': True,
                 'reads': [{'name': 'top_topics', 'query': ''}], 'rank_followups': ('sops', 'evidence')}
@@ -922,6 +950,8 @@ def _insights_answer(cfg, filters, body, plan, tokens, *, agent=False):
         if result['answer_mode'] == 'computed' and (cases or sops or case_refs) and all(
                 tool['name'] not in (*METRIC_LABELS, 'top_topics', 'compare') for tool in result['tools']):
             result['answer_mode'] = 'source_reference'
+        if plan.get('local_evidence') and not (sops or case_refs or citations):
+            result['answer_mode'] = 'insufficient'
         return result
     if case_refs or (ranked_refs and _CASE_REQUEST.search(body['message'])):
         rows = _case_rows(engine, cfg, scoped, case_refs or ranked_refs)
@@ -941,10 +971,21 @@ def answer(cfg: Settings, filters: dict, body: object) -> dict:
     message = mask_pii(message.strip())
     history = _history(body)
     inherited, prior_refs = context_scope(filters, body)
-    direct = _direct_plan(message, has_references=bool(prior_refs))
+    direct = _direct_plan(message, has_references=bool(prior_refs), has_topic=bool(inherited.get('focus_topic')))
     if direct and direct['intent'] in ('top_topics', 'insights') and '当前范围' in message:
         inherited, prior_refs = dict(filters), []
-    raw_plan, plan_tokens = (direct, 0) if direct else _plan(cfg, message, history, inherited)
+    try:
+        raw_plan, plan_tokens = (direct, 0) if direct else _plan(cfg, message, history, inherited)
+    except ModelProtocolError as error:
+        if error.status < 500:
+            raise
+        scope = _scope(inherited)
+        scope['query_filters'] = query_projection(inherited)
+        warning = ('模型未在等待时间内完成查询规划。' if error.status == 504
+                   else '本次未取得有效的查询计划。')
+        return {'answer': warning + '请补充具体平台、功能或异常现象，或直接选用高频问题、客服原话或已核验 SOP 的快捷提问。',
+                'citations': [], 'tools': [], 'scope': scope, 'model': cfg.llm.model_main,
+                'usage_tokens': 0, 'answer_mode': 'insufficient', 'warnings': [warning]}
     plan = _normalize_metric_plan(raw_plan, message)
     prepared = plan, plan_tokens
     ordinal = re.search(r'(?:上面|前面|刚才|刚刚|其中)(?:的)?\s*第\s*(10|[1-9一二两三四五六七八九十])\s*(?:个|条|项)', message)
@@ -966,7 +1007,7 @@ def answer(cfg: Settings, filters: dict, body: object) -> dict:
         return _insights_answer(cfg, inherited, effective_body, plan, prepared[1], agent=True)
     if plan['intent'] == 'insights':
         return _insights_answer(cfg, inherited, effective_body, plan, prepared[1],
-                                agent=not direct or plan.get('explain', False))
+                                agent=not direct or plan.get('explain', False) or plan.get('local_evidence', False))
     result = _query_answer(cfg, inherited, effective_body, prepared)
     found = result.pop('_found', {})
     result.pop('_ranked_topics', None)
