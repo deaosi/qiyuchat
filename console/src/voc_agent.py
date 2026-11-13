@@ -87,9 +87,9 @@ def choose_followup(cfg: Settings, *, question: str, scope: dict, observations: 
     remaining = deadline - time.monotonic()
     if remaining < 1:
         return [], 0, ''
-    llm = replace(cfg.llm, timeout=min(cfg.llm.timeout, 6, int(remaining)))
+    llm = replace(cfg.llm, timeout=min(cfg.llm.timeout, 12, int(remaining)))
     try:
-        response = complete_json(llm, _SYSTEM, payload, max_tokens=1000)
+        response = complete_json(llm, _SYSTEM, payload, max_tokens=700)
     except ModelProtocolError:
         return [], 0, _WARNING
     data, tokens = response['data'], response['usage_tokens']

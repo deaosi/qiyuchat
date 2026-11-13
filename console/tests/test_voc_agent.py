@@ -41,8 +41,8 @@ class TestVocAgent(unittest.TestCase):
         ):
             self.assertEqual(voc_agent.choose_followup(self.cfg, **self.params), (reads, 29, ''))
         config, _, payload = model.call_args.args
-        self.assertEqual(config.timeout, 6)
-        self.assertEqual(model.call_args.kwargs['max_tokens'], 1000)
+        self.assertEqual(config.timeout, 10)
+        self.assertEqual(model.call_args.kwargs['max_tokens'], 700)
         self.assertEqual(set(payload['tools']), {'evidence', 'sops'})
         self.assertEqual(payload['scope'], {'label': '最近 7 天'})
         self.assertEqual(payload['observations'][0], {'tool': 'overview', 'status': 'found', 'summary': '有 4 条问答'})

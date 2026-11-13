@@ -95,7 +95,7 @@ _CASE_REQUEST = re.compile(r'真实(?:会话|聊天|客服)?(?:案例|例子)|�
 _AGENT_EXAMPLE = '找出当前范围最常见的一类问题，查看具体问法、已核验 SOP 和真实会话，并指出还缺哪些证据'
 _AGENT_TOOLS = ('top_topics', 'compare', 'daily_trend', 'sops', 'evidence', 'reply_patterns')
 _AGENT_READ_LIMIT = 5
-_AGENT_SECONDS = 30
+_AGENT_SECONDS = 45
 
 def _engine():
     from . import voc_engine

@@ -79,6 +79,7 @@ function QueryDetails({ message, filters }: { message: ChatMessage; filters: Api
         <p className="font-medium" id={queriesId}>本次已执行的查询</p>
         <ul aria-labelledby={queriesId} className="space-y-0.5 pl-2">{queries.map(label => <li key={label}>{label}</li>)}</ul>
       </div>}
+      {!!message.warnings?.length && <p className="whitespace-pre-line">{[...new Set(message.warnings)].join('\n')}</p>}
     </div>
   </details>
 }
