@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 from src.extract.text import clean_visible_text
 from src.qiyu.ticket import _id
 from src.web import ticket_guest, ticket_media, tickets
-from src.web.guest_evidence import PUBLIC_ORIGIN
 
 
 COLUMNS = {"latest": "最新七鱼跟进", "history": "工单往来记录", "attachments": "跟进附件"}
@@ -73,7 +72,7 @@ def _attached_count(attachments):
     return len(paths)
 
 
-def project(ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict:
+def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict:
     """Read chronological replies and preserve their direction without sending feedback."""
     identifier = _id(ticket_id)
     if identifier is None or str(identifier) != ticket_id:
@@ -117,7 +116,7 @@ def project(ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict:
         header = " · ".join(part for part in (when, direction, _shorten(sender, 120)) if part)
         marker = f"附件 {count} 个" if count else ""
         if not from_feishu:
-            has_attachments |= bool(count)
+            has_attachments |= bool(_attached_count(ticket_guest.followup_media(entry)))
             if not latest and role != "修改回复":
                 latest = "\n".join(part for part in (header, _shorten(message, _MAX_LATEST), marker) if part)
         summary = "\n".join(part for part in (header, _shorten(message, _MAX_REPLY), marker) if part)
@@ -132,7 +131,7 @@ def project(ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict:
     history = list(reversed(entries))
     if omitted:
         history.insert(0, f"以下为最近 {len(entries)} 条回复")
-    attachment_link = {"text": "查看跟进附件", "link": f"{PUBLIC_ORIGIN}/#tickets?id={identifier}"} if has_attachments else None
+    attachment_link = {"text": "查看跟进附件", "link": ticket_guest.followup_url_for(cfg, ticket_id)} if has_attachments else None
     return {
         COLUMNS["latest"]: latest,
         COLUMNS["history"]: "\n\n".join(history),

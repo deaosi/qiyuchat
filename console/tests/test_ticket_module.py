@@ -387,6 +387,62 @@ class TicketModuleTests(LocalFixture):
             _, scoped = ticket_guest._project(detail, "A" * 43, logs=logs)
             self.assertNotIn(internal_file, {source[0] for source in scoped.values()})
 
+    def test_ticket_followup_link_shares_only_scoped_native_reply_media(self):
+        from hashlib import sha256
+
+        ticket_id = "581001"
+        ordinary = ticket_guest.url_for(self.cfg, ticket_id)
+        followup = ticket_guest.followup_url_for(self.cfg, ticket_id)
+        self.assertEqual(followup, ticket_guest.followup_url_for(self.cfg, ticket_id))
+        self.assertNotEqual(urlsplit(ordinary).path, urlsplit(followup).path)
+        self.assertTrue(ticket_guest.matches_followup(self.cfg, ticket_id, followup))
+        self.assertFalse(ticket_guest.matches_followup(self.cfg, "581002", followup))
+        self.assertFalse(ticket_guest.matches(self.cfg, ticket_id, followup))
+        self.assertFalse(ticket_guest.matches_followup(self.cfg, ticket_id, ordinary))
+        shot_path = "/01010101010101010101010101010101.png"
+        doc_path = "/02020202020202020202020202020202.pdf"
+        private_path = "/03030303030303030303030303030303.pdf"
+        other_path = "/04040404040404040404040404040404.pdf"
+        origin = "https://shop.qiyukf.net"
+        shot = {"url": origin + shot_path + "?secret=source-token", "name": "跟进截图.png"}
+        document = {"url": origin + doc_path, "name": "跟进附件.pdf"}
+        private = {"url": origin + private_path, "name": "私密内容.pdf"}
+        other = {"url": origin + other_path, "name": "同步内容.pdf"}
+        detail = {"id": int(ticket_id), "title": "工单标题"}
+        logs = [
+            {"id": 1234567, "actionType": 20, "action": "回复", "customerSee": False, "operator": "私密回复人",
+             "time": 1794537200000, "attachments": [shot],
+             "info": [{"title": "备注", "content": "仅限内部的回复"},
+                      {"title": "附件", "content": json.dumps([document])}]},
+            {"id": 1234568, "actionType": 20, "action": "内部备注", "attachments": [private]},
+            {"id": 1234569, "actionType": 20, "action": "回复", "attachments": [other],
+             "info": [{"title": "回复", "content": "〔语海同步 0123456789abcdef〕"}]},
+        ]
+        path = urlsplit(followup).path
+        token = path.rsplit("/", 1)[1]
+        ordinary_token = urlsplit(ordinary).path.rsplit("/", 1)[1]
+        png = b"\x89PNG\r\n\x1a\ncontent"
+        with (patch.object(ticket_guest.TicketClient, "detail", return_value=detail),
+              patch.object(ticket_guest.TicketClient, "history", return_value=logs),
+              patch.object(case_media, "fetch_bytes", return_value=(png, "image/png")) as fetch):
+            payload = ticket_guest.resolve_payload(self.cfg, token)
+            self.assertEqual(len(payload["followup_attachments"]), 1)
+            entry = payload["followup_attachments"][0]
+            self.assertEqual(entry["time"], 1794537200000)
+            self.assertEqual(len(entry["images"]), 1)
+            self.assertEqual(len(entry["attachments"]), 1)
+            self.assertNotIn("followup_attachments", ticket_guest.resolve_payload(self.cfg, ordinary_token))
+            for hidden in ("仅限内部的回复", "私密回复人", "私密内容.pdf", "同步内容.pdf", "source-token"):
+                self.assertNotIn(hidden, str(payload))
+            image_id = entry["images"][0]["url"].rsplit("/", 1)[1]
+            self.assertEqual(ticket_guest.fetch_image(self.cfg, token, image_id)[:2], (png, "image/png"))
+            fetch.assert_called_once_with(shot["url"], image_only=True, ticket_attachment=True)
+            with self.assertRaises(case_media.ImageFetchError):
+                ticket_guest.fetch_image(self.cfg, ordinary_token, image_id)
+            forged_id = sha256(f"{ordinary_token}/shop.qiyukf.net{shot_path}".encode()).hexdigest()
+            with self.assertRaises(case_media.ImageFetchError):
+                ticket_guest.fetch_image(self.cfg, ordinary_token, forged_id)
+
     def test_guest_ticket_keeps_readable_overlapping_public_values(self):
         detail = {
             "id": 581010,

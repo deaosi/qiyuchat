@@ -1,8 +1,9 @@
+import { useEffect, useRef } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { ConversationMessageBody } from './conversation-image'
 import { ConversationBubble, ConversationTranscript, guestChatRoles } from './conversation-transcript'
-import { TicketForm, ticketTime, type TicketAttachment, type TicketField } from './ticket-form'
+import { TicketAttachments, TicketForm, ticketTime, type TicketAttachment, type TicketField } from './ticket-form'
 import { TicketHistory, TicketInfo, TicketTechnicalFeedback, type TechnicalFeedback, type TicketEvent } from './ticket-details-view'
 
 type GuestTicket = {
@@ -27,6 +28,12 @@ type GuestSession = {
   messages: { text: string; time: string; role: string; sender_name?: string; images?: string[] }[]
 }
 
+type GuestFollowup = {
+  time: number | null
+  images: TicketAttachment[]
+  attachments: TicketAttachment[]
+}
+
 export type GuestTicketPayload = {
   kind: 'ticket'
   ticket: GuestTicket
@@ -34,13 +41,21 @@ export type GuestTicketPayload = {
   history_available?: boolean
   sessions?: GuestSession[]
   technical_feedback?: Omit<TechnicalFeedback, 'error' | 'feishu_url'> | null
+  followup_attachments?: GuestFollowup[]
 }
 
 const ticketPath = /^\/guest\/ticket\/[A-Za-z0-9_-]{43}$/
 const imageId = /^[a-f0-9]{64}$/
+const followupAnchor = 'ticket-followup-attachments'
 
-export function VocGuestTicket({ ticket, history, history_available, sessions, technical_feedback }: GuestTicketPayload) {
+export function VocGuestTicket({ ticket, history, history_available, sessions, technical_feedback, followup_attachments }: GuestTicketPayload) {
   const path = window.location.pathname
+  const followupHeading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    if (window.location.hash === `#${followupAnchor}`) {
+      followupHeading.current?.focus()
+    }
+  }, [])
   function isScoped(url: unknown, type: 'images' | 'attachments') {
     const prefix = `${path}/${type}/`
     return ticketPath.test(path) && typeof url === 'string' && url.startsWith(prefix)
@@ -60,6 +75,9 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
     ...event, details: scopedFields(event.details) ?? [],
     images: scopedMedia(event.images, 'images'), attachments: scopedMedia(event.attachments, 'attachments'),
   })) ?? []
+  const followups = followup_attachments?.map(({ time, images, attachments }) => ({
+    time, images: scopedMedia(images, 'images'), attachments: scopedMedia(attachments, 'attachments'),
+  })).filter(item => item.images.length || item.attachments.length)
 
   return <div className="min-h-screen bg-linear-to-b from-muted/50 via-background to-background">
     <header className="border-b bg-background">
@@ -92,6 +110,15 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
             resolved_version: technical_feedback.resolved_version, received_at: technical_feedback.received_at,
             writeback_status: technical_feedback.writeback_status, written_at: technical_feedback.written_at,
           }} />}
+          {followups && <section className="space-y-2" aria-labelledby={followupAnchor}>
+            <h2 id={followupAnchor} ref={followupHeading} tabIndex={-1} className="scroll-mt-4 text-sm font-semibold">跟进附件</h2>
+            {followups.length ? <ul className="divide-y rounded-lg border">
+              {followups.map((item, index) => <li className="space-y-2 p-4" key={`${item.time}-${index}`}>
+                <p className="text-xs tabular-nums text-muted-foreground">{ticketTime(item.time)}</p>
+                <TicketAttachments images={item.images} attachments={item.attachments} />
+              </li>)}
+            </ul> : <p className="text-sm text-muted-foreground">{history_available ? '暂无可查看的跟进附件。' : '暂时无法读取跟进附件。'}</p>}
+          </section>}
           <section aria-label="处理记录" className="space-y-2">
             <h2 className="text-sm font-semibold">处理记录</h2>
             <TicketHistory history={events} available={history_available === true} />

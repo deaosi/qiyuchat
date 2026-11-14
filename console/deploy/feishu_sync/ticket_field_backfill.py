@@ -7,7 +7,7 @@ from src import voc_feishu_sync as sync
 from src.qiyu.ticket import TicketClient, TicketError, _id
 
 
-def _page(target, limit, after):
+def _page(target, limit, after, *, attachments_only=False):
     key_column = tickets._FIELDS["key"]
     query = {
         "field_names": [key_column, tickets._FIELDS["source"]],
@@ -16,6 +16,9 @@ def _page(target, limit, after):
             {"field_name": ticket_archive.CLOSED_AT, "operator": "isEmpty", "value": []},
         ]},
     }
+    if attachments_only:
+        attachment_column = ticket_history.COLUMNS["attachments"]
+        query["field_names"].append(attachment_column)
     params = {"page_size": limit}
     if after is not None:
         params["page_token"] = after
@@ -31,7 +34,7 @@ def _page(target, limit, after):
     return rows, cursor
 
 
-def run(state_dir, *, limit=20, after=None):
+def run(state_dir, *, limit=20, after=None, attachments_only=False):
     """Refresh one page of existing, unarchived tickets without creating records."""
     if type(limit) is not int or not 1 <= limit <= tickets.MATCH_SIZE:
         raise ValueError("飞书工单补齐单页数量无效。")
@@ -49,10 +52,13 @@ def run(state_dir, *, limit=20, after=None):
         if table_id is None:
             raise sync.SyncError("找不到配置中的七鱼工单表。", 409)
         key_column, source_column = tickets._FIELDS["key"], tickets._FIELDS["source"]
-        fields = {"key": key_column, "source": source_column, "closed": ticket_archive.CLOSED_AT, **tickets._DETAIL}
+        attachment_column = ticket_history.COLUMNS["attachments"]
+        detail_fields = {"attachments": attachment_column} if attachments_only else tickets._DETAIL
+        fields = {"key": key_column, "source": source_column, "closed": ticket_archive.CLOSED_AT, **detail_fields}
         target = replace(report, table_id=table_id, fields=fields, destination=top._destination(report, table_id))
-        rows, cursor = _page(target, limit, after)
+        rows, cursor = _page(target, limit, after, attachments_only=attachments_only)
         candidates = {}
+        legacy_links = {}
         record_ids = set()
         for row in rows:
             cells = row.get("fields") if isinstance(row, dict) else None
@@ -66,24 +72,33 @@ def run(state_dir, *, limit=20, after=None):
             if (not isinstance(key, str) or not tickets._ID.fullmatch(key) or _id(key) is None
                     or not isinstance(source, dict) or not tickets.ticket_guest.matches(cfg, key, source.get("link"))):
                 continue
+            if attachments_only:
+                attachment = sync._value(cells.get(attachment_column))
+                if not isinstance(attachment, dict) or attachment.get("link") != tickets._legacy_source_link(key):
+                    continue
+                legacy_links[key] = attachment
             if key in candidates:
                 raise sync.SyncError("飞书补齐工单编号重复。", 409)
             candidates[key] = record_id, source["link"]
 
         client = TicketClient(cfg.qiyu)
-        names = tickets._private_names(cfg, {}) if candidates else None
+        names = tickets._private_names(cfg, {}) if candidates and not attachments_only else None
         desired = {}
         missing = failed = 0
         for key, (_, link) in candidates.items():
             try:
-                raw = client.detail(int(key))
+                raw = {} if attachments_only else client.detail(int(key))
                 logs = client.history(int(key))
             except TicketError as error:
                 missing += error.http_status == 404
                 failed += error.http_status != 404
                 continue
-            desired[key] = {**tickets._summary(raw, names, source_link=link),
-                            **ticket_history.project(key, logs, submitter_id=raw.get("staffId"))}
+            history = ticket_history.project(cfg, key, logs, submitter_id=raw.get("staffId"))
+            if attachments_only:
+                if history[attachment_column]:
+                    desired[key] = {attachment_column: history[attachment_column]}
+            else:
+                desired[key] = {**tickets._summary(raw, names, source_link=link), **history}
         if tickets.maintenance(cfg):
             return {"status": "maintenance"}
 
@@ -98,6 +113,8 @@ def run(state_dir, *, limit=20, after=None):
             source = sync._value(cells.get(source_column))
             if (sync._value(cells.get(ticket_archive.CLOSED_AT)) or not isinstance(source, dict)
                     or source.get("link") != expected_link):
+                continue
+            if attachments_only and sync._value(cells.get(attachment_column)) != legacy_links[key]:
                 continue
             selected[key] = detail
         _, updated = tickets._upsert(target, selected, existing=existing)

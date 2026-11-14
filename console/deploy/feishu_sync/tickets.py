@@ -13,6 +13,7 @@ from src import ticket_feedback
 from src import voc_feishu_sync as sync
 from src.config import settings
 from src.qiyu.ticket import PAGE_SIZE, TicketClient, TicketError, _id
+from src.voc_assets import digest
 from src.voc_feishu_content import _private_names, _public_text
 from src.voc_service import maintenance
 from src.web import ticket_guest
@@ -31,92 +32,42 @@ _MINUTE = 60_000
 _RECONCILE = 10 * _MINUTE
 _DAY = 24 * 60 * _MINUTE
 _FEEDBACK_QUIET_MS = 15_000
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _WORK_SECONDS = 9
 _ARCHIVE_START_BUDGET = 12
 _ZONE = timezone(timedelta(hours=8))
 _ID = re.compile(r"[1-9][0-9]{0,18}")
-_FIELDS = {"key": "工单ID", "title": "工单标题", "status": "状态", "priority": "优先级", "submitter": "提报人",
-           "created": "创建时间", "updated": "更新时间", "sessions": "关联会话数", "source": "语海详情"}
+_FIELDS = {"key": "网易七鱼工单ID", "title": "工单标题", "status": "状态", "priority": "优先级", "submitter": "提报人",
+           "created": "创建时间", "updated": "更新时间", "sessions": "关联会话数", "source": "点击查看详情"}
 _TYPES = {"key": 1, "title": 1, "status": 1, "priority": 1, "created": 5, "updated": 5, "sessions": 2, "source": 15}
 _FORM = {"group": "客户群名称", "owner": "后台负责人", "platform_version": "平台&版本", "shop": "店铺名",
          "software": "软件版本", "reported": "是否已点击报告问题", "request": "问题需求", "attachment": "附件/截图"}
 _DETAIL = {"summary": "工单描述", "platform": "平台", **_FORM, **ticket_history.COLUMNS}
-_INPUT = {"status": "技术处理状态", "reply": "技术回复", "version": "解决版本"}
+_INPUT = {"status": "处理状态", "reply": "回复内容", "version": "解决版本"}
 _OUTPUT = {"status": "回传状态", "returned_at": "回传时间", "error": "回传失败原因"}
 _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
 
 
-def _column_specs() -> dict:
-    names = (_FIELDS["submitter"], *_DETAIL.values(), *_INPUT.values(), *_OUTPUT.values())
-    specs = {name: {"name": name, "type": "text"} for name in names}
-    for name in (_FORM["attachment"], ticket_history.COLUMNS["attachments"]):
-        specs[name]["style"] = {"type": "url"}
-    specs[_OUTPUT["returned_at"]].update(type="datetime", style={"format": "yyyy-MM-dd HH:mm"})
-    return specs
-
-
-def _table(report: sync.Target, *, incremental=False) -> tuple[sync.Target, str]:
+def _table(report: sync.Target, *, incremental=False) -> sync.Target:
     table_id = top._find_table(report, TABLE_NAME)
     if table_id is None:
-        definitions = [
-            {"name": _FIELDS[role], "type": "text"} for role in ("key", "title", "status", "priority", "submitter")
-        ]
-        definitions.extend({"name": _FIELDS[role], "type": "datetime", "style": {"format": "yyyy-MM-dd HH:mm"}}
-                           for role in ("created", "updated"))
-        definitions.extend((
-            {"name": _FIELDS["sessions"], "type": "number", "style": {"type": "plain", "precision": 0}},
-            {"name": _FIELDS["source"], "type": "text", "style": {"type": "url"}},
-        ))
-        table_id = top._create_table(report, TABLE_NAME, definitions)
-    target = replace(report, table_id=table_id, fields=_FIELDS, destination=top._destination(report, table_id))
+        raise sync.SyncError("找不到配置中的七鱼工单表。", 409)
+    target = replace(report, table_id=table_id, fields={**_FIELDS, **_DETAIL}, destination=top._destination(report, table_id))
     fields = {row.get("field_name"): row for row in sync._paginated(target, "GET", "/fields")
               if isinstance(row, dict)}
-    if (any(fields.get(_FIELDS[role], {}).get("type") != kind for role, kind in _TYPES.items())
-            or fields[_FIELDS["key"]].get("is_primary") is not True):
-        raise sync.SyncError("飞书七鱼工单表字段不匹配。", 409)
-    definitions = _column_specs()
+    expected = {_FIELDS[role]: (kind,) for role, kind in _TYPES.items()}
+    expected.update({name: (1,) for name in (_FIELDS["submitter"], *_DETAIL.values(), *_INPUT.values(), *_OUTPUT.values())})
+    expected.update({_FORM["attachment"]: (15,), ticket_history.COLUMNS["attachments"]: (15,),
+                     _OUTPUT["returned_at"]: (5,), _INPUT["status"]: (1, 3)})
     if incremental:
-        name = ticket_reply_delta.TIME_FIELD
-        definitions[name] = {"name": name, "type": "updated_at", "style": {"format": "yyyy-MM-dd HH:mm"}}
-        definitions[ticket_archive.CLOSED_AT] = {"name": ticket_archive.CLOSED_AT, "type": "datetime",
-                                                 "style": {"format": "yyyy-MM-dd HH:mm"}}
-    for name, definition in definitions.items():
-        if name not in fields:
-            top._cli(target, "+field-create", "--table-id", table_id, "--json", json.dumps(definition, ensure_ascii=False))
-    if not set(definitions) <= fields.keys():
-        fields = {row.get("field_name"): row for row in sync._paginated(target, "GET", "/fields") if isinstance(row, dict)}
-    for name in definitions:
-        expected = {_FORM["attachment"]: 15, ticket_history.COLUMNS["attachments"]: 15,
-                    _OUTPUT["returned_at"]: 5, ticket_archive.CLOSED_AT: 5,
-                    ticket_reply_delta.TIME_FIELD: ticket_reply_delta.TIME_FIELD_TYPE}.get(name, 1)
-        allowed = (1, 3) if name == _INPUT["status"] else (expected,)
+        expected.update({ticket_reply_delta.TIME_FIELD: (ticket_reply_delta.TIME_FIELD_TYPE,),
+                         ticket_archive.CLOSED_AT: (5,)})
+    for name, allowed in expected.items():
         if fields.get(name, {}).get("type") not in allowed:
             raise sync.SyncError(f"飞书七鱼工单表字段名称或类型不匹配：{name}。", 409)
-    submitter_id = fields[_FIELDS["submitter"]].get("field_id")
-    if not isinstance(submitter_id, str) or not submitter_id:
-        raise sync.SyncError("无法核对飞书工单提报人字段。", 409)
-    return replace(target, fields={**target.fields, **_DETAIL}), submitter_id
-
-
-def _position_submitter(target):
-    args = ("--table-id", target.table_id, "--view-id", top._view_id(target))
-    current = top._cli(target, "+view-get-visible-fields", *args).get("visible_fields")
-    priority, submitter = _FIELDS["priority"], _FIELDS["submitter"]
-    source = _FIELDS["source"]
-    if (not isinstance(current, list) or not all(isinstance(name, str) for name in current)
-            or len(set(current)) != len(current) or priority not in current or source not in current):
-        raise sync.SyncError("无法核对飞书工单视图的详情列。", 409)
-    detail_columns = [*ticket_history.COLUMNS.values(), *_FORM.values()]
-    order = [name for name in current if name != submitter and name not in detail_columns]
-    order.insert(order.index(priority) + 1, submitter)
-    index = order.index(source) + 1
-    order[index:index] = detail_columns
-    if current != order:
-        top._cli(target, "+view-set-visible-fields", *args,
-                 "--json", json.dumps({"visible_fields": order}, ensure_ascii=False))
-        if top._cli(target, "+view-get-visible-fields", *args).get("visible_fields") != order:
-            raise sync.SyncError("飞书工单视图的提报字段位置未能回读确认。", 409)
+    if fields[_FIELDS["key"]].get("is_primary") is not True:
+        raise sync.SyncError("飞书七鱼工单表的主字段与固定表头不匹配。", 409)
+    return target
 
 
 def _pages(cfg, **filters):
@@ -385,7 +336,10 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         stamp = [row[_FIELDS["created"]], row[_FIELDS["updated"]], row[_FIELDS["title"]]]
         previous = cache.get(key)
         cached = previous.get("fields") if isinstance(previous, dict) else None
-        if isinstance(cached, dict) and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values()):
+        followup = cached.get(ticket_history.COLUMNS["attachments"]) if isinstance(cached, dict) else None
+        if (isinstance(cached, dict) and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values())
+                and (followup is None or (isinstance(followup, dict)
+                     and ticket_guest.matches_followup(cfg, key, followup.get("link"))))):
             row.update(cached)
             if not incremental:
                 next_cache[key] = previous
@@ -405,7 +359,7 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
             names_loaded = True
         source_cell = sync._value(row.get(_FIELDS["source"]))
         columns = _summary(source, names, source_link=source_cell.get("link") if isinstance(source_cell, dict) else None)
-        columns.update(ticket_history.project(key, logs, submitter_id=source.get("staffId")))
+        columns.update(ticket_history.project(cfg, key, logs, submitter_id=source.get("staffId")))
         row.update(columns)
         next_cache.pop(key, None)
         next_cache[key] = {"stamp": stamp, "fields": columns}
@@ -488,7 +442,7 @@ def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_sta
     return records
 
 
-def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exclude_closed=False):
+def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exclude_closed=False, baseline=None):
     if pending is not None:
         rows = pending
     else:
@@ -507,6 +461,7 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
                                     **({"modified": ticket_reply_delta.TIME_FIELD} if window else {})})
     imported = uncertain = failed = 0
     waiting = {}
+    handled = set()
     for offset in range(0, len(keys), MATCH_SIZE):
         group = keys[offset:offset + MATCH_SIZE]
         verified = sync._existing(lookup, dict.fromkeys(group))
@@ -530,9 +485,13 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             if not _source_matches(cfg, key, fields.get(_FIELDS["source"])):
                 raise sync.SyncError("飞书技术回复的语海详情已变动，请核对来源。", 409)
             feedback = _feedback(fields)
+            record_id = rows[key]
+            if baseline is not None and key in baseline:
+                if baseline[key] == [record_id, digest(ticket_feedback._normalized(feedback))]:
+                    continue
+                handled.add(key)
             if not any(feedback.values()):
                 continue
-            record_id = rows[key]
             result = ticket_feedback.ingest(cfg, ticket_id=key, record_id=record_id,
                                             feedback=feedback, feishu_url=target.destination)
             imported += int(result.get("changed") is True)
@@ -548,6 +507,9 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             if changes:
                 updates.append({"record_id": record_id, "fields": changes})
         sync._batch(target, "update", updates)
+    if baseline is not None:
+        for key in handled:
+            baseline.pop(key, None)
     return {"checked": len(rows), "imported": imported, "awaiting_review": uncertain, "failed": failed,
             **({"waiting": waiting} if pending is not None else {})}
 
@@ -581,13 +543,13 @@ def _feedback_work(cfg, target, queue, lane, now, window, *, batch_state, retry_
     return next(reversed(retries), "") if len(retries) == 100 else ""
 
 
-def _drain_feedback(cfg, target, queue, lane, now, window):
+def _drain_feedback(cfg, target, queue, lane, now, window, *, baseline=None):
     batch = ticket_work.due(queue, lane, now_ms=now, limit=10)
     if not batch:
         return {"checked": 0, "imported": 0, "awaiting_review": 0, "failed": 0}
     try:
         result = _import_feedback(cfg, target, window=window, exclude_closed=True,
-                                  pending={key: item["record_id"] for key, item in batch.items()})
+                                  pending={key: item["record_id"] for key, item in batch.items()}, baseline=baseline)
     except _SYNC_ERRORS:
         ticket_work.defer(queue, lane, batch, until_ms=now + _RECONCILE)
         raise
@@ -709,18 +671,21 @@ def run(state_dir, *, incremental=False):
         if (incremental and state.get("schema_version") == _SCHEMA_VERSION
                 and type(schema_at) is int and 0 <= now - schema_at < _RECONCILE
                 and isinstance(table_id, str) and top._TABLE_ID.fullmatch(table_id)
-                and setup.get("table_id") == table_id and setup.get("positioned_field_id")):
+                and setup.get("table_id") == table_id):
             target = replace(report, table_id=table_id, destination=top._destination(report, table_id),
                              fields={**_FIELDS, **_DETAIL})
-            submitter_field_id = setup["positioned_field_id"]
         else:
-            target, submitter_field_id = _table(report, incremental=True) if incremental else _table(report)
+            target = _table(report, incremental=incremental)
             if state.get("table_id") != target.table_id:
                 state = {"table_id": target.table_id}
             state["schema_at"] = now
             state["schema_version"] = _SCHEMA_VERSION
         if setup.get("table_id") != target.table_id:
             setup = {"table_id": target.table_id}
+        saved_baseline = setup.get("feedback_header_baseline", {})
+        if not isinstance(saved_baseline, dict):
+            raise ValueError("飞书工单反馈初始记录无效。")
+        baseline = dict(saved_baseline)
         reconcile = incremental and now - state.get("reconciled_at", 0) >= _RECONCILE
         retry_feedback = incremental and now - state.get("feedback_retry_at", 0) >= _RECONCILE
         daily = incremental and now - state.get("daily_at", 0) >= _DAY
@@ -748,12 +713,16 @@ def run(state_dir, *, incremental=False):
                     state["feedback_retry_at"] = now
                     state["feedback_retry_cursor"] = next_retry
                 support._write_state(state_path, state)
-                feedback = _drain_feedback(cfg, target, queue, inbound, now, (feedback_start, feedback_end))
+                feedback = _drain_feedback(cfg, target, queue, inbound, now, (feedback_start, feedback_end),
+                                           baseline=baseline)
             else:
-                feedback = _import_feedback(cfg, target)
+                feedback = _import_feedback(cfg, target, baseline=baseline)
         except _SYNC_ERRORS as exc:
             message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "飞书技术回复暂无法核对。"
             feedback = {"status": "failed", "message": message}
+        if baseline != saved_baseline:
+            setup["feedback_header_baseline"] = baseline
+            support._write_state(setup_path, setup)
         previous_qiyu = state.get("qiyu_until", 0)
         try:
             if incremental:
@@ -791,15 +760,6 @@ def run(state_dir, *, incremental=False):
                 added, adjusted = _upsert(target, group)
                 inserted += added
                 changed += adjusted
-        layout_error = ""
-        if setup.get("positioned_field_id") != submitter_field_id or setup.get("form_layout") != _SCHEMA_VERSION:
-            try:
-                _position_submitter(target)
-                setup["positioned_field_id"] = submitter_field_id
-                setup["form_layout"] = _SCHEMA_VERSION
-                support._write_state(setup_path, setup)
-            except _SYNC_ERRORS as exc:
-                layout_error = str(exc) if isinstance(exc, sync.SyncError) else "工单视图设置暂不可核对。"
         migrated = 0
         if setup.get("guest_links_migrated") is not True:
             migrated = _migrate_old_links(cfg, target, desired)
@@ -846,13 +806,11 @@ def run(state_dir, *, incremental=False):
         or feedback.get("status") == "failed" or feedback.get("failed") or feedback.get("awaiting_review")
         or details.get("status") == "failed" or details.get("failed") or details.get("deferred")
         or submitters.get("status") == "failed" or submitters.get("pending")
-        or layout_error or archive.get("status") == "failed"
+        or archive.get("status") == "failed"
     ) else "published"
     return {"status": status, "tickets": len(desired), "created": inserted, "updated": changed,
             "url": target.destination, "historical_guest_links_updated": migrated,
             "details": details, "feedback": feedback, "submitters": submitters,
-            "submitter_column_positioned": not layout_error,
-            **({"submitter_column_error": layout_error} if layout_error else {}),
             **({"incremental": True, "reconciled": reconcile, "daily": daily,
                 "archive": {key: value for key, value in archive.items() if key != "next_cursor"},
                 "queued": {name: ticket_work.count(queue, lane) for name, lane in

@@ -9,7 +9,7 @@ from deploy.feishu_sync import ticket_reply_delta
 from src import voc_feishu_sync as sync
 
 
-CLOSED_AT = "自动关闭时间"
+CLOSED_AT = "工单自动关闭时间（周期：无更新6个月）"
 CLOSED_STATUS = "已关闭"
 PAGE_SIZE = 5
 BUSINESS_ZONE = timezone(timedelta(hours=8))

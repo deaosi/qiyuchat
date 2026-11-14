@@ -22,13 +22,15 @@ class TicketFieldBackfillTests(TestCase):
             summary = tickets._DETAIL["summary"]
             rows = {
                 key: {"record_id": "recFixture" + key, "fields": {
-                    "工单ID": key, "语海详情": {"text": "查看工单", "link": links["10" if key == "11" else key]},
-                    "技术回复": "保留反馈", "状态": "处理中",
+                    "网易七鱼工单ID": key,
+                    "点击查看详情": {"text": "查看工单", "link": links["10" if key == "11" else key]},
+                    "回复内容": "保留反馈", "状态": "处理中",
                 }}
                 for key in links
             }
             snapshots = deepcopy(list(rows.values()))
-            rows["12"]["fields"]["自动关闭时间"] = 1794537000000
+            archive_column = "工单自动关闭时间（周期：无更新6个月）"
+            rows["12"]["fields"][archive_column] = 1794537000000
             writes = []
 
             def feishu(target, method, resource, *, params=None, data=None):
@@ -37,6 +39,7 @@ class TicketFieldBackfillTests(TestCase):
                 if resource == "/records/search":
                     conditions = data["filter"]["conditions"]
                     if conditions[0]["operator"] == "isEmpty":
+                        self.assertEqual(conditions[0]["field_name"], archive_column)
                         self.assertEqual(params, {"page_size": 5, "page_token": "previous"})
                         return {"items": snapshots, "has_more": True, "page_token": "following"}
                     return {"items": [deepcopy(rows[rule["value"][0]]) for rule in conditions], "has_more": False}
@@ -74,7 +77,58 @@ class TicketFieldBackfillTests(TestCase):
             self.assertEqual((retry["next_cursor"], retry["updated"], retry["unchanged"]), ("previous", 0, 1))
             for key, row in rows.items():
                 cells = row["fields"]
-                self.assertEqual(cells["技术回复"], "保留反馈")
+                self.assertEqual(cells["回复内容"], "保留反馈")
                 self.assertEqual(cells["状态"], "处理中")
                 if key != "10":
                     self.assertNotIn(summary, cells)
+
+    def test_attachment_backfill_only_updates_follow_up_attachment_cell(self):
+        with TemporaryDirectory() as directory:
+            state = Path(directory)
+            cfg = Settings(runtime=RuntimeConfig(db_path=str(state / "test.db"), state_dir=directory, mock=False))
+            report = sync.Target("lark-cli", "baseFixture", "tblReports",
+                                 "https://example.test/base/baseFixture?table=tblReports", {}, state / "write.lock")
+            link = tickets.ticket_guest.url_for(cfg, "10")
+            other_link = tickets.ticket_guest.url_for(cfg, "11")
+            follow_up = {"text": "查看跟进附件", "link": link + "#ticket-followup-attachments"}
+            row = {"record_id": "recFixture10", "fields": {
+                "网易七鱼工单ID": "10", "点击查看详情": {"text": "查看工单", "link": link},
+                "跟进附件": {"text": "旧链接", "link": "https://qiyu.fanwulink.cn/#tickets?id=10"},
+                "工单往来记录": "既有记录", "回复内容": "保留反馈",
+            }}
+            other = {"record_id": "recFixture11", "fields": {
+                "网易七鱼工单ID": "11", "点击查看详情": {"text": "查看工单", "link": other_link},
+                "跟进附件": {"text": "人工维护的链接", "link": "https://example.test/attachment"},
+            }}
+
+            def feishu(target, method, resource, *, params=None, data=None):
+                self.assertEqual(target.table_id, "tblTickets")
+                if resource == "/records/search":
+                    conditions = data["filter"]["conditions"]
+                    if conditions[0]["operator"] == "isEmpty":
+                        self.assertIn("跟进附件", data["field_names"])
+                        return {"items": [deepcopy(row), deepcopy(other)], "has_more": False}
+                    return {"items": [deepcopy(row)], "has_more": False}
+                self.assertEqual(resource, "/records/batch_update")
+                self.assertEqual(data["records"], [{"record_id": "recFixture10", "fields": {"跟进附件": follow_up}}])
+                row["fields"].update(data["records"][0]["fields"])
+                return {"records": [{"record_id": "recFixture10"}]}
+
+            with (patch.object(tickets, "settings", return_value=cfg),
+                  patch.object(tickets, "maintenance", return_value=False),
+                  patch.object(tickets.support, "target_table", return_value=report),
+                  patch.object(tickets.top, "_find_table", return_value="tblTickets"),
+                  patch.object(backfill.TicketClient, "detail") as fetch_detail,
+                  patch.object(backfill.TicketClient, "history", return_value=[{}]) as history,
+                  patch.object(backfill.ticket_history, "project", return_value={
+                      "跟进附件": follow_up, "工单往来记录": "投影不用于回填",
+                  }) as project,
+                  patch.object(sync, "_call", side_effect=feishu)):
+                result = backfill.run(state, attachments_only=True)
+            self.assertEqual(result["updated"], 1)
+            self.assertEqual(result["skipped"], 1)
+            self.assertEqual(row["fields"]["回复内容"], "保留反馈")
+            self.assertEqual(row["fields"]["工单往来记录"], "既有记录")
+            fetch_detail.assert_not_called()
+            history.assert_called_once_with(10)
+            project.assert_called_once_with(cfg, "10", [{}], submitter_id=None)

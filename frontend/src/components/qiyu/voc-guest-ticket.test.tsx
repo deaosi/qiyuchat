@@ -67,3 +67,30 @@ it('shows the ticket-scoped download, technical result, and conversation without
     window.history.replaceState(null, '', previousPath)
   }
 })
+
+it('focuses the follow-up attachment heading and displays only attachments for the current link', () => {
+  const previousUrl = window.location.pathname + window.location.hash
+  const token = 'a'.repeat(43)
+  const path = `/guest/ticket/${token}`
+  const fileUrl = `${path}/attachments/${'0'.repeat(64)}`
+  window.history.replaceState(null, '', `${path}#ticket-followup-attachments`)
+  try {
+    render(<VocGuestTicket kind="ticket" ticket={{
+      title: '打印故障', status: '处理中', priority: '一般', description: '',
+      created_at: null, updated_at: null,
+    }} followup_attachments={[{
+      time: 1794537200000, images: [], attachments: [
+        { name: '跟进附件.pdf', url: fileUrl },
+        { name: '其他工单.pdf', url: fileUrl.replace(token, 'b'.repeat(43)) },
+      ],
+    }]} />)
+    const heading = screen.getByRole('heading', { name: '跟进附件' })
+    expect(document.activeElement).toBe(heading)
+    const section = screen.getByRole('region', { name: '跟进附件' })
+    expect(within(section).getByRole('link', { name: '跟进附件.pdf' }).getAttribute('href')).toBe(fileUrl)
+    expect(within(section).queryByRole('link', { name: '其他工单.pdf' })).toBeNull()
+  } finally {
+    cleanup()
+    window.history.replaceState(null, '', previousUrl)
+  }
+})
