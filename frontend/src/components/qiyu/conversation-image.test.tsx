@@ -19,24 +19,36 @@ afterEach(() => {
   else Reflect.deleteProperty(navigator, 'clipboard')
 })
 
-it('keeps the original image eligible for its native context menu and supports uncapped 1:1 scrolling', () => {
+it('keeps the original available in the context menu and supports continuous zoom and fit reset', () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(500)
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(400)
   const preview = openPreview()
+  const viewport = preview.getByRole('region', { name: '会话图片查看区' })
+  const zoom = preview.getByRole('slider', { name: '缩放比例' }) as HTMLInputElement
+  const fit = preview.getByRole('button', { name: '适应窗口' }) as HTMLButtonElement
+  Object.defineProperty(viewport, 'scrollTo', { value: vi.fn() })
   const image = preview.getByRole('img', { name: '会话原图' }) as HTMLImageElement
   Object.defineProperties(image, { naturalWidth: { value: 4000 }, naturalHeight: { value: 8000 } })
   fireEvent.load(image)
   expect(image.src).toBe(url)
   expect(fireEvent.contextMenu(image)).toBe(true)
   expect(preview.getByText('4000 × 8000')).toBeTruthy()
-  expect(preview.getByRole('region', { name: '完整图片' })).toBeTruthy()
-  expect(image.style.width).toBe('')
+  const fitWidth = parseFloat(image.style.width)
+  expect(fitWidth).toBeGreaterThan(0)
+  expect(fitWidth).toBeLessThan(image.naturalWidth)
+  expect(fit.disabled).toBe(true)
 
-  fireEvent.click(preview.getByRole('button', { name: '原尺寸' }))
-  expect(preview.getByRole('region', { name: '原尺寸图片，可滚动查看' }).classList.contains('overflow-auto')).toBe(true)
-  expect(image.style.width).toBe('4000px')
-  expect(image.style.height).toBe('8000px')
+  fireEvent.change(zoom, { target: { value: '225' } })
+  const zoomedWidth = parseFloat(image.style.width)
+  expect(zoomedWidth).toBeGreaterThan(fitWidth)
+  expect(zoom.valueAsNumber).toBe(225)
+  fireEvent.wheel(viewport, { deltaY: -100 })
+  expect(parseFloat(image.style.width)).toBeGreaterThan(zoomedWidth)
 
-  fireEvent.click(preview.getByRole('button', { name: '适应窗口' }))
-  expect(image.style.width).toBe('')
+  fireEvent.click(fit)
+  expect(parseFloat(image.style.width)).toBe(fitWidth)
+  expect(zoom.valueAsNumber).toBe(100)
+  expect(fit.disabled).toBe(true)
 })
 
 it('copies a PNG representation and downloads the same original file bytes with one request', async () => {

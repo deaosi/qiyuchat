@@ -11,7 +11,7 @@ import { useApi } from '@/hooks/use-api'
 import { normalizePair } from '@/lib/api'
 import { LoadingState, RefreshDataButton } from './loading-state'
 import { QADetail } from './qa-detail'
-import { TicketImagePreview } from './ticket-image-preview'
+import { ZoomableImage } from './zoomable-image'
 
 const pageSize = 20
 const numberFormat = new Intl.NumberFormat('zh-CN')
@@ -71,7 +71,11 @@ function TicketAttachments({ images = [], attachments = [] }: { images?: TicketA
         <a href={file.url} download>{file.name || '下载附件'}</a>
       </Button>
     </li>)}</ul>}
-    {images.map(image => <TicketImagePreview key={image.url} {...image} />)}
+    {images.map(({ url, name }) => {
+      const label = name || '工单截图'
+      return <ZoomableImage key={url} url={url} title="工单图片预览" alt={label} viewportLabel="工单图片查看区"
+        thumbnailAlt={label} triggerLabel={`查看图片：${label}`} imageClassName="rounded-md border bg-background" />
+    })}
   </div>
 }
 

@@ -1,10 +1,8 @@
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { cn } from '@/lib/utils'
+import { ZoomableImage } from './zoomable-image'
 
 type ImageFile = { blob: Blob; filename: string }
-type ImageSize = { width: number; height: number }
 type ImageFileReader = (url: string) => Promise<ImageFile>
 type ImageProps = { url: string; readFile?: ImageFileReader }
 
@@ -26,16 +24,12 @@ async function clipboardPng(blob: Blob): Promise<Blob> {
   }
 }
 
-function ImagePreview({ url, readFile }: ImageProps) {
-  const [size, setSize] = useState<ImageSize | null>(null)
-  const [originalSize, setOriginalSize] = useState(false)
-  const [failed, setFailed] = useState(false)
+function ImageFileActions({ url, readFile }: { url: string; readFile: ImageFileReader }) {
   const [pending, setPending] = useState<'copy' | 'download' | null>(null)
   const [feedback, setFeedback] = useState('')
   const file = useRef<Promise<ImageFile> | null>(null)
 
   function loadFile() {
-    if (!readFile) throw new Error('图片文件暂不可读取')
     file.current ??= readFile(url).catch(error => {
       file.current = null
       throw error
@@ -86,68 +80,21 @@ function ImagePreview({ url, readFile }: ImageProps) {
     }
   }
 
-  const unavailable = readFile ? <p role="status" className="m-auto text-sm text-muted-foreground">图片暂不可查看</p>
-    : <div className="m-auto space-y-2 text-center text-sm text-muted-foreground">
-      <p role="status">图片暂不可查看</p>
-      <Button variant="outline" size="sm" onClick={() => { setSize(null); setFailed(false) }}>重试加载图片</Button>
-    </div>
-
   return <>
-    <div className="border-b px-3 py-2.5 sm:px-4">
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-        <div className="flex items-center gap-3">
-          <DialogTitle className="text-sm">会话图片预览</DialogTitle>
-          {size && <span className="text-xs tabular-nums text-muted-foreground">{size.width} × {size.height}</span>}
-          <DialogDescription className="hidden text-xs sm:block">右键可复制或另存</DialogDescription>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" disabled={!size || failed} onClick={() => setOriginalSize(value => !value)}>{originalSize ? '适应窗口' : '原尺寸'}</Button>
-          {readFile ? <>
-            <Button variant="outline" size="sm" disabled={pending !== null} onClick={() => void copy()}>复制图片</Button>
-            <Button variant="outline" size="sm" disabled={pending !== null} onClick={() => void download()}>下载原图</Button>
-          </> : size && !failed && <Button asChild variant="outline" size="sm">
-            <a href={url} download referrerPolicy="no-referrer">下载原图</a>
-          </Button>}
-          <DialogClose asChild><Button variant="ghost" size="sm" aria-label="关闭图片预览">关闭</Button></DialogClose>
-        </div>
-      </div>
-      <p role="status" className="mt-1 text-xs leading-5 text-muted-foreground empty:mt-0">{feedback}</p>
-    </div>
-    <div role="region" aria-label={originalSize ? '原尺寸图片，可滚动查看' : '完整图片'} tabIndex={originalSize ? 0 : undefined}
-      className={cn('flex min-h-0 min-w-0 bg-muted/50', originalSize ? 'overflow-auto' : 'overflow-hidden p-3')}>
-      {failed ? unavailable :
-        <img src={url} alt="会话原图" decoding="async" referrerPolicy="no-referrer"
-          onLoad={event => {
-            const { naturalWidth: width, naturalHeight: height } = event.currentTarget
-            if (width && height) setSize({ width, height })
-          }} onError={() => setFailed(true)}
-          className={cn('m-auto block h-auto w-auto shrink-0', originalSize ? 'max-h-none max-w-none' : 'max-h-full max-w-full object-contain')}
-          style={originalSize && size ? { width: size.width, height: size.height } : undefined} />}
-    </div>
+    <Button type="button" variant="outline" size="sm" disabled={pending !== null} onClick={() => void copy()}>复制图片</Button>
+    <Button type="button" variant="outline" size="sm" disabled={pending !== null} onClick={() => void download()}>下载原图</Button>
+    <p role="status" className="text-xs leading-5 text-muted-foreground empty:sr-only">{feedback}</p>
   </>
 }
 
 export function ConversationImage({ url, readFile }: ImageProps) {
-  const [failed, setFailed] = useState(false)
-  if (failed) {
-    if (readFile) return <p className="text-xs opacity-75">图片暂不可查看</p>
-    return <div className="flex flex-wrap items-center gap-x-2">
-      <p className="text-xs opacity-75">图片暂不可查看</p>
-      <Button variant="ghost" size="xs" onClick={() => setFailed(false)}>重试加载图片</Button>
-    </div>
-  }
-
-  return <Dialog>
-    <DialogTrigger asChild>
-      <button type="button" aria-label="放大会话图片" className="block w-fit max-w-[min(100%,14rem)] cursor-zoom-in overflow-hidden rounded-md focus-visible:outline-2 focus-visible:outline-offset-2">
-        <img src={url} alt="会话图片" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)}
-          className="block h-auto max-h-36 max-w-full object-contain" />
-      </button>
-    </DialogTrigger>
-    <DialogContent showCloseButton={false} className="h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-none grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:max-w-none">
-      <ImagePreview url={url} readFile={readFile} />
-    </DialogContent>
-  </Dialog>
+  return <ZoomableImage url={url} title="会话图片预览" alt="会话原图" viewportLabel="会话图片查看区"
+    thumbnailAlt="会话图片" triggerLabel="放大会话图片" thumbnailClassName="w-fit max-w-[min(100%,14rem)]"
+    imageClassName="max-h-36" showDimensions actions={loaded => readFile
+      ? <ImageFileActions url={url} readFile={readFile} />
+      : loaded && <Button asChild variant="outline" size="sm">
+        <a href={url} download referrerPolicy="no-referrer">下载原图</a>
+      </Button>} />
 }
 
 export function ConversationMessageBody({ text, imageUrls, readFile }: {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
@@ -10,9 +10,16 @@ const padding = 12
 type ImageSize = { width: number; height: number }
 type ZoomPoint = { clientX: number; clientY: number; imageX: number; imageY: number }
 type DragStart = { id: number; clientX: number; clientY: number; left: number; top: number }
-type TicketImage = { url: string; name: string }
+type PreviewProps = {
+  url: string
+  title: string
+  alt: string
+  viewportLabel: string
+  showDimensions?: boolean
+  actions?: (loaded: boolean) => ReactNode
+}
 
-function ImageViewport({ url, name }: TicketImage) {
+function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions }: PreviewProps) {
   const viewport = useRef<HTMLDivElement>(null)
   const image = useRef<HTMLImageElement>(null)
   const zoomPoint = useRef<ZoomPoint | null>(null)
@@ -108,13 +115,19 @@ function ImageViewport({ url, name }: TicketImage) {
 
   function fitImage() {
     zoomAt(100)
-    viewport.current?.scrollTo(0, 0)
+    if (viewport.current) {
+      viewport.current.scrollLeft = 0
+      viewport.current.scrollTop = 0
+    }
   }
 
   return <>
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-3 py-2 sm:px-4">
-      <DialogTitle className="mr-auto shrink-0 text-sm">工单图片预览</DialogTitle>
-      <DialogDescription className="sr-only">滚轮或滑块缩放，放大后可以拖动查看。</DialogDescription>
+      <div className="mr-auto flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1">
+        <DialogTitle className="text-sm">{title}</DialogTitle>
+        {showDimensions && imageSize && <span className="text-xs tabular-nums text-muted-foreground">{imageSize.width} × {imageSize.height}</span>}
+      </div>
+      <DialogDescription className="sr-only">滚轮或滑块缩放，放大后可以拖动查看。右键可复制或另存。</DialogDescription>
       <label className="flex items-center gap-2 text-xs">
         <span className="sr-only">缩放比例</span>
         <input type="range" min={minimumZoom} max={Math.max(maximumZoom, zoom)} value={zoom} disabled={!fit || failed}
@@ -123,9 +136,10 @@ function ImageViewport({ url, name }: TicketImage) {
         <span className="w-11 text-right tabular-nums" aria-hidden="true">{zoom}%</span>
       </label>
       <Button type="button" variant="outline" size="sm" disabled={!fit || failed || zoom === 100} onClick={fitImage}>适应窗口</Button>
+      {actions?.(Boolean(imageSize) && !failed)}
       <DialogClose asChild><Button type="button" variant="ghost" size="sm" aria-label="关闭图片预览">关闭</Button></DialogClose>
     </div>
-    <div ref={viewport} role="region" aria-label="工单图片查看区" tabIndex={0}
+    <div ref={viewport} role="region" aria-label={viewportLabel} tabIndex={0}
       className={cn('min-h-0 min-w-0 overflow-auto bg-muted/50 outline-none [overflow-anchor:none] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
         zoom > 100 && 'cursor-grab active:cursor-grabbing')}
       onPointerDown={startDrag} onPointerMove={moveDrag} onLostPointerCapture={() => { drag.current = null }}>
@@ -133,7 +147,7 @@ function ImageViewport({ url, name }: TicketImage) {
         {failed ? <div className="space-y-2 text-center">
           <p role="status" className="text-sm text-muted-foreground">图片暂不可查看</p>
           <Button type="button" variant="outline" size="sm" onClick={() => { setFailed(false); setAttempt(value => value + 1) }}>重试加载图片</Button>
-        </div> : <img key={attempt} ref={image} src={url} alt={name} draggable={false} decoding="async" referrerPolicy="no-referrer"
+        </div> : <img key={attempt} ref={image} src={url} alt={alt} draggable={false} decoding="async" referrerPolicy="no-referrer"
           onLoad={event => {
             const { naturalWidth: width, naturalHeight: height } = event.currentTarget
             if (width && height) setImageSize({ width, height })
@@ -147,21 +161,29 @@ function ImageViewport({ url, name }: TicketImage) {
   </>
 }
 
-export function TicketImagePreview({ url, name }: TicketImage) {
+export function ZoomableImage({ thumbnailAlt, triggerLabel, thumbnailClassName, imageClassName, ...preview }: PreviewProps & {
+  thumbnailAlt: string
+  triggerLabel: string
+  thumbnailClassName?: string
+  imageClassName?: string
+}) {
   const [failed, setFailed] = useState(false)
-  const label = name || '工单截图'
-  return <Dialog onOpenChange={open => { if (open && failed) setFailed(false) }}>
+  if (failed) return <div className="flex flex-wrap items-center gap-x-2">
+    <p className="text-xs text-muted-foreground">图片暂不可查看</p>
+    <Button type="button" variant="ghost" size="xs" onClick={() => setFailed(false)}>重试加载图片</Button>
+  </div>
+
+  return <Dialog>
     <DialogTrigger asChild>
-      <button type="button" aria-label={`查看图片：${label}`}
-        className="block max-w-full cursor-zoom-in overflow-hidden rounded-md text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
-        {failed ? <span className="text-sm text-muted-foreground">图片暂不可查看，点击重试</span> :
-          <img src={url} alt={label} loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)}
-            className="block h-auto max-w-full rounded-md border bg-background object-contain" />}
+      <button type="button" aria-label={triggerLabel}
+        className={cn('block max-w-full cursor-zoom-in overflow-hidden rounded-md text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring', thumbnailClassName)}>
+        <img src={preview.url} alt={thumbnailAlt} loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)}
+          className={cn('block h-auto max-w-full object-contain', imageClassName)} />
       </button>
     </DialogTrigger>
     <DialogContent showCloseButton={false}
       className="h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-none grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:max-w-none">
-      <ImageViewport url={url} name={label} />
+      <ImageViewport {...preview} />
     </DialogContent>
   </Dialog>
 }
