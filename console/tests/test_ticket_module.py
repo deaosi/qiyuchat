@@ -277,3 +277,39 @@ class TicketModuleTests(LocalFixture):
             self.assertEqual(self.fetch_raw(asset + "?url=https://example.org/evil.png", admin=False)[0], 404)
             self.assertEqual(self.fetch_raw(asset.replace(path, other), admin=False)[0], 404)
             media.assert_called_once_with(shot, image_only=True, ticket_attachment=True)
+
+    def test_guest_ticket_keeps_readable_overlapping_public_values(self):
+        detail = {
+            "id": 581010,
+            "title": "测试1",
+            "userName": "实际访客名称",
+            "holderName": "否",
+            "content": ("实际访客名称反馈测试1失败 联系人 user-private@example.org 13812345678 "
+                        "token=private-token Authorization: Bearer private.bearer.value"),
+            "custom": [
+                {"name": "店铺名", "value": "测试1"},
+                {"name": "客户群名称", "value": "测试1"},
+                {"name": "后台负责人", "value": "测试1"},
+                {"name": "商家名称", "value": "v1.2.3"},
+                {"name": "平台&版本", "value": "测试1"},
+                {"name": "软件版本", "value": "v1.2.3"},
+                {"name": "是否已点击报告问题", "value": "否"},
+                {"name": "问题需求", "value": "测试1失败"},
+            ],
+        }
+        payload, _ = ticket_guest._project(detail, "A" * 43)
+        guest = payload["ticket"]
+        self.assertEqual(guest["title"], "测试1")
+        self.assertIn("反馈测试1失败", guest["description"])
+        self.assertEqual({field["label"]: field["value"] for field in guest["fields"]}, {
+            "平台&版本": "测试1", "软件版本": "v1.2.3",
+            "是否已点击报告问题": "否", "问题需求": "测试1失败",
+        })
+        for private in ("实际访客名称", "user-private@example.org", "13812345678",
+                        "private-token", "private.bearer.value", "581010"):
+            self.assertNotIn(private, json.dumps(payload, ensure_ascii=False))
+
+    def test_guest_ticket_without_identity_does_not_redact_empty_matches(self):
+        payload, _ = ticket_guest._project({"title": "打印故障", "content": "请检查打印设置"}, "A" * 43)
+        self.assertEqual(payload["ticket"]["title"], "打印故障")
+        self.assertEqual(payload["ticket"]["description"], "请检查打印设置")

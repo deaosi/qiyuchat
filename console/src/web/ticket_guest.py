@@ -25,6 +25,10 @@ IMAGE_PATTERN = r"[a-f0-9]{64}"
 _TOKEN = re.compile(TOKEN_PATTERN)
 _IMAGE = re.compile(IMAGE_PATTERN)
 _FIELDS = {"平台&版本", "平台", "软件版本", "是否已点击报告问题", "问题需求", "附件/截图", "附件／截图"}
+_TEST_PLACEHOLDER = re.compile(r"(?:测试|test|demo|sample)(?:[-_ ]?[0-9]{1,3})?", re.I)
+_SOFTWARE_VERSION = re.compile(r"[vV]?\d{1,4}(?:\.\d{1,4}){1,3}")
+_REPORT_VALUES = {"是", "否", "已点击", "未点击", "yes", "no", "true", "false"}
+_BEARER_TOKEN = re.compile(r"\b(Bearer)[ \t]+[A-Za-z0-9_./+~=-]{8,}", re.I)
 _MAX_IMAGES = 16
 _CACHE_SECONDS = 30
 _CACHE_LIMIT = 128
@@ -85,8 +89,9 @@ def matches(cfg: Settings, ticket_id: str, url: str) -> bool:
     return number is not None and str(number) == ticket_id
 
 
-def _private_values(raw: dict, custom: list[dict]) -> re.Pattern[str]:
-    values = {str(raw.get("id", ""))}
+def _private_values(raw: dict, custom: list[dict]) -> re.Pattern[str] | None:
+    ticket_id = _id(raw.get("id"))
+    values = {str(ticket_id)} if ticket_id is not None else set()
     for key in ("userName", "staffName", "holderName", "creatorName", "applyStaffName", "groupName", "userId", "userMobile", "userEmail"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
@@ -95,15 +100,21 @@ def _private_values(raw: dict, custom: list[dict]) -> re.Pattern[str]:
         name = field.get("name")
         if isinstance(name, str) and any(part in name for part in ("客户群", "负责人", "店铺名", "商家名称", "联系")):
             value, _ = tickets._field_value(field.get("value"), 180)
-            if value:
+            if value and not _TEST_PLACEHOLDER.fullmatch(value):
                 values.add(value)
     pieces = []
-    for value in sorted(filter(None, values), key=lambda value: (-len(value), value)):
+    for value in sorted(values, key=lambda value: (-len(value), value)):
         pattern = re.escape(value)
         if value.isascii() and value.isalnum():
             pattern = r"(?<![a-z0-9])" + pattern + r"(?![a-z0-9])"
         pieces.append(pattern)
-    return re.compile("|".join(pieces), re.I)
+    return re.compile("|".join(pieces), re.I) if pieces else None
+
+
+def _guest_text(value: object, names: re.Pattern[str] | None) -> str:
+    if isinstance(value, str):
+        value = _BEARER_TOKEN.sub(r"\1 [已脱敏]", value)
+    return guest_evidence._clean_projection(value, names)
 
 
 def _project(raw: dict, token: str) -> tuple[dict, dict[str, str]]:
@@ -132,21 +143,23 @@ def _project(raw: dict, token: str) -> tuple[dict, dict[str, str]]:
         if not isinstance(label, str) or label not in _FIELDS:
             continue
         value, candidates = tickets._field_value(field.get("value"), 4000)
-        value = guest_evidence._clean_projection(value, names)
+        typed_value = ((label == "是否已点击报告问题" and value.casefold() in _REPORT_VALUES)
+                       or (label == "软件版本" and _SOFTWARE_VERSION.fullmatch(value) is not None))
+        value = _guest_text(value, None if typed_value else names)
         images = snapshots(candidates)
         if value or images:
             fields.append({"label": label, "value": value, **({"images": images} if images else {})})
 
     text, embedded = tickets._field_value(raw.get("content"), 8000, rich=raw.get("isRichText") in (True, 1, "1"))
     title, status, priority, created, updated = (
-        guest_evidence._clean_projection(raw.get("title"), names)[:300],
+        _guest_text(raw.get("title"), names)[:300],
         tickets.TICKET_STATUSES.get(_id(raw.get("status")), ""),
         tickets.TICKET_PRIORITIES.get(_id(raw.get("priority")), ""),
         tickets._millis(raw.get("createTime")),
         tickets._millis(raw.get("modifyTime")),
     )
     data = {"title": title or "工单详情", "status": status, "priority": priority, "created_at": created,
-            "updated_at": updated, "description": guest_evidence._clean_projection(text, names),
+            "updated_at": updated, "description": _guest_text(text, names),
             "fields": fields, "images": snapshots(embedded)}
     return {"kind": "ticket", "ticket": data}, media
 

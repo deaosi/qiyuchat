@@ -40,7 +40,8 @@ class TestTicketDelta(TestCase):
         for last_page in ((3, [{"id": 2}]), (2, []), (2, [{"id": "1"}]),
                           (2, [{"id": 2}, {"id": 3}])):
             with (self.subTest(last_page=last_page),
-                  patch.object(ticket_delta.TicketClient, "search", side_effect=[(2, [{"id": 1}]), last_page]),
+                  patch.object(ticket_delta.TicketClient, "search", side_effect=[(2, [{"id": 1}]), (0, []),
+                                                                                last_page]),
                   patch.object(ticket_delta, "_linked_sessions") as linked):
                 with self.assertRaises(TicketError):
                     ticket_delta.read(Settings(), self.start, self.end)
@@ -52,3 +53,38 @@ class TestTicketDelta(TestCase):
             self.assertEqual(search.call_count, 2)
         with self.assertRaises(ValueError):
             ticket_delta.read(Settings(), self.end, self.start)
+
+    def test_slice_reduces_both_branches_before_paginating_an_oversized_window(self):
+        midpoint = (self.start + self.end) // 2
+        requests = []
+
+        def search(*, offset, limit, bounds):
+            requests.append((offset, bounds))
+            if "start" in bounds:
+                return 0, []
+            total = 201 if bounds["opEnd"] == self.end else 200
+            return total, [{"id": offset + index + 1} for index in range(min(total - offset, limit))]
+
+        with patch.object(ticket_delta.TicketClient, "search", side_effect=search):
+            rows, coverage = ticket_delta.read_slice(Settings(), self.start, self.end)
+
+        self.assertEqual(len(rows), 200)
+        self.assertEqual(coverage["created_period"], [self.start, midpoint])
+        self.assertEqual(coverage["updated_period"], [self.start, midpoint])
+        self.assertEqual(requests[:2], [(0, {"start": self.start, "end": self.end}),
+                                       (0, {"opStart": self.start, "opEnd": self.end})])
+        self.assertEqual([offset for offset, bounds in requests[2:] if "opStart" in bounds], [0, 50, 100, 150])
+
+    def test_slice_never_discards_tickets_that_share_one_millisecond(self):
+        def search(*, offset, limit, bounds):
+            if "opStart" in bounds:
+                return 0, []
+            self.assertEqual(bounds["start"], self.start)
+            total = 201
+            return total, [{"id": offset + index + 1} for index in range(min(total - offset, limit))]
+
+        with patch.object(ticket_delta.TicketClient, "search", side_effect=search):
+            rows, coverage = ticket_delta.read_slice(Settings(), self.start, self.start + 1)
+
+        self.assertEqual(coverage["created_period"], [self.start, self.start])
+        self.assertEqual(len(rows), 201)

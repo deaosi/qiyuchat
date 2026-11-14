@@ -43,3 +43,33 @@ class TestTicketReplyDelta(unittest.TestCase):
             with self.subTest(case=case), patch.object(sync, "_call", side_effect=pages):
                 with self.assertRaises(sync.SyncError):
                     list(delta.read(object(), since_ms=4000, until_ms=5000, field_names=["技术回复"]))
+
+    def test_batch_limit_preserves_cutoff_cohort_on_resume(self):
+        pages = [{"items": [_row(number, 4000)], "has_more": True, "page_token": f"page{number}", "total": 6}
+                 for number in range(1, 5)]
+        pages.append({"items": [_row(5, 4000), _row(6, 3000)], "has_more": False, "total": 6})
+        options = {"since_ms": 4000, "until_ms": 5000, "field_names": ["技术回复"]}
+        with patch.object(sync, "_call", side_effect=pages) as call:
+            rows, cursor = delta.read_batch(object(), **options)
+            self.assertEqual(call.call_count, 4)
+            self.assertEqual([row["record_id"] for row in rows], [f"recTest{number}" for number in range(1, 5)])
+            rows, cursor = delta.read_batch(object(), **options, cursor=cursor)
+            self.assertEqual(call.call_args.kwargs["params"]["page_token"], "page4")
+        self.assertEqual([row["record_id"] for row in rows], ["recTest5"])
+        self.assertIsNone(cursor)
+
+    def test_batch_restarts_page_one_when_saved_cursor_is_invalidated(self):
+        options = {"since_ms": 4000, "until_ms": 5000, "field_names": ["技术回复"]}
+        cursor = {"bounds": [4000, 5000], "token": "saved", "stamp": 4000, "ids": ["recTest1"], "total": 10}
+        invalid = [sync.SyncError("cursor expired"),
+                   {"items": [_row(1, 4000)], "has_more": False, "total": 10},
+                   {"items": [_row(2, 4000)], "has_more": False, "total": 8}]
+        for response in invalid:
+            with self.subTest(response=response):
+                retry = {"items": [_row(3, 5000)], "has_more": False, "total": 1}
+                with patch.object(sync, "_call", side_effect=[response, retry]) as call:
+                    rows, next_cursor = delta.read_batch(object(), **options, cursor=cursor)
+                    self.assertEqual(call.call_args_list[0].kwargs["params"]["page_token"], "saved")
+                    self.assertNotIn("page_token", call.call_args_list[1].kwargs["params"])
+                self.assertEqual([row["record_id"] for row in rows], ["recTest3"])
+                self.assertIsNone(next_cursor)

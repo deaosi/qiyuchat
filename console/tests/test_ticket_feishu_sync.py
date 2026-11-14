@@ -205,20 +205,21 @@ class TestTicketFeishuSync(unittest.TestCase):
                                          "guest_links_migrated": True})
         before = now * 1000 - 60_000
         original = {"table_id": self.target.table_id, "schema_at": before, "qiyu_until": before,
+                    "schema_version": tickets._SCHEMA_VERSION,
                     "feishu_until": before - 15_000, "reconciled_at": before, "daily_at": before,
                     "feedback_retry_at": before, "daily_feedback_at": before}
         support._write_state(cursor_path, original)
-        coverage = {"created_scope": "qiyu", "updated_scope": "qiyu"}
+        coverage = {"created_scope": "qiyu", "updated_scope": "qiyu", "created_period": [before, now * 1000]}
         with (patch.object(tickets, "settings", return_value=self.cfg),
               patch.object(tickets.support, "target_table", return_value=self.target),
               patch.object(tickets, "time", return_value=now),
               patch.object(tickets, "_table") as table,
-              patch.object(tickets, "_import_feedback", side_effect=sync.SyncError("network issue")) as receive,
+              patch.object(tickets, "_feedback_work", side_effect=sync.SyncError("network issue")) as receive,
               patch.object(tickets, "_incremental_projection", return_value=({}, coverage, {})) as project):
             result = tickets.run(state, incremental=True)
         self.assertEqual(result["status"], "partial")
         receive.assert_called_once()
-        self.assertEqual(receive.call_args.kwargs["window"], (before - 75_000, now * 1000 - 15_000))
+        self.assertEqual(receive.call_args.args[-1], (before - 75_000, now * 1000 - 15_000))
         project.assert_called_once_with(self.cfg, before - 60_000, now * 1000)
         self.assertEqual(support._read_state(cursor_path),
                          {**original, "qiyu_until": now * 1000})
@@ -236,3 +237,45 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertEqual(result["checked"], 1)
         ingest.assert_not_called()
         self.assertFalse(self.writes)
+
+    def test_queued_export_never_overwrites_a_closed_or_newer_row(self):
+        items = [{"id": "42", "updated_at": 100}, {"id": "43", "updated_at": 100}, {"id": "44", "updated_at": 100}]
+        desired = tickets._projection(self.cfg, items)
+        closed = {**desired["42"], "状态": "已关闭", "自动关闭时间": 200}
+        self.rows["42"] = {"record_id": "recFixture42", "fields": closed}
+        self.rows["43"] = {"record_id": "recFixture43", "fields": {**desired["43"], "更新时间": 101}}
+        with patch.object(sync, "_call", side_effect=self.fake_api):
+            selected, _ = tickets._current_export(self.target, desired)
+        self.assertEqual(set(selected), {"44"})
+
+    def test_auto_close_only_changes_status_and_close_time(self):
+        archive = tickets.ticket_archive
+        now = 1_795_000_000_000
+        cutoff = archive.six_month_cutoff(now)
+        stamps = (cutoff - 1, cutoff, cutoff - 1)
+        seen = []
+        for key, stamp in zip(("42", "43", "44"), stamps):
+            fields = tickets._projection(self.cfg, [{"id": key, "created_at": cutoff - 10_000}])[key]
+            fields.update({"状态": "处理中", tickets.ticket_reply_delta.TIME_FIELD: stamp})
+            self.rows[key] = {"record_id": "recFixture" + key, "fields": fields, "last_modified_time": stamp}
+        self.rows["44"]["fields"]["技术回复"] = "待回传"
+        original = deepcopy(self.rows)
+
+        def api(target, method, resource, *, params=None, data=None):
+            if resource == "/records/search" and data.get("automatic_fields"):
+                seen.append(params["page_size"])
+                return {"items": deepcopy(list(self.rows.values())), "has_more": False}
+            return self.fake_api(target, method, resource, params=params, data=data)
+
+        with patch.object(sync, "_call", side_effect=api):
+            result = archive.archive(self.target, now_ms=now, key_field="工单ID", status_field="状态",
+                                     created_field="创建时间", updated_field="更新时间", source_field="语海详情",
+                                     feedback_fields=("技术回复",), writeback_field="回传状态",
+                                     is_pending=lambda fields: bool(fields.get("技术回复")),
+                                     eligible=lambda key, fields: True)
+        self.assertEqual(seen, [5])
+        self.assertEqual(result["closed"], 1)
+        self.assertEqual(self.rows["42"]["fields"], {**original["42"]["fields"], "状态": "已关闭",
+                                                   "自动关闭时间": now})
+        self.assertEqual(self.rows["43"], original["43"])
+        self.assertEqual(self.rows["44"], original["44"])

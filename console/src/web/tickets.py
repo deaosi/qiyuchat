@@ -16,7 +16,6 @@ from typing import Any
 from ..clean.rules import mask_pii
 from ..config import Settings
 from ..qiyu.ticket import PAGE_SIZE, TicketClient, TicketError, _id
-from ..voc_feishu_content import _public_text
 from . import ticket_media
 
 
@@ -178,6 +177,8 @@ def _linked_sessions(cfg: Settings, ticket_ids: set[int]) -> dict[int, list[dict
 
 
 def submitter_names(history: list[dict], staff_id: int | None) -> set[str]:
+    from ..voc_feishu_content import _public_text
+
     if staff_id is None:
         return set()
     names = {_public_text(event.get("operator"), None)[:120] for event in history
@@ -200,6 +201,8 @@ def _submitter_cache() -> dict:
 
 
 def _cached_submitter(cache: dict, ticket_id: int, staff_id: int | None) -> str:
+    from ..voc_feishu_content import _public_text
+
     entry = cache.get(str(ticket_id))
     if staff_id is None or not isinstance(entry, dict) or _id(entry.get("staff_id")) != staff_id:
         return ""

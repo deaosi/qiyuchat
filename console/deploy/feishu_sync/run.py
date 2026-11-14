@@ -689,7 +689,7 @@ def main():
         if args.tickets_only:
             from deploy.feishu_sync import tickets
 
-            result = tickets.run(state_dir, incremental=args.ticket_incremental)
+            result = tickets.run(state_dir, incremental=True)
         elif args.links_only:
             result = _links_only(state_dir)
         else:

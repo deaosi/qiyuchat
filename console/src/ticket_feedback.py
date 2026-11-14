@@ -156,7 +156,19 @@ def get(cfg: Settings, ticket_id: str) -> dict | None:
     return dict(row) if row is not None else None
 
 
-def retry_records(cfg: Settings) -> dict[str, str]:
+def confirmed(cfg: Settings, ticket_id: str, feedback: dict) -> bool:
+    path = _path(cfg)
+    if not path.is_file():
+        return False
+    with connection(path) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ticket_feedback'").fetchone():
+            return False
+        return conn.execute("""
+            SELECT 1 FROM ticket_feedback WHERE ticket_id = ? AND revision = ? AND writeback_status = 'succeeded'
+        """, (ticket_id, digest(_normalized(feedback)))).fetchone() is not None
+
+
+def retry_records(cfg: Settings, *, limit: int = 100, after: str = "") -> dict[str, str]:
     path = _path(cfg)
     if not path.is_file():
         return {}
@@ -165,5 +177,5 @@ def retry_records(cfg: Settings) -> dict[str, str]:
             return {}
         return dict(conn.execute("""
             SELECT ticket_id, record_id FROM ticket_feedback
-            WHERE writeback_status IN ('pending', 'failed', 'uncertain')
-        """))
+            WHERE writeback_status IN ('pending', 'failed', 'uncertain') AND ticket_id > ? ORDER BY ticket_id LIMIT ?
+        """, (after, limit)))
