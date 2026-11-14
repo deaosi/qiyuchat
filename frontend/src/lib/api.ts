@@ -597,7 +597,7 @@ function isTicketTime(value: unknown): boolean {
 
 function isTicketRow(data: unknown): data is Record<string, unknown> {
   return isRecord(data) && typeof data.id === 'string' && /^[1-9][0-9]{0,18}$/.test(data.id)
-    && ['title', 'status', 'priority', 'owner'].every(field => typeof data[field] === 'string')
+    && ['title', 'status', 'priority', 'submitter'].every(field => typeof data[field] === 'string')
     && isTicketTime(data.created_at) && isTicketTime(data.updated_at) && isCount(data.linked_session_count)
 }
 

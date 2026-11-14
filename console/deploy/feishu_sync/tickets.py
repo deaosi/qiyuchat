@@ -17,7 +17,7 @@ from src.voc_feishu_content import _private_names, _public_text
 from src.voc_service import maintenance
 from src.web import ticket_guest
 from src.web.guest_evidence import PUBLIC_ORIGIN
-from src.web.tickets import TICKET_PRIORITIES, TICKET_STATUSES, _field_value, list_tickets
+from src.web.tickets import TICKET_PRIORITIES, TICKET_STATUSES, _field_value, list_tickets, submitter_names
 
 
 TABLE_NAME = "七鱼工单"
@@ -31,7 +31,6 @@ _ID = re.compile(r"[1-9][0-9]{0,18}")
 _FIELDS = {"key": "工单ID", "title": "工单标题", "status": "状态", "priority": "优先级", "submitter": "提报人",
            "created": "创建时间", "updated": "更新时间", "sessions": "关联会话数", "source": "语海详情"}
 _TYPES = {"key": 1, "title": 1, "status": 1, "priority": 1, "created": 5, "updated": 5, "sessions": 2, "source": 15}
-_CREATE_ACTIONS = frozenset((1, 2, 127, 128, 129, 130))
 _DETAIL = {"summary": "工单描述", "platform": "平台", "software": "软件版本"}
 _INPUT = {"status": "技术处理状态", "reply": "技术回复", "version": "解决版本"}
 _OUTPUT = {"status": "回传状态", "returned_at": "回传时间", "error": "回传失败原因"}
@@ -305,9 +304,7 @@ def _submitters(cfg, desired, staff_ids, state_dir):
             history = client.history(int(key))
         except TicketError:
             history = []
-        names = {_public_text(event.get("operator"), None)[:120] for event in history
-                 if _id(event.get("actionType")) in _CREATE_ACTIONS and _id(event.get("operatorId")) == staff_id}
-        names.discard("")
+        names = submitter_names(history, staff_id)
         if len(names) == 1:
             name = names.pop()
             desired[key][_FIELDS["submitter"]] = name

@@ -118,6 +118,40 @@ class TicketModuleTests(LocalFixture):
         with patch("src.qiyu.ticket.request", return_value={"code": 200, "message": {"total": 1, "tickets": []}}):
             self.assertEqual(self.fetch("/api/tickets")[0], 502)
 
+    def test_submitter_uses_verified_cache_in_list_and_checks_creation_history_in_detail(self):
+        cache = Path(self.temp.name) / "ticket-submitters.json"
+        cache.write_text(json.dumps({
+            "12": {"staff_id": 31, "name": "提交客服"},
+            "13": {"staff_id": 31, "name": "无关员工"},
+            "14": {"staff_id": 33, "name": "旧日志名称"},
+        }), encoding="utf-8")
+        rows = [
+            {"id": identifier, "staffId": str(staff_id), "holderId": 91, "holderName": "受理客服", "userName": "访客"}
+            for identifier, staff_id in ((12, 31), (13, 32), (14, 33), (15, 34))
+        ]
+        histories = {
+            12: [],
+            13: [{"actionType": 1, "operatorId": 32, "operator": " 新提交客服 "},
+                 {"actionType": 20, "operatorId": 32, "operator": "后续回复人员"},
+                 {"actionType": 1, "operatorId": 91, "operator": "受理客服"}],
+            14: [{"actionType": 1, "operatorId": 33, "operator": "不同日志名称"}],
+            15: [{"actionType": 1, "operatorId": 34, "operator": "冲突一"},
+                 {"actionType": 2, "operatorId": 34, "operator": "冲突二"}],
+        }
+        with (patch.dict("os.environ", {"YUHAI_TICKET_SUBMITTERS_PATH": str(cache)}),
+              patch.object(ticket.TicketClient, "search", return_value=(len(rows), rows)),
+              patch.object(ticket.TicketClient, "detail", side_effect=lambda identifier: rows[identifier - 12]),
+              patch.object(ticket.TicketClient, "history", side_effect=histories.get) as history):
+            status, result = self.fetch("/api/tickets")
+            self.assertEqual(status, 200)
+            self.assertEqual([(item["submitter"], item["owner"]) for item in result["items"]],
+                             [("提交客服", "受理客服"), ("", "受理客服"), ("旧日志名称", "受理客服"), ("", "受理客服")])
+            history.assert_not_called()
+            for identifier, name in ((12, "提交客服"), (13, "新提交客服"), (14, "不同日志名称"), (15, "")):
+                with self.subTest(identifier=identifier):
+                    status, detail = self.fetch(f"/api/tickets/detail?id={identifier}")
+                    self.assertEqual((status, detail["ticket"]["submitter"]), (200, name))
+
     def test_projects_template_fields_and_only_serves_authenticated_ticket_media(self):
         image_url = "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef"
         file_url = "https://qiyukf.net/f123456789abcdef0123456789abcdef"

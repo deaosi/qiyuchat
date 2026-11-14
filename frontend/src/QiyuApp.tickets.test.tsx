@@ -4,7 +4,7 @@ import QiyuApp from './QiyuApp'
 
 const id = '9007199254740993'
 const feishuUrl = 'https://freecallai.feishu.cn/base/example?table=tblExample'
-const ticket = { id, title: '订单复核', status: '处理中', priority: '高', owner: '测试客服',
+const ticket = { id, title: '订单复核', status: '处理中', priority: '高', owner: '值班受理客服', submitter: '原工单提报客服',
   created_at: Date.UTC(2026, 0, 1, 1), updated_at: Date.UTC(2026, 0, 1, 3), linked_session_count: 1 }
 const fetchApi = vi.fn(async (path: string) => {
   const url = new URL(path, location.origin)
@@ -54,6 +54,10 @@ describe('七鱼工单', () => {
     const popup = await screen.findByRole('dialog', { name: ticket.title })
     expect(popup.getAttribute('data-slot')).toBe('dialog-content')
     const detail = within(popup)
+    const info = within(detail.getByText('提报人').closest('dl')!)
+    expect(info.getByText('提报人')).toBeTruthy()
+    expect(info.getByText(ticket.submitter)).toBeTruthy()
+    expect(info.queryByText(ticket.owner)).toBeNull()
     expect(detail.getByText('核对订单明细。')).toBeTruthy()
     expect(detail.getByText('抖音 · Windows')).toBeTruthy()
     expect(detail.getByText('处理已记录。')).toBeTruthy()
@@ -72,6 +76,10 @@ describe('七鱼工单', () => {
     expect(location.hash).toBe('#tickets')
 
     const openDetails = await screen.findByRole('button', { name: `查看工单 ${id}` })
+    expect(screen.getByRole('columnheader', { name: '提报人' })).toBeTruthy()
+    const ticketRow = within(openDetails.closest('tr')!)
+    expect(ticketRow.getByText(ticket.submitter)).toBeTruthy()
+    expect(ticketRow.queryByText(ticket.owner)).toBeNull()
     expect(openDetails.textContent).toBe('查看详情')
     expect(openDetails.getAttribute('data-variant')).toBe('outline')
     expect(openDetails.querySelector('svg')).toBeNull()

@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import date, datetime, time, timedelta, timezone
 from html.parser import HTMLParser
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -15,6 +16,7 @@ from typing import Any
 from ..clean.rules import mask_pii
 from ..config import Settings
 from ..qiyu.ticket import PAGE_SIZE, TicketClient, TicketError, _id
+from ..voc_feishu_content import _public_text
 from . import ticket_media
 
 
@@ -24,6 +26,9 @@ _LINKED_IDS = re.compile(r"[0-9]+(?:\s*[,，]\s*[0-9]+)*")
 _PRIVATE_LABELS = frozenset(("用户姓名", "访客姓名", "用户手机", "手机号码", "手机号", "邮箱",
                             "用户邮箱", "访客邮箱", "访客手机", "联系电话", "用户uid", "访客uid"))
 _FILTER_SCAN_LIMIT = 2000
+_CREATE_ACTIONS = frozenset((1, 2, 127, 128, 129, 130))
+_SUBMITTER_CACHE = "/var/lib/qiyu-feishu-sync/ticket-submitters.json"
+_SUBMITTER_CACHE_LIMIT = 8_000_000
 TICKET_STATUSES = {1: "已提交", 5: "待申领", 10: "处理中", 20: "已完结"}
 TICKET_PRIORITIES = {5: "一般", 8: "紧急", 10: "非常紧急"}
 
@@ -172,7 +177,36 @@ def _linked_sessions(cfg: Settings, ticket_ids: set[int]) -> dict[int, list[dict
     return links
 
 
-def _public(row: dict, linked_session_count: int) -> dict:
+def submitter_names(history: list[dict], staff_id: int | None) -> set[str]:
+    if staff_id is None:
+        return set()
+    names = {_public_text(event.get("operator"), None)[:120] for event in history
+             if _id(event.get("actionType")) in _CREATE_ACTIONS and _id(event.get("operatorId")) == staff_id}
+    names.discard("")
+    return names
+
+
+def _submitter_cache() -> dict:
+    path = Path(os.environ.get("YUHAI_TICKET_SUBMITTERS_PATH", "").strip() or _SUBMITTER_CACHE)
+    try:
+        if path.is_symlink() or not path.is_file():
+            return {}
+        with path.open("rb") as handle:
+            data = handle.read(_SUBMITTER_CACHE_LIMIT + 1)
+        cache = json.loads(data) if len(data) <= _SUBMITTER_CACHE_LIMIT else None
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return cache if isinstance(cache, dict) else {}
+
+
+def _cached_submitter(cache: dict, ticket_id: int, staff_id: int | None) -> str:
+    entry = cache.get(str(ticket_id))
+    if staff_id is None or not isinstance(entry, dict) or _id(entry.get("staff_id")) != staff_id:
+        return ""
+    return _public_text(entry.get("name"), None)[:120]
+
+
+def _public(row: dict, linked_session_count: int, submitter: str) -> dict:
     status = _id(row.get("status"))
     priority = _id(row.get("priority"))
     return {
@@ -183,6 +217,7 @@ def _public(row: dict, linked_session_count: int) -> dict:
         "priority": TICKET_PRIORITIES.get(priority, f"优先级 {priority}" if priority else ""),
         "priority_code": priority,
         "owner": _text(row.get("holderName") or row.get("staffName"), 120),
+        "submitter": submitter,
         "created_at": _millis(row.get("createTime")),
         "updated_at": _millis(row.get("modifyTime")),
         "linked_session_count": linked_session_count,
@@ -235,10 +270,14 @@ def list_tickets(cfg: Settings, *, start: str = "", end: str = "", q: str = "",
     else:
         total, rows = client.search(offset=offset, limit=limit, bounds=bounds)
     links = _linked_sessions(cfg, {_id(row["id"]) for row in rows})
-    items = [_public(row, len(links[_id(row["id"])])) for row in rows]
-    if include_submitter_id:
-        for item, row in zip(items, rows):
-            item["submitter_id"] = _id(row.get("staffId"))
+    cache = _submitter_cache() if rows and not include_submitter_id else {}
+    items = []
+    for row in rows:
+        identifier, staff_id = _id(row["id"]), _id(row.get("staffId"))
+        item = _public(row, len(links[identifier]), _cached_submitter(cache, identifier, staff_id))
+        if include_submitter_id:
+            item["submitter_id"] = staff_id
+        items.append(item)
     return {"items": items,
             "total": total, "has_more": offset + len(rows) < total, "offset": offset, "limit": limit,
             "source": "qiyu"}
@@ -261,7 +300,12 @@ def ticket_detail(cfg: Settings, ticket_id: str) -> dict:
     secret = cfg.qiyu.app_secret
     description, embedded = _field_value(row.get("content"), 12000, rich=row.get("isRichText") in (True, 1, "1"))
     images, attachments = ticket_media.links([*embedded, *_attachments(row.get("attachments"))], secret)
-    result = _public(row, len(sessions))
+    staff_id = _id(row.get("staffId"))
+    names = submitter_names(logs, staff_id)
+    submitter = next(iter(names)) if len(names) == 1 else ""
+    if not names:
+        submitter = _cached_submitter(_submitter_cache(), identifier, staff_id)
+    result = _public(row, len(sessions), submitter)
     result.update(
         description=description,
         category=_text(category.get("path") or category.get("name"), 300) if isinstance(category, dict) else "",

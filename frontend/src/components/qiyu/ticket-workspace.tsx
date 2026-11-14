@@ -20,7 +20,7 @@ type Ticket = {
   title: string
   status: string
   priority: string
-  owner: string
+  submitter: string
   created_at: number | null
   updated_at: number | null
   linked_session_count: number
@@ -162,7 +162,7 @@ function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus }: {
             </section>
             <dl aria-label="工单信息" className="grid grid-cols-2 gap-x-3 gap-y-4 rounded-lg border bg-muted/25 p-4 text-sm sm:grid-cols-3">
               {[
-                ['受理人', data.ticket.owner],
+                ['提报人', data.ticket.submitter],
                 ['创建时间', ticketTime(data.ticket.created_at)], ['更新时间', ticketTime(data.ticket.updated_at)],
                 ...(data.ticket.category ? [['工单分类', data.ticket.category]] : []),
                 ...(data.ticket.template ? [['工单模板', data.ticket.template]] : []),
@@ -272,7 +272,7 @@ export function TicketWorkspace({ selected, onSelect, refreshKey = 0 }: {
             <TableHeader className="bg-muted/45"><TableRow className="[&_th]:px-2 sm:[&_th]:px-4">
               <TableHead className="w-full xl:w-[34%]">工单</TableHead><TableHead>状态</TableHead>
               <TableHead className="hidden xl:table-cell">优先级</TableHead>
-              <TableHead className="hidden xl:table-cell">受理人</TableHead>
+              <TableHead className="hidden xl:table-cell">提报人</TableHead>
               <TableHead className="hidden xl:table-cell">创建时间</TableHead>
               <TableHead className="hidden xl:table-cell">更新时间</TableHead>
               <TableHead><span className="sr-only">操作</span></TableHead>
@@ -281,7 +281,7 @@ export function TicketWorkspace({ selected, onSelect, refreshKey = 0 }: {
               <TableCell className="whitespace-normal"><p className="font-medium [overflow-wrap:anywhere]">{item.title || '未填写标题'}</p><p className="mt-1 text-xs tabular-nums text-muted-foreground">#{item.id}{item.linked_session_count > 0 && ` · ${numberFormat.format(item.linked_session_count)} 个关联会话`}</p></TableCell>
               <TableCell>{item.status ? <Badge variant="outline" className="font-normal">{item.status}</Badge> : '—'}</TableCell>
               <TableCell className="hidden xl:table-cell">{item.priority || '—'}</TableCell>
-              <TableCell className="hidden whitespace-normal xl:table-cell">{item.owner || '—'}</TableCell>
+                <TableCell className="hidden whitespace-normal xl:table-cell">{item.submitter || '—'}</TableCell>
               <TableCell className="hidden text-xs tabular-nums text-muted-foreground xl:table-cell">{ticketTime(item.created_at)}</TableCell>
               <TableCell className="hidden text-xs tabular-nums text-muted-foreground xl:table-cell">{ticketTime(item.updated_at)}</TableCell>
               <TableCell className="text-right"><Button type="button" variant="outline" size="sm" aria-label={`查看工单 ${item.id}`} onClick={event => {
