@@ -191,7 +191,7 @@ def _public(row: dict, linked_session_count: int) -> dict:
 
 def list_tickets(cfg: Settings, *, start: str = "", end: str = "", q: str = "",
                  offset: int = 0, limit: int = 20, status: str = "",
-                 updated_start: str = "", updated_end: str = "") -> dict:
+                 updated_start: str = "", updated_end: str = "", include_submitter_id: bool = False) -> dict:
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= PAGE_SIZE:
         raise ValueError("工单分页参数无效")
     if len(q) > 120:
@@ -235,7 +235,11 @@ def list_tickets(cfg: Settings, *, start: str = "", end: str = "", q: str = "",
     else:
         total, rows = client.search(offset=offset, limit=limit, bounds=bounds)
     links = _linked_sessions(cfg, {_id(row["id"]) for row in rows})
-    return {"items": [_public(row, len(links[_id(row["id"])])) for row in rows],
+    items = [_public(row, len(links[_id(row["id"])])) for row in rows]
+    if include_submitter_id:
+        for item, row in zip(items, rows):
+            item["submitter_id"] = _id(row.get("staffId"))
+    return {"items": items,
             "total": total, "has_more": offset + len(rows) < total, "offset": offset, "limit": limit,
             "source": "qiyu"}
 

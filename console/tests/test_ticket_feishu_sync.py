@@ -83,18 +83,36 @@ class TestTicketFeishuSync(unittest.TestCase):
         def fetch(_cfg, **filters):
             if "start" in filters:
                 self.assertEqual((filters["start"], filters["end"]), ("2026-10-16", "2026-11-14"))
-                rows = [{"id": "42", "updated_at": 1_794_500_000_000, "status_code": 10}]
+                rows = [{"id": "42", "updated_at": 1_794_500_000_000, "status_code": 10, "submitter_id": 31}]
             else:
                 self.assertEqual((filters["updated_start"], filters["updated_end"]), ("2026-11-08", "2026-11-14"))
-                rows = [{"id": "42", "updated_at": 1_794_600_000_000, "status_code": 20}, {"id": "43"}]
+                rows = [{"id": "42", "updated_at": 1_794_600_000_000, "status_code": 20, "submitter_id": 31}, {"id": "43"}]
             return {"items": rows, "total": len(rows), "has_more": False, "source": "qiyu"}
 
         with (patch.object(tickets, "list_tickets", side_effect=fetch),
               patch.object(tickets, "_private_names", return_value=None)):
-            projected, scope = tickets._recent(self.cfg, date(2026, 11, 14))
+            projected, scope, staff_ids = tickets._recent(self.cfg, date(2026, 11, 14))
         self.assertEqual(set(projected), {"42", "43"})
         self.assertEqual(projected["42"]["状态"], "已完结")
         self.assertEqual(scope["updated_scope"], "qiyu")
+        self.assertEqual(staff_ids, {"42": 31, "43": None})
+
+    def test_submitter_uses_matching_creation_log_and_caches_it(self):
+        projected = tickets._projection(self.cfg, [{"id": "42"}, {"id": "43"}])
+        staff_ids = {"42": 31, "43": 32}
+        history = [
+            {"actionType": 20, "operatorId": 31, "operator": "回复人员"},
+            {"actionType": 2, "operatorId": "31", "operator": " 提报员工 "},
+        ]
+        state_dir = Path(self.cfg.runtime.state_dir)
+        with patch.object(tickets.TicketClient, "history", return_value=history) as fetch:
+            self.assertEqual(tickets._submitters(self.cfg, projected, staff_ids, state_dir),
+                             {"fetched": 2, "filled": 1, "pending": 1, "deferred": 0, "unavailable": 0})
+            self.assertEqual(projected["42"]["提报人"], "提报员工")
+            self.assertNotIn("提报人", projected["43"])
+            fetch.reset_mock()
+            self.assertEqual(tickets._submitters(self.cfg, projected, staff_ids, state_dir)["fetched"], 0)
+            fetch.assert_not_called()
 
     def test_repeated_or_incomplete_source_pages_refuse_publication(self):
         first = {"items": [{"id": "42"}], "total": 2, "has_more": True, "source": "qiyu"}
@@ -151,6 +169,23 @@ class TestTicketFeishuSync(unittest.TestCase):
             self.assertEqual(tickets._migrate_old_links(self.cfg, self.target, {}), 0)
         self.assertTrue(tickets.ticket_guest.matches(self.cfg, "42", fields["语海详情"]["link"]))
         self.assertEqual(fields["技术回复"], "需要复核")
+
+    def test_completed_schema_and_link_migrations_do_not_run_again(self):
+        state = Path(self.cfg.runtime.state_dir)
+        scope = {"created_scope": "qiyu", "updated_scope": "qiyu"}
+        with (patch.object(tickets, "settings", return_value=self.cfg),
+              patch.object(tickets.support, "target_table", return_value=self.target),
+              patch.object(tickets, "_table", return_value=(self.target, "fldSubmitter")),
+              patch.object(tickets, "_recent", return_value=({}, scope, {})),
+              patch.object(tickets, "_import_feedback", return_value={}),
+              patch.object(tickets, "_position_submitter") as position,
+              patch.object(tickets, "_migrate_old_links", side_effect=[sync.SyncError("retry"), 2]) as migrate):
+            with self.assertRaisesRegex(sync.SyncError, "retry"):
+                tickets.run(state)
+            self.assertEqual(tickets.run(state)["historical_guest_links_updated"], 2)
+            self.assertEqual(tickets.run(state)["historical_guest_links_updated"], 0)
+        position.assert_called_once_with(self.target)
+        self.assertEqual(migrate.call_count, 2)
 
     def test_maintenance_skips_ticket_sync(self):
         with (patch.object(tickets, "settings", return_value=object()),
