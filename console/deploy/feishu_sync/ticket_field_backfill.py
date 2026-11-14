@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from deploy.feishu_sync import support, ticket_archive, tickets, top
+from deploy.feishu_sync import support, ticket_archive, ticket_history, tickets, top
 from src import voc_feishu_sync as sync
 from src.qiyu.ticket import TicketClient, TicketError, _id
 
@@ -77,11 +77,13 @@ def run(state_dir, *, limit=20, after=None):
         for key, (_, link) in candidates.items():
             try:
                 raw = client.detail(int(key))
+                logs = client.history(int(key))
             except TicketError as error:
                 missing += error.http_status == 404
                 failed += error.http_status != 404
                 continue
-            desired[key] = tickets._summary(raw, names, source_link=link)
+            desired[key] = {**tickets._summary(raw, names, source_link=link),
+                            **ticket_history.project(key, logs, submitter_id=raw.get("staffId"))}
         if tickets.maintenance(cfg):
             return {"status": "maintenance"}
 

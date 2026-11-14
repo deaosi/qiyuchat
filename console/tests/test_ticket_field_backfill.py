@@ -63,6 +63,7 @@ class TicketFieldBackfillTests(TestCase):
                   patch.object(tickets.top, "_find_table", return_value="tblTickets"),
                   patch.object(tickets, "_summary", side_effect=summarize),
                   patch.object(backfill.TicketClient, "detail", side_effect=detail) as fetch,
+                  patch.object(backfill.TicketClient, "history", return_value=[]),
                   patch.object(sync, "_call", side_effect=feishu)):
                 first = backfill.run(state, limit=5, after="previous")
                 retry = backfill.run(state, limit=5, after=first["next_cursor"])

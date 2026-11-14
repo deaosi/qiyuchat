@@ -132,13 +132,21 @@ class TestTicketFeishuSync(unittest.TestCase):
             *({"name": key, "value": value} for key, value in values.items()),
             {"name": "附件/截图", "value": '[{"name":"现场截图.png","url":"' + image + '"}]'},
         ], "attachments": [media]}
-        with patch.object(tickets.TicketClient, "detail", return_value=raw) as fetch:
+        logs = [
+            {"id": 1, "actionType": 20, "action": "回复", "operator": "工程师", "time": 1794648432000,
+             "info": [{"title": "备注", "content": "语海 Voc · 飞书技术反馈\n技术回复：请提供截图\n〔语海同步 0123456789abcdef〕"}]},
+            {"id": 2, "actionType": 20, "action": "回复", "operator": "提报人员", "time": 1794648722000,
+             "info": [{"title": "备注", "content": "补充了现场截图"}], "attachments": [media]},
+        ]
+        with (patch.object(tickets.TicketClient, "detail", return_value=raw) as fetch,
+              patch.object(tickets.TicketClient, "history", return_value=logs) as history):
             result = tickets._enrich(self.cfg, projected, state_dir, incremental=True)
             self.assertEqual(result["fetched"], 1)
             fetch.assert_called_once_with(42)
             refreshed = tickets._projection(self.cfg, [{"id": "42"}])
             self.assertEqual(tickets._enrich(self.cfg, refreshed, state_dir, incremental=True)["fetched"], 0)
             self.assertEqual(refreshed, projected)
+            history.assert_called_once_with(42)
         self.assertEqual(row["客户群名称"], values["客户群名称"])
         self.assertEqual(row["店铺名"], values["店铺名"])
         self.assertEqual(row["平台&版本"], values["平台&版本"])
@@ -148,6 +156,10 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertEqual(row["附件/截图"]["text"], "现场截图.png")
         self.assertTrue(row["附件/截图"]["link"].startswith(link + "/images/"))
         self.assertNotIn("signature", row["附件/截图"]["link"])
+        self.assertIn("补充了现场截图", row["最新七鱼跟进"])
+        self.assertLess(row["工单往来记录"].index("请提供截图"), row["工单往来记录"].index("补充了现场截图"))
+        self.assertNotIn("语海同步", row["工单往来记录"])
+        self.assertEqual(row["跟进附件"]["link"], "https://qiyu.fanwulink.cn/#tickets?id=42")
         legacy = tickets._summary({"id": 42, "content": "原生工单描述"}, None, source_link=link)
         self.assertEqual(legacy["问题需求"], "原生工单描述")
         self.assertEqual(legacy["客户群名称"], "")

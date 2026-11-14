@@ -8,7 +8,7 @@ import json
 import re
 from time import monotonic, time
 
-from deploy.feishu_sync import support, ticket_archive, ticket_delta, ticket_reply_delta, ticket_work, top
+from deploy.feishu_sync import support, ticket_archive, ticket_delta, ticket_history, ticket_reply_delta, ticket_work, top
 from src import ticket_feedback
 from src import voc_feishu_sync as sync
 from src.config import settings
@@ -26,11 +26,12 @@ UPDATED_DAYS = 7
 MATCH_SIZE = 20
 DETAIL_LIMIT = 12
 DETAIL_BUDGET_SECONDS = 25
+_DETAIL_CACHE_LIMIT = 128
 _MINUTE = 60_000
 _RECONCILE = 10 * _MINUTE
 _DAY = 24 * 60 * _MINUTE
 _FEEDBACK_QUIET_MS = 15_000
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _WORK_SECONDS = 9
 _ARCHIVE_START_BUDGET = 12
 _ZONE = timezone(timedelta(hours=8))
@@ -40,7 +41,7 @@ _FIELDS = {"key": "工单ID", "title": "工单标题", "status": "状态", "prio
 _TYPES = {"key": 1, "title": 1, "status": 1, "priority": 1, "created": 5, "updated": 5, "sessions": 2, "source": 15}
 _FORM = {"group": "客户群名称", "owner": "后台负责人", "platform_version": "平台&版本", "shop": "店铺名",
          "software": "软件版本", "reported": "是否已点击报告问题", "request": "问题需求", "attachment": "附件/截图"}
-_DETAIL = {"summary": "工单描述", "platform": "平台", **_FORM}
+_DETAIL = {"summary": "工单描述", "platform": "平台", **_FORM, **ticket_history.COLUMNS}
 _INPUT = {"status": "技术处理状态", "reply": "技术回复", "version": "解决版本"}
 _OUTPUT = {"status": "回传状态", "returned_at": "回传时间", "error": "回传失败原因"}
 _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
@@ -49,7 +50,8 @@ _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
 def _column_specs() -> dict:
     names = (_FIELDS["submitter"], *_DETAIL.values(), *_INPUT.values(), *_OUTPUT.values())
     specs = {name: {"name": name, "type": "text"} for name in names}
-    specs[_FORM["attachment"]]["style"] = {"type": "url"}
+    for name in (_FORM["attachment"], ticket_history.COLUMNS["attachments"]):
+        specs[name]["style"] = {"type": "url"}
     specs[_OUTPUT["returned_at"]].update(type="datetime", style={"format": "yyyy-MM-dd HH:mm"})
     return specs
 
@@ -85,7 +87,8 @@ def _table(report: sync.Target, *, incremental=False) -> tuple[sync.Target, str]
     if not set(definitions) <= fields.keys():
         fields = {row.get("field_name"): row for row in sync._paginated(target, "GET", "/fields") if isinstance(row, dict)}
     for name in definitions:
-        expected = {_FORM["attachment"]: 15, _OUTPUT["returned_at"]: 5, ticket_archive.CLOSED_AT: 5,
+        expected = {_FORM["attachment"]: 15, ticket_history.COLUMNS["attachments"]: 15,
+                    _OUTPUT["returned_at"]: 5, ticket_archive.CLOSED_AT: 5,
                     ticket_reply_delta.TIME_FIELD: ticket_reply_delta.TIME_FIELD_TYPE}.get(name, 1)
         allowed = (1, 3) if name == _INPUT["status"] else (expected,)
         if fields.get(name, {}).get("type") not in allowed:
@@ -104,11 +107,11 @@ def _position_submitter(target):
     if (not isinstance(current, list) or not all(isinstance(name, str) for name in current)
             or len(set(current)) != len(current) or priority not in current or source not in current):
         raise sync.SyncError("无法核对飞书工单视图的详情列。", 409)
-    form_columns = list(_FORM.values())
-    order = [name for name in current if name != submitter and name not in form_columns]
+    detail_columns = [*ticket_history.COLUMNS.values(), *_FORM.values()]
+    order = [name for name in current if name != submitter and name not in detail_columns]
     order.insert(order.index(priority) + 1, submitter)
     index = order.index(source) + 1
-    order[index:index] = form_columns
+    order[index:index] = detail_columns
     if current != order:
         top._cli(target, "+view-set-visible-fields", *args,
                  "--json", json.dumps({"visible_fields": order}, ensure_ascii=False))
@@ -384,7 +387,8 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         cached = previous.get("fields") if isinstance(previous, dict) else None
         if isinstance(cached, dict) and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values()):
             row.update(cached)
-            next_cache[key] = previous
+            if not incremental:
+                next_cache[key] = previous
             continue
         if fetched >= DETAIL_LIMIT or monotonic() - started >= DETAIL_BUDGET_SECONDS:
             deferred += 1
@@ -392,6 +396,7 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         fetched += 1
         try:
             source = client.detail(int(key))
+            logs = client.history(int(key))
         except TicketError:
             failures += 1
             continue
@@ -400,8 +405,12 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
             names_loaded = True
         source_cell = sync._value(row.get(_FIELDS["source"]))
         columns = _summary(source, names, source_link=source_cell.get("link") if isinstance(source_cell, dict) else None)
+        columns.update(ticket_history.project(key, logs, submitter_id=source.get("staffId")))
         row.update(columns)
+        next_cache.pop(key, None)
         next_cache[key] = {"stamp": stamp, "fields": columns}
+    if len(next_cache) > _DETAIL_CACHE_LIMIT:
+        next_cache = dict(list(next_cache.items())[-_DETAIL_CACHE_LIMIT:])
     if next_cache != cache:
         support._write_state(cache_path, next_cache)
     return {"fetched": fetched, "failed": failures, "deferred": deferred}
@@ -835,7 +844,7 @@ def run(state_dir, *, incremental=False):
     status = "partial" if (
         "linked" in (coverage["created_scope"], coverage["updated_scope"])
         or feedback.get("status") == "failed" or feedback.get("failed") or feedback.get("awaiting_review")
-        or details.get("status") == "failed"
+        or details.get("status") == "failed" or details.get("failed") or details.get("deferred")
         or submitters.get("status") == "failed" or submitters.get("pending")
         or layout_error or archive.get("status") == "failed"
     ) else "published"
