@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, ChevronLeft, ChevronRight, Copy } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Copy } from 'lucide-react'
 import { toast } from 'sonner'
 import { useApi } from '@/hooks/use-api'
 import { normalizePair, type ApiFilters, type VocCasePath, type VocCaseSolution, type VocIssuePilot, type VocPilotCase, type VocPilotEvidence, type VocPilotFamily, type VocPilotIssue, type VocPlaybook, type VocPlaybookBranch } from '@/lib/api'
@@ -169,17 +169,18 @@ export function VocIssuePilotResults({ data, onOpenPair, fullList }: { data: Voc
         if (value.trim()) fullList?.request()
       }} />}
     {pending ? <LoadingFullList error={pending.error} retry={pending.retry} /> : matches.length ? <ul className="divide-y rounded-md border px-2 sm:px-3">{matches.slice(current * issuePageSize, (current + 1) * issuePageSize).map(item =>
-      <li key={item.id}>
-        <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-1 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
-          onClick={event => { opener.current = event.currentTarget; setSelectedId(item.id) }}>
-          <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
-            <span className="flex flex-wrap items-center gap-2"><span className="line-clamp-2 font-medium">{item.cases[0]?.quote ?? item.title}</span><Badge variant="outline" className="font-normal">{issueStatuses[item.evidence_status]}</Badge>
-              {item.scope_status === 'needs_context' && <Badge variant="outline" className="font-normal">范围待补</Badge>}
-            </span>
-            <span className="block text-xs text-muted-foreground">{[item.cases.length ? item.title : '', categoryText(item)].filter(Boolean).join(' · ')}</span>
+      <li key={item.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-1 px-2 py-3">
+        <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
+          <span className="flex flex-wrap items-center gap-2"><span className="line-clamp-2 font-medium">{item.cases[0]?.quote ?? item.title}</span><Badge variant="outline" className="font-normal">{issueStatuses[item.evidence_status]}</Badge>
+            {item.scope_status === 'needs_context' && <Badge variant="outline" className="font-normal">范围待补</Badge>}
           </span>
-          <span className="flex items-center gap-2 text-right text-xs tabular-nums"><span>{count(item.impact.consultations)} 次咨询</span><ChevronRight aria-hidden="true" className="size-4 text-muted-foreground" /></span>
-        </button>
+          <span className="block text-xs text-muted-foreground">{[item.cases.length ? item.title : '', categoryText(item)].filter(Boolean).join(' · ')}</span>
+        </span>
+        <div className="flex flex-col items-end gap-1">
+          <span className="text-right text-xs tabular-nums">{count(item.impact.consultations)} 次咨询</span>
+          <Button type="button" variant="outline" size="sm" aria-label={`查看详情：${item.title}`}
+            onClick={event => { opener.current = event.currentTarget; setSelectedId(item.id) }}>查看详情</Button>
+        </div>
       </li>)}</ul> : <p className="py-5 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的产品问题' : '当前范围暂无可归类的产品问题'}</p>}
     {!(pending && search.trim()) && <PageNav label="产品问题分页" current={current} last={last} onChange={next => {
       setPage(next)
@@ -200,7 +201,7 @@ export function VocIssuePilotResults({ data, onOpenPair, fullList }: { data: Voc
             <ImpactCounts impact={selected.impact} />
             <section className="space-y-2 border-t pt-3">
               <MissingEvidence values={selected.next.missing} />
-              <Button asChild variant="outline" size="sm"><a href={`#voc-next?issue=${encodeURIComponent(selected.id)}`}>查看处理手册<ArrowUpRight /></a></Button>
+              <Button asChild variant="outline" size="sm"><a href={`#voc-next?issue=${encodeURIComponent(selected.id)}`}>查看处理手册</a></Button>
             </section>
           </div>
         </>}
@@ -396,36 +397,32 @@ export function VocPlaybookResults({ items, casePaths = [], onOpenPair, fullList
     {pending && <LoadingFullList error={pending.error} retry={pending.retry} />}
     {!pending && pathsOnPage.length > 0 && <section className="space-y-2">
       <h3 className="text-sm font-medium">已有处理记录的案例</h3>
-      <ul className="divide-y rounded-md border px-2 sm:px-3">{pathsOnPage.map(item => <li key={item.id}>
-        <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
-          onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'case', id: item.id }) }}>
-          <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
-            <span className="line-clamp-2 font-medium">{item.solution?.title ?? item.problem.quote}</span>
-            <span className="line-clamp-1 text-sm text-muted-foreground">{item.solution?.sections.find(section => section.kind === 'next_step')?.text
-              ?? item.steps[0]?.action}</span>
-            <span className="block text-xs text-muted-foreground">{[item.platform, item.problem.ts > 0 ? displayTime(item.problem.ts) : ''].filter(Boolean).join(' · ')}</span>
-          </span>
-          <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
-        </button>
+      <ul className="divide-y rounded-md border px-2 sm:px-3">{pathsOnPage.map(item => <li key={item.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 px-2 py-3">
+        <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
+          <span className="line-clamp-2 font-medium">{item.solution?.title ?? item.problem.quote}</span>
+          <span className="line-clamp-1 text-sm text-muted-foreground">{item.solution?.sections.find(section => section.kind === 'next_step')?.text
+            ?? item.steps[0]?.action}</span>
+          <span className="block text-xs text-muted-foreground">{[item.platform, item.problem.ts > 0 ? displayTime(item.problem.ts) : ''].filter(Boolean).join(' · ')}</span>
+        </span>
+        <Button type="button" variant="outline" size="sm" aria-label={`查看案例：${item.solution?.title ?? item.problem.quote}`}
+          onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'case', id: item.id }) }}>查看案例</Button>
       </li>)}</ul>
     </section>}
     {!pending && issuesOnPage.length > 0 && <section className="space-y-2">
       {matchingPaths.length > 0 && <h3 className="text-sm font-medium">问题汇总</h3>}
       <ul className="divide-y rounded-md border px-2 sm:px-3">{issuesOnPage.map(({ item, branches }) =>
-      <li key={item.id}>
-        <button type="button" className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-sm px-2 py-3 text-left hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring"
-          onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'issue', id: item.id }) }}>
-          <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
-            <span className="flex flex-wrap items-center gap-2"><span className="line-clamp-2 font-medium">{item.cases?.[0]?.quote ?? item.title}</span><PlaybookBadge item={item} branches={branches} /></span>
-            <span className="block text-xs text-muted-foreground">{[item.cases?.length ? item.title : '', categoryText(item)].filter(Boolean).join(' · ')}</span>
-            {(item.impact || item.checked_cases > 0) && <span className="block text-xs tabular-nums text-muted-foreground">{[
-              item.impact ? `${count(item.impact.consultations)} 次咨询` : '',
-              item.checked_cases > 0 ? `${count(item.checked_cases)} 个关联处理案例` : '',
-            ].filter(Boolean).join(' · ')}</span>}
-          </span>
-          <ChevronRight aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
-        </button>
-    </li>)}</ul></section>}
+      <li key={item.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 px-2 py-3">
+        <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
+          <span className="flex flex-wrap items-center gap-2"><span className="line-clamp-2 font-medium">{item.cases?.[0]?.quote ?? item.title}</span><PlaybookBadge item={item} branches={branches} /></span>
+          <span className="block text-xs text-muted-foreground">{[item.cases?.length ? item.title : '', categoryText(item)].filter(Boolean).join(' · ')}</span>
+          {(item.impact || item.checked_cases > 0) && <span className="block text-xs tabular-nums text-muted-foreground">{[
+            item.impact ? `${count(item.impact.consultations)} 次咨询` : '',
+            item.checked_cases > 0 ? `${count(item.checked_cases)} 个关联处理案例` : '',
+          ].filter(Boolean).join(' · ')}</span>}
+        </span>
+        <Button type="button" variant="outline" size="sm" aria-label={`查看手册：${item.cases?.[0]?.quote ?? item.title}`}
+          onClick={event => { opener.current = event.currentTarget; setSelection({ kind: 'issue', id: item.id }) }}>查看手册</Button>
+      </li>)}</ul></section>}
     {!pending && matchingPaths.length === 0 && matches.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">{search.trim() ? '未找到匹配的咨询或处理流程' : '当前范围暂无可查看的咨询线索'}</p>}
     {!(pending && search.trim()) && <PageNav label="处理手册分页" current={current} last={last} onChange={next => {
       setPage(next)

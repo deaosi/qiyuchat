@@ -75,7 +75,7 @@ function GroupRows({ items, onDrill, onViewCustomers }: { items: Group[]; onDril
       <TableCell className="tabular-nums"><Unanswered count={item.unanswered} name={item.group_name} onSelect={() => onDrill(scope, 'unanswered')} /></TableCell>
       <TableCell className="whitespace-normal text-xs leading-5 text-muted-foreground">{item.last_seen || '—'}</TableCell>
       <TableCell className="whitespace-normal"><IssueLinks questions={item.top.slice(0, 3)} onSelect={cluster => onDrill({ ...scope, cluster })} /></TableCell>
-      <TableCell className="text-right"><Button variant="ghost" size="sm" aria-label={`查看客户：${item.group_name}`} onClick={() => onViewCustomers(item.group_name)}>查看客户</Button></TableCell>
+      <TableCell className="text-right"><Button variant="outline" size="sm" aria-label={`查看客户：${item.group_name}`} onClick={() => onViewCustomers(item.group_name)}>查看客户</Button></TableCell>
     </TableRow>
   })
 }

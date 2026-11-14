@@ -167,14 +167,12 @@ def _matches_image_signature(mime: str, data: bytes) -> bool:
     return data[8:12] in brands or any(data[index:index + 4] in brands for index in range(16, size, 4))
 
 
-def fetch_image(url: str) -> tuple[bytes, str, str]:
-    """Fetch the attachment's exact bytes from its recorded CDN URL."""
-    if not _safe_image_url(url):
-        raise ImageFetchError('图片地址无效。', 400)
-    unavailable = '暂时无法读取会话图片。'
+def fetch_bytes(url: str, *, image_only: bool = True, ticket_attachment: bool = False) -> tuple[bytes, str]:
+    """Read an already validated attachment URL with the shared size and timeout limits."""
+    unavailable = '暂时无法读取工单附件。' if ticket_attachment else '暂时无法读取会话图片。'
     unsupported = '图片格式无法读取。'
-    too_large = '图片超过 20 MB，无法加载。'
-    timeout = '图片加载超时，请重试。'
+    too_large = '附件超过 20 MB，无法加载。' if ticket_attachment else '图片超过 20 MB，无法加载。'
+    timeout = '附件加载超时，请重试。' if ticket_attachment else '图片加载超时，请重试。'
     deadline = time.monotonic() + _IMAGE_TOTAL_TIMEOUT
     request = Request(url, headers={'Accept-Encoding': 'identity'})
     try:
@@ -185,7 +183,8 @@ def fetch_image(url: str) -> tuple[bytes, str, str]:
             mime = headers.get_content_type().lower()
             mime = _IMAGE_MIME_ALIASES.get(mime, mime)
             encoding = headers.get('Content-Encoding', 'identity').strip().lower()
-            if mime not in _IMAGE_FORMATS or encoding != 'identity':
+            if encoding != 'identity' or (image_only and mime not in _IMAGE_FORMATS
+                                          and not (ticket_attachment and mime == 'application/octet-stream')):
                 raise ImageFetchError(unsupported, 502)
             declared = headers.get_all('Content-Length', [])
             if len(declared) > 1:
@@ -210,7 +209,7 @@ def fetch_image(url: str) -> tuple[bytes, str, str]:
                 raise ImageFetchError(unavailable, 502)
     except HTTPError as exc:
         exc.close()
-        if exc.code in (404, 410):
+        if exc.code in (404, 410) and not ticket_attachment:
             raise ImageFetchError('会话图片已失效或暂不可用。', 502) from None
         raise ImageFetchError(unavailable, 502) from None
     except URLError as exc:
@@ -222,12 +221,24 @@ def fetch_image(url: str) -> tuple[bytes, str, str]:
     except (OSError, HTTPException, ValueError):
         raise ImageFetchError(unavailable, 502) from None
 
-    # Qiyu's CDN sometimes labels PNG files as JPEG, including for .jpg URLs.
-    if not _matches_image_signature(mime, data):
-        mime = next((candidate for candidate in _IMAGE_FORMATS
-                     if candidate != mime and _matches_image_signature(candidate, data)), '')
+    return data, mime
+
+
+def actual_image_type(data: bytes, mime: str) -> str:
+    # Qiyu sometimes labels PNG files as JPEG or generic binary attachments.
+    if mime in _IMAGE_FORMATS and _matches_image_signature(mime, data):
+        return mime
+    return next((candidate for candidate in _IMAGE_FORMATS if _matches_image_signature(candidate, data)), '')
+
+
+def fetch_image(url: str) -> tuple[bytes, str, str]:
+    """Fetch the attachment's exact bytes from its recorded CDN URL."""
+    if not _safe_image_url(url):
+        raise ImageFetchError('图片地址无效。', 400)
+    data, mime = fetch_bytes(url)
+    mime = actual_image_type(data, mime)
     if not mime:
-        raise ImageFetchError(unsupported, 502)
+        raise ImageFetchError('图片格式无法读取。', 502)
     leaf = urlsplit(url).path.rsplit('/', 1)[-1].rsplit('.', 1)[0]
     basename = re.sub(r'[^A-Za-z0-9_.-]+', '_', unquote(leaf))[:100].strip('._-')
     return data, mime, f"{basename or 'conversation-image'}.{_IMAGE_FORMATS[mime]}"

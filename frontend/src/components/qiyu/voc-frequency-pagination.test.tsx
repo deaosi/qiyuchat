@@ -20,7 +20,7 @@ const handlers = { onOpenPair: vi.fn(), onOpenChat: vi.fn() }
 const topicCalls = () => vi.mocked(apiGet).mock.calls.filter(([name]) => name === 'voc2/topics').map(([, filters]) => filters)
 const nextPage = () => screen.getByRole('button', { name: '下一页' }) as HTMLButtonElement
 const previousPage = () => screen.getByRole('button', { name: '上一页' }) as HTMLButtonElement
-const rankedRows = () => screen.queryAllByRole('button', { name: /^排名\s*\d/ })
+const rankedRows = () => screen.queryAllByRole('button', { name: /^查看(?:问答| \d+ 个细分问题) · / })
 const pageResult = (offset: number, size: number) => ({ items: topics.slice(offset, Math.min(total, offset + size)), total })
 let total: number
 let secondPage: Promise<ReturnType<typeof pageResult>> | undefined
@@ -57,9 +57,10 @@ describe('VOC frequency ranking pagination', () => {
       return summary
     })
     render(<VocFrequencyWorkspace filters={{ ...initialScope, group: '分组测试' }} {...handlers} />)
-    const row = await screen.findByRole('button', { name: /排名\s*1.*回复异常.*6 次咨询.*查看 2 个细分问题/ })
+    const row = await screen.findByRole('button', { name: '查看 2 个细分问题 · 回复异常' })
     expect(screen.getByRole('heading', { name: '咨询分类排行' })).toBeTruthy()
-    expect(within(row).queryByText(members[0].question)).toBeNull()
+    expect(screen.queryByText(members[0].question)).toBeNull()
+    expect(row.getAttribute('data-variant')).toBe('outline')
     expect(screen.getByText('高频分类')).toBeTruthy()
     expect(within(screen.getByText('咨询次数').parentElement!).getByText('6')).toBeTruthy()
     expect(within(screen.getByText('咨询片段').parentElement!).getByText('5')).toBeTruthy()
@@ -118,7 +119,8 @@ describe('VOC frequency ranking pagination', () => {
     await act(async () => { resolveSecond(pageResult(20, 20)) })
 
     expect(rankedRows()).toHaveLength(20)
-    const firstOnSecondPage = screen.getByRole('button', { name: /^排名\s*21.*示例主题 21/ })
+    const firstOnSecondPage = screen.getByRole('button', { name: '查看问答 · 示例主题 21' })
+    expect(screen.getByText('21', { selector: 'span.tabular-nums' })).toBeTruthy()
     fireEvent.click(firstOnSecondPage)
     const drawer = within(screen.getByRole('dialog', { name: '问题与原句依据' }))
     expect(await drawer.findByText('示例主题 21')).toBeTruthy()
@@ -132,7 +134,7 @@ describe('VOC frequency ranking pagination', () => {
     fireEvent.click(nextPage())
     await screen.findByText('第 3 / 3 页')
     expect(rankedRows()).toHaveLength(5)
-    expect(screen.getByRole('button', { name: /^排名\s*45.*示例主题 45/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '查看问答 · 示例主题 45' })).toBeTruthy()
     expect(nextPage().disabled).toBe(true)
     expect(topicCalls().map(({ limit, offset }) => [limit, offset])).toEqual([[20, 0], [20, 20], [20, 40]])
   })
@@ -165,7 +167,7 @@ describe('VOC frequency ranking pagination', () => {
     const view = render(<VocFrequencyWorkspace filters={initialScope} {...handlers} />)
     await screen.findByText('第 1 / 3 页')
     fireEvent.click(nextPage())
-    fireEvent.click(await screen.findByRole('button', { name: /^排名\s*21.*示例主题 21/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '查看问答 · 示例主题 21' }))
     expect(screen.getByRole('dialog', { name: '问题与原句依据' })).toBeTruthy()
 
     const newScope: ApiFilters = { source: 'local', days: 30, group: '测试群', staff: '测试客服' }
@@ -188,7 +190,7 @@ describe('VOC frequency ranking pagination', () => {
     await screen.findByText('第 2 / 2 页')
     expect(screen.getByText('共 21 个主题')).toBeTruthy()
     expect(rankedRows()).toHaveLength(1)
-    expect(screen.getByRole('button', { name: /^排名\s*21.*示例主题 21/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '查看问答 · 示例主题 21' })).toBeTruthy()
   })
 
   it('opens all trend filters when the comparison range is unavailable and resets pagination', async () => {
@@ -281,7 +283,7 @@ describe('VOC frequency ranking pagination', () => {
     expect(topicCalls().at(-1)).toMatchObject({ workbench: 1, trend: 'rising', limit: 20, offset: 0 })
     expect(screen.getByText('2026-11-11 15:00')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /商品已配置但机器人没触发.*7 次咨询/ }))
+    fireEvent.click(screen.getByRole('button', { name: '查看问答 · 商品已配置但机器人没触发' }))
     const drawer = within(await screen.findByRole('dialog', { name: '问题与原句依据' }))
     expect(await drawer.findByText('代表问答')).toBeTruthy()
     const exchange = drawer.getByText('客户问题原文').closest('article')!

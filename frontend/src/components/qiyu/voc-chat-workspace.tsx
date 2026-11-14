@@ -106,7 +106,7 @@ function AnswerExamples({ examples, onOpen }: { examples: ChatExample[]; onOpen:
         </dl>
         <div className="flex flex-wrap items-center justify-between gap-2">
           {example.time && <time className="text-xs tabular-nums text-muted-foreground">{example.time}</time>}
-          <Button type="button" variant="ghost" size="xs" className="ml-auto" onClick={() => onOpen(example.citation)}>查看原会话</Button>
+          <Button type="button" variant="outline" size="xs" className="ml-auto" onClick={() => onOpen(example.citation)}>查看原会话</Button>
         </div>
       </article>)}
     </div>

@@ -98,7 +98,7 @@ describe('VOC navigation', () => {
     expect(screen.queryByText(completeSop.title)).toBeNull()
     expect(query.mock.calls.some(([endpoint]) => ['voc2/knowledge', 'voc2/summary'].includes(endpoint))).toBe(false)
 
-    fireEvent.click(screen.getByRole('button', { name: /场景未触发.*3 次咨询/ }))
+    fireEvent.click(screen.getByRole('button', { name: '查看问答 · 场景未触发' }))
     const detail = within(screen.getByRole('dialog', { name: '问题与原句依据' }))
     expect(detail.getByText(evidence.answer)).toBeTruthy()
     fireEvent.click(detail.getByRole('button', { name: '跳转到会话上下文' }))

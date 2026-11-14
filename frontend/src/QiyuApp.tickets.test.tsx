@@ -12,7 +12,11 @@ const fetchApi = vi.fn(async (path: string) => {
     return Response.json({ items: [ticket], total: 21, has_more: offset === 0, offset, limit: 20 })
   }
   if (url.pathname === '/api/tickets/detail') return Response.json({
-    ticket: { ...ticket, description: '核对订单明细。' },
+    ticket: { ...ticket, description: '', fields: [
+      { label: '平台&版本', value: '抖音 · Windows' },
+      { label: '问题需求', value: '核对订单明细。' },
+      { label: '附件/截图', value: '', images: [{ url: '/api/tickets/attachment?file=example', name: '订单截图' }] },
+    ] },
     history: [{ id: '783', action: '回复工单', operator: '测试客服', time: ticket.updated_at, details: [{ label: '回复', value: '处理已记录。' }] }],
     history_available: true,
     sessions: [{ session_id: 'linked-session', started_at: ticket.created_at, qa_id: 24 }],
@@ -41,10 +45,16 @@ describe('七鱼工单', () => {
     history.replaceState(null, '', `#tickets?id=${id}`)
     render(<QiyuApp />)
 
-    const detail = within(await screen.findByRole('dialog', { name: ticket.title }))
+    const popup = await screen.findByRole('dialog', { name: ticket.title })
+    expect(popup.getAttribute('data-slot')).toBe('dialog-content')
+    const detail = within(popup)
     expect(detail.getByText('核对订单明细。')).toBeTruthy()
+    expect(detail.getByText('抖音 · Windows')).toBeTruthy()
+    expect(detail.getByRole('img', { name: '订单截图' }).getAttribute('src')).toBe('/api/tickets/attachment?file=example')
+    expect(detail.getByRole('link', { name: '查看原图' }).getAttribute('href')).toBe('/api/tickets/attachment?file=example')
+    expect(detail.getByRole('link', { name: '下载原图' }).getAttribute('href')).toBe('/api/tickets/attachment?file=example&download=1')
     expect(detail.getByText('处理已记录。')).toBeTruthy()
-    expect(detail.getByText(`七鱼工单 #${id}`)).toBeTruthy()
+    expect(detail.getByText(`七鱼工单 #${id} · 处理中`)).toBeTruthy()
     expect(fetchApi.mock.calls.some(([path]) => path.startsWith('/api/tickets/detail?') && new URL(path, location.origin).searchParams.get('id') === id)).toBe(true)
 
     fireEvent.click(detail.getByRole('button', { name: '查看会话' }))
@@ -53,7 +63,11 @@ describe('七鱼工单', () => {
     fireEvent.click(detail.getByRole('button', { name: 'Close' }))
     expect(location.hash).toBe('#tickets')
 
-    fireEvent.click(await screen.findByRole('button', { name: `查看工单 ${id}` }))
+    const openDetails = await screen.findByRole('button', { name: `查看工单 ${id}` })
+    expect(openDetails.textContent).toBe('查看详情')
+    expect(openDetails.getAttribute('data-variant')).toBe('outline')
+    expect(openDetails.querySelector('svg')).toBeNull()
+    fireEvent.click(openDetails)
     expect(location.hash).toBe(`#tickets?id=${id}`)
     await screen.findByRole('dialog', { name: ticket.title })
     act(() => { history.replaceState(null, '', '#tickets'); window.dispatchEvent(new PopStateEvent('popstate')) })

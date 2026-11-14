@@ -23,7 +23,7 @@ from .. import voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
-from . import admin_keys, api, case_media, guest_evidence, tickets
+from . import admin_keys, api, case_media, guest_evidence, ticket_media, tickets
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
@@ -385,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"keys": self.server.key_store.list()})
             elif path == "/api/detail/image":
                 self._case_image(qs)
+            elif path == "/api/tickets/media":
+                self._ticket_media(qs)
             elif path in ("/api/tickets", "/api/tickets/detail"):
                 self._ticket_api(path, qs)
             elif path.startswith("/api/voc2/"):
@@ -419,6 +421,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(error)}, error.http_status)
             return
         self._json(response)
+
+    def _ticket_media(self, qs: dict[str, list[str]]) -> None:
+        tokens = qs.get("token", [])
+        download = qs.get("download", ["0"])
+        if len(tokens) != 1 or len(download) != 1 or download[0] not in ("0", "1"):
+            self._json({"error": "工单附件参数无效。"}, 400)
+            return
+        if not IMAGE_SLOTS.acquire(timeout=2):
+            self._json({"error": "附件加载繁忙，请重试。"}, 503)
+            return
+        try:
+            media, mime, disposition = ticket_media.fetch(tokens[0], self.server.cfg.qiyu.app_secret,
+                                                           download=download[0] == "1")
+        except case_media.ImageFetchError as exc:
+            self._json({"error": str(exc)}, exc.status)
+        else:
+            self._send(media, mime, extra={
+                "Content-Disposition": disposition,
+                "Cross-Origin-Resource-Policy": "same-origin",
+            })
+        finally:
+            IMAGE_SLOTS.release()
 
     def _guest_asset(self, path: str, suffix: str) -> None:
         name = path.removeprefix(GUEST_ASSET_PREFIX)
@@ -876,9 +900,9 @@ class Handler(BaseHTTPRequestHandler):
             self.log_message('"%s /guest/evidence/[redacted] %s" %s %s',
                              self.command, self.request_version, str(code), str(size))
             return
-        if path.endswith("/api/detail/image"):
-            self.log_message('"%s /api/detail/image %s" %s %s',
-                             self.command, self.request_version, str(code), str(size))
+        if path in ("/api/detail/image", "/api/tickets/media"):
+            self.log_message('"%s %s %s" %s %s',
+                             self.command, path, self.request_version, str(code), str(size))
             return
         super().log_request(code, size)
 

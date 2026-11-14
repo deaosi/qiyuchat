@@ -142,7 +142,7 @@ export function RuleClusterWorkspace({ filters, refreshKey = 0, onDrill }: Props
                         </p>}
                         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                           <span className="tabular-nums">簇 {id} · {numbers.format(item.variants)} 种问法</span>
-                          <Button variant="link" className={rowLink} aria-label={`簇 ${id}，查看问答`} onClick={() => onDrill(cluster, 'all')}>查看问答</Button>
+                          <Button variant="outline" size="xs" aria-label={`簇 ${id}，查看问答`} onClick={() => onDrill(cluster, 'all')}>查看问答</Button>
                           <Button variant="ghost" size="xs" aria-expanded={detailsOpen} aria-controls={detailsOpen ? detailsId : undefined} aria-label={`簇 ${id}，${detailsOpen ? '收起问法' : '查看问法'}`} onClick={() => setCursor({ scope, offset, expanded: detailsOpen ? null : id })}>
                             {detailsOpen ? '收起问法' : '查看问法'}
                           </Button>

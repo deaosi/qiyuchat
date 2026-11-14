@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import http.client
+from email.message import Message
+from io import BytesIO
 import json
 import threading
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from src.app import get_db
 from src.qiyu import ticket
 from src.qiyu.sign import build_signature
+from src.web import case_media
 from src.web.server import DashboardServer
 from tests.test_local import LocalFixture
 
@@ -28,14 +31,18 @@ class TicketModuleTests(LocalFixture):
         self.thread.join(timeout=2)
         super().tearDown()
 
-    def fetch(self, path: str, *, admin: bool = True):
+    def fetch_raw(self, path: str, *, admin: bool = True):
         client = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
         try:
             client.request("GET", path, headers={"X-Admin-Key": "fixture"} if admin else {})
             response = client.getresponse()
-            return response.status, json.loads(response.read())
+            return response.status, response.headers, response.read()
         finally:
             client.close()
+
+    def fetch(self, path: str, *, admin: bool = True):
+        status, _, data = self.fetch_raw(path, admin=admin)
+        return status, json.loads(data)
 
     def test_authenticated_projection_keeps_ticket_links_and_drops_private_fields(self):
         self.seed()
@@ -107,3 +114,67 @@ class TicketModuleTests(LocalFixture):
             upstream.assert_called_once()
         with patch("src.qiyu.ticket.request", return_value={"code": 200, "message": {"total": 1, "tickets": []}}):
             self.assertEqual(self.fetch("/api/tickets")[0], 502)
+
+    def test_projects_template_fields_and_only_serves_authenticated_ticket_media(self):
+        image_url = "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef"
+        file_url = "https://qiyukf.net/f123456789abcdef0123456789abcdef"
+        foreign_url = "https://shop.qiyukf.net.example.org/0123456789abcdef0123456789abcdef"
+        fields = [
+            {"name": "客户群名称", "value": "示例客户群"},
+            {"name": "平台&版本", "value": json.dumps({"path": "示例平台/新版", "idpath": [12, 34]})},
+            {"name": "手机号码", "value": "13812345678"},
+            {"name": "附件/截图", "value": json.dumps([
+                {"name": "截图.jpg", "response": {"url": image_url}},
+                {"name": "截图.jpg", "url": image_url},
+                {"name": "说明.pdf", "url": file_url},
+                {"name": "假图.png", "url": foreign_url},
+            ])},
+        ]
+        detail = {"id": 12, "title": "示例工单", "custom": fields, "isRichText": 1,
+                  "content": f'<p>故障描述<img src="{image_url}" alt="截图.jpg"><script>ignore</script></p>',
+                  "attachments": [{"name": "截图.jpg", "url": image_url}]}
+        logs = [{"id": 44, "attachments": [{"name": "截图.jpg", "url": image_url}]}]
+        with patch("src.qiyu.ticket.request", side_effect=[{"code": 200, "data": detail}, {"code": 200, "data": logs}]):
+            status, projected = self.fetch("/api/tickets/detail?id=12")
+        self.assertEqual(status, 200)
+        ticket_detail = projected["ticket"]
+        self.assertEqual(ticket_detail["description"], "故障描述")
+        first, second, media = ticket_detail["fields"]
+        self.assertEqual(first, {"label": "客户群名称", "value": "示例客户群"})
+        self.assertEqual(second, {"label": "平台&版本", "value": "示例平台/新版"})
+        self.assertEqual((media["label"], media["value"]), ("附件/截图", ""))
+        self.assertEqual([image["name"] for image in media["images"]], ["截图.jpg"])
+        self.assertEqual([file["name"] for file in media["attachments"]], ["说明.pdf"])
+        self.assertEqual(ticket_detail["images"], media["images"])
+        self.assertEqual(projected["history"][0]["images"], media["images"])
+        self.assertNotIn(foreign_url, json.dumps(projected))
+
+        class Upstream(BytesIO):
+            status = 200
+
+            def __init__(self, data, mime):
+                super().__init__(data)
+                self.headers = Message()
+                self.headers["Content-Type"] = mime
+                self.headers["Content-Length"] = str(len(data))
+
+        png = b"\x89PNG\r\n\x1a\ncontent"
+        image_link = media["images"][0]["url"]
+        attachment_link = media["attachments"][0]["url"]
+        with patch.object(case_media._IMAGE_OPENER, "open") as upstream:
+            self.assertEqual(self.fetch(image_link, admin=False)[0], 401)
+            self.assertEqual(self.fetch(image_link + "a")[0], 404)
+            self.assertEqual(self.fetch("/api/tickets/media?url=" + image_url)[0], 400)
+            upstream.assert_not_called()
+            for recorded_type in ("image/jpeg", "application/octet-stream"):
+                upstream.return_value = Upstream(png, recorded_type)
+                code, headers, content = self.fetch_raw(image_link)
+                self.assertEqual((code, headers.get_content_type(), content), (200, "image/png", png))
+                self.assertTrue(headers["Content-Disposition"].startswith("inline;"))
+                self.assertTrue(headers["Content-Disposition"].endswith(".png"))
+                self.assertEqual(upstream.call_args.args[0].full_url, image_url)
+            upstream.return_value = Upstream(b"<script>ignore</script>", "text/html")
+            code, headers, content = self.fetch_raw(attachment_link)
+            self.assertEqual((code, headers.get_content_type()), (200, "application/octet-stream"))
+            self.assertTrue(headers["Content-Disposition"].startswith("attachment;"))
+            self.assertEqual(upstream.call_args.args[0].full_url, file_url)

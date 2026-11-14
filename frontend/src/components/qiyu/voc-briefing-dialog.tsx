@@ -1,5 +1,5 @@
 import { useState, type ReactElement } from 'react'
-import { ArrowUpRight, Copy, RefreshCw } from 'lucide-react'
+import { Copy, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -88,7 +88,7 @@ function BriefingEntries({ section }: { section: BriefingSection }) {
     {rows.length ? <ul className="divide-y rounded-lg border bg-background">
       {rows.map(row => <li key={row.id} className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1 px-3 py-2.5">
         <div className="min-w-0 flex-1 basis-48"><p className="break-words text-sm font-medium">{row.title}</p><p className="mt-0.5 text-xs tabular-nums text-muted-foreground">{row.description}</p></div>
-        {row.href && <a href={row.href} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2">查看问题<ArrowUpRight aria-hidden="true" className="size-3" /></a>}
+        {row.href && <Button asChild variant="outline" size="sm"><a href={row.href} target="_blank" rel="noreferrer">查看问题</a></Button>}
       </li>)}
     </ul> : <p className="rounded-lg border border-dashed bg-background px-3 py-2.5 text-sm text-muted-foreground">本期暂无{title}。</p>}
     {total > rows.length && <p className="text-xs text-muted-foreground">预览仅列出前 {previewLimit} 条。</p>}

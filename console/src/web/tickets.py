@@ -6,6 +6,7 @@ from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime, time, timedelta, timezone
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -14,6 +15,7 @@ from typing import Any
 from ..clean.rules import mask_pii
 from ..config import Settings
 from ..qiyu.ticket import PAGE_SIZE, TicketClient, TicketError, _id
+from . import ticket_media
 
 
 _ZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -52,28 +54,86 @@ class _RichText(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.media: list[dict] = []
+        self.hidden: str = ""
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+        if not self.hidden:
+            self.parts.append(data)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.hidden:
+            return
+        if tag in ("script", "style"):
+            self.hidden = tag
         if tag == "br":
             self.parts.append("\n")
+        if tag == "img":
+            values = dict(attrs)
+            self.media.append({"url": values.get("src"), "name": values.get("alt") or "工单截图", "inline_image": True})
 
     def handle_endtag(self, tag: str) -> None:
+        if self.hidden:
+            if tag == self.hidden:
+                self.hidden = ""
+            return
         if tag in ("p", "div", "li", "tr"):
             self.parts.append("\n")
 
 
-def _text(value: Any, maximum: int, *, rich: bool = False) -> str:
+def _text(value: Any, maximum: int) -> str:
     if not isinstance(value, str):
         return ""
-    if rich:
+    return mask_pii(value.strip())[:maximum]
+
+
+def _attachments(value: Any) -> list[dict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _field_value(value: Any, maximum: int, *, rich: bool = False) -> tuple[str, list[dict]]:
+    if not isinstance(value, str):
+        return "", []
+    stripped = value.strip()
+    if not rich and stripped.startswith(("[", "{")):
+        try:
+            structured = json.loads(stripped)
+        except (ValueError, RecursionError):
+            structured = None
+        if isinstance(structured, dict) and isinstance(structured.get("path"), str):
+            return _text(structured["path"], maximum), []
+        candidates = _attachments(structured)
+        if candidates and all("url" in item or "response" in item for item in candidates):
+            return "", candidates
+    if rich or re.search(r"<img\s", value, re.IGNORECASE):
         parser = _RichText()
         parser.feed(value)
         parser.close()
-        value = "".join(parser.parts)
-    return mask_pii(value.strip())[:maximum]
+        return _text("".join(parser.parts), maximum), parser.media
+    return _text(value, maximum), []
+
+
+def _project_fields(value: Any, secret: str, *, history: bool = False) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    fields = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        label = _text(entry.get("title") or entry.get("titleLang") if history else entry.get("name"), 100)
+        if label.casefold() in _PRIVATE_LABELS or (not history and not label):
+            continue
+        content, candidates = _field_value(entry.get("content" if history else "value"), 4000)
+        images, attachments = ticket_media.links(candidates, secret)
+        if history and not (content or images or attachments):
+            continue
+        field = {"label": label, "value": content}
+        if images:
+            field["images"] = images
+        if attachments:
+            field["attachments"] = attachments
+        fields.append(field)
+    return fields
 
 
 def _linked_sessions(cfg: Settings, ticket_ids: set[int]) -> dict[int, list[dict]]:
@@ -194,30 +254,28 @@ def ticket_detail(cfg: Settings, ticket_id: str) -> dict:
         history_available = False
     sessions = _linked_sessions(cfg, {identifier})[identifier]
     category = row.get("questionType")
+    secret = cfg.qiyu.app_secret
+    description, embedded = _field_value(row.get("content"), 12000, rich=row.get("isRichText") in (True, 1, "1"))
+    images, attachments = ticket_media.links([*embedded, *_attachments(row.get("attachments"))], secret)
     result = _public(row, len(sessions))
     result.update(
-        description=_text(row.get("content"), 12000, rich=row.get("isRichText") in (True, 1, "1")),
+        description=description,
         category=_text(category.get("path") or category.get("name"), 300) if isinstance(category, dict) else "",
         template=_text(row.get("templateName"), 200),
+        fields=_project_fields(row.get("custom"), secret),
+        images=images, attachments=attachments,
     )
     history = []
     for index, entry in enumerate(logs):
-        details = []
-        info = entry.get("info")
-        if isinstance(info, list):
-            for field in info:
-                if not isinstance(field, dict):
-                    continue
-                label = _text(field.get("title") or field.get("titleLang"), 100)
-                value = _text(field.get("content"), 4000)
-                if label.casefold() not in _PRIVATE_LABELS and value:
-                    details.append({"label": label, "value": value})
+        event_images, event_attachments = ticket_media.links(_attachments(entry.get("attachments")), secret)
         history.append({
             "id": str(_id(entry.get("id")) or f"log-{index + 1}"),
             "action": _text(entry.get("action") or entry.get("actionLang"), 200) or "工单变更",
             "operator": _text(entry.get("operator"), 120),
             "time": _millis(entry.get("time")),
-            "details": details,
+            "details": _project_fields(entry.get("info"), secret, history=True),
+            "images": event_images,
+            "attachments": event_attachments,
         })
     history.sort(key=lambda entry: entry["time"] or 0, reverse=True)
     timestamps = [result["updated_at"], _millis(row.get("lastFinishTime")), *(entry["time"] for entry in history)]

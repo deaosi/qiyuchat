@@ -149,7 +149,10 @@ describe('VOC Feishu briefing preview', () => {
     await act(async () => complete({ url: destination, title: '本期操作知识', reused: false, count: 1 }))
     expect(screen.queryByRole('link', { name: '在飞书查看成果' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '知识 SOP' }))
-    expect((await screen.findByRole('link', { name: '在飞书查看成果' })).getAttribute('href')).toBe(destination)
+    const resultLink = await screen.findByRole('link', { name: '在飞书查看成果' })
+    expect(resultLink.getAttribute('href')).toBe(destination)
+    expect(resultLink.getAttribute('data-variant')).toBe('outline')
+    expect(resultLink.querySelector('svg')).toBeNull()
     expect((screen.getByRole('button', { name: '发布到飞书' }) as HTMLButtonElement).disabled).toBe(true)
   })
 

@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { AlertCircle, Archive, ArrowUpRight, CircleCheck, CircleDashed, Layers2, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
+import { AlertCircle, Archive, CircleCheck, CircleDashed, Layers2, MessageSquareText, MessagesSquare, RefreshCw, ShieldCheck } from 'lucide-react'
 import { LoadingState } from './loading-state'
 import type { QAPair } from '@/lib/demo-data'
 import { ApiError, apiGet, apiPost, normalizePair, type ApiFilters, type DetailMessageImage, type DetailRepliesResponse, type DetailSenderKind, type DetailSenderMetadata } from '@/lib/api'
@@ -255,7 +255,7 @@ export function QADetail({ pair: requestedPair, onClose, source = 'local', embed
             <p className="whitespace-pre-wrap text-sm font-medium [overflow-wrap:anywhere]">{normalizedQuestion}</p>
           </div>}
           <section className="py-6">
-            <h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><ArrowUpRight className="size-3.5" />客服回复</h3>
+            <h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><MessageSquareText aria-hidden="true" className="size-3.5" />客服回复</h3>
             <p className="whitespace-pre-wrap text-sm leading-7 [overflow-wrap:anywhere]">{pair.answer.trim() || (officialFound ? '查到的人工客服回复见下方会话记录。' : hasStaffInContext ? '客服原话见下方会话记录。' : hasFukeStaff ? '福客 AI 员工的消息见下方会话记录。' : '当前抽取片段中未发现客服回复。这不代表已经确认该问题未解决。')}</p>
           </section>
           </>}

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { ArrowUpRight, Download, RefreshCw } from 'lucide-react'
+import { Download, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DialogClose, DialogFooter } from '@/components/ui/dialog'
 import { useApi } from '@/hooks/use-api'
@@ -107,7 +107,7 @@ export function VocFeishuPublish({ active, hasWindow, filters, defaultKind, publ
       {action?.error && <p role="alert" className="rounded-lg border p-3 text-sm [overflow-wrap:anywhere]">{action.error}</p>}
       {receipt && receiptUrl && <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm">
         <p className="min-w-0 [overflow-wrap:anywhere]">{receipt.reused ? '相同内容已发布' : '发布成功'}{receipt.count !== undefined ? ` · ${countText.format(receipt.count)} 项` : ''}</p>
-        <a href={receiptUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium underline underline-offset-4">在飞书查看成果<ArrowUpRight aria-hidden="true" className="size-3.5" /></a>
+        <Button asChild variant="outline" size="sm"><a href={receiptUrl} target="_blank" rel="noreferrer">在飞书查看成果</a></Button>
       </div>}
     </div>
 

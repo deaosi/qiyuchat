@@ -71,6 +71,7 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
   const [running, setRunning] = useState(false)
   const [limit, setLimit] = useState('100')
   const rankingHeading = useRef<HTMLDivElement>(null)
+  const rankingButton = useRef<HTMLButtonElement>(null)
   const resultFilters: ApiFilters = { ...filters, support_intent: supportIntent, diagnosis_status: diagnosisStatus }
   const scopeKey = JSON.stringify({ ...resultFilters, trend })
   const [ranking, setRanking] = useState<{ scopeKey: string; page: number; selectedId: string | null; members?: TopicMember[] }>({ scopeKey, page: 0, selectedId: initialTopic })
@@ -174,7 +175,8 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
             const memberCount = item.members?.length ?? 0
             const theme = item.theme.trim()
             const showQuestion = theme && theme !== item.question.trim() && (!item.category_key || memberCount < 2)
-            return <button type="button" key={item.category_key ?? item.id} onClick={() => setRanking({ scopeKey, page, selectedId: item.members?.[0]?.id ?? item.id, members: item.members })} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-sm px-1 py-4 text-left transition-colors hover:bg-muted/35 focus-visible:outline-2 focus-visible:outline-ring sm:px-2">
+            const action = memberCount > 1 ? `查看 ${count(memberCount)} 个细分问题` : '查看问答'
+            return <div key={item.category_key ?? item.id} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-1 py-4 sm:px-2">
               <span className="flex min-w-0 items-start gap-3">
                 <span className="w-7 shrink-0 text-right text-sm tabular-nums text-muted-foreground"><span className="sr-only">排名 </span>{count(offset + index + 1)}</span>
                 <span className="min-w-0 [overflow-wrap:anywhere]">
@@ -183,14 +185,18 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
                   <span className="mt-1 block text-xs leading-5 text-muted-foreground">{[intentLabels[item.primary_intent || 'unclear'], platforms, item.last_seen && `最近 ${displayTime(item.last_seen)}`].filter(Boolean).join(' · ')}</span>
                 </span>
               </span>
-              <span className="flex items-center gap-3 sm:gap-4">
+              <span className="flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-4">
                 <span className="grid justify-items-end gap-1 text-right text-xs tabular-nums text-muted-foreground">
                   <span className="font-medium text-foreground">{count(item.consultation_count)} 次咨询</span>
                   <span className="flex flex-col items-end gap-x-1 sm:flex-row"><span>{count(item.session_count)} 个会话</span>{item.merchant_count !== undefined && <><span aria-hidden="true" className="hidden sm:inline">·</span><span>识别 {count(item.merchant_count)} 家商家</span></>}</span>
                 </span>
-                <span className="shrink-0 rounded-md border px-2 py-1 text-xs font-medium">{memberCount > 1 ? `查看 ${count(memberCount)} 个细分问题` : '查看问答'}</span>
+                <Button type="button" variant="outline" size="sm" aria-label={`${action} · ${theme || item.question}`}
+                  onClick={event => {
+                    rankingButton.current = event.currentTarget
+                    setRanking({ scopeKey, page, selectedId: item.members?.[0]?.id ?? item.id, members: item.members })
+                  }}>{action}</Button>
               </span>
-            </button>
+            </div>
           })}</div> : <p role="status" className="py-10 text-center text-sm text-muted-foreground">{emptyTrendMessage(trend, comparison)}</p>}
         </QueryPanel>
       </CardContent>
@@ -208,7 +214,13 @@ export function VocFrequencyWorkspace({ filters, refreshKey = 0, onOpenPair, onO
       setRanking(current => ({ ...current, selectedId: null }))
       if (initialTopic) onCloseLinkedTopic?.()
     }}>
-      <SheetContent className="w-full gap-0 sm:max-w-3xl xl:max-w-4xl">
+      <SheetContent className="w-full gap-0 sm:max-w-3xl xl:max-w-4xl" onCloseAutoFocus={event => {
+        event.preventDefault()
+        const button = rankingButton.current
+        const focusTarget = button?.isConnected ? button : rankingHeading.current
+        rankingButton.current = null
+        focusTarget?.focus({ preventScroll: true })
+      }}>
         <TopicDetailPanel exchangeOnly>
           {selectedMembers && selectedMembers.length > 1 && <div className="mb-4 space-y-2" role="group" aria-label="选择细分问题">
             <p className="text-sm font-medium">选择细分问题</p>
