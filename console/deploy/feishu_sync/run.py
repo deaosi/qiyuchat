@@ -19,6 +19,7 @@ BATCH_SIZE = 100
 REGISTER_LIMIT = 1500
 UPDATED_FIELD = "最近更新时间"
 DISPLAY_LINK_FIELD = "语海详情"
+TOP_DISPLAY_LINK_FIELD = "点击查看详情"
 _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
 
 
@@ -86,7 +87,7 @@ def _display_link(key, url):
     return {"text": "查看 SOP" if key.startswith("sop_") else "查看问题", "link": url}
 
 
-def _project(target, snapshot, *, top=False, display_links=True):
+def _project(target, snapshot, *, top=False, display_field=DISPLAY_LINK_FIELD):
     doc = snapshot["documents"]["topics"]
     records = doc["records"][:100] if top else doc["records"]
     fields = target.fields
@@ -104,15 +105,15 @@ def _project(target, snapshot, *, top=False, display_links=True):
         key = item.get("register_key", item["key"])
         if not sync._SOURCE_ID["topics"].fullmatch(key) or key in desired:
             raise ValueError("高频问题登记编号重复或无效。")
-        if display_links:
-            row[DISPLAY_LINK_FIELD] = _display_link(key, item["url"])
+        if display_field:
+            row[display_field] = _display_link(key, item["url"])
         desired[key] = row
     if not top:
         for item in snapshot["documents"]["sops"]["records"]:
             desired[item["key"]] = {fields["title"]: item["title"], fields["detail"]: item["detail"],
                                     fields["summary"]: item["summary"], fields["source"]: item["url"]}
-            if display_links:
-                desired[item["key"]][DISPLAY_LINK_FIELD] = _display_link(item["key"], item["url"])
+            if display_field:
+                desired[item["key"]][display_field] = _display_link(item["key"], item["url"])
     return desired
 
 
@@ -344,7 +345,7 @@ def _load_create_intent(path, target, marker, desired):
     return keys_seen, batches, False
 
 
-def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=True, display_links=True):
+def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=True, display_field=DISPLAY_LINK_FIELD):
     times = {} if not top else None
     current, links = _read_rows(target, creation_times=times) if not top else _read_rows(target)
     if path.exists():
@@ -357,7 +358,12 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
         known = _adopt_legacy(target, current, links, previous)
         previous_state = {"table": target.table_id, "records": known}
         support._write_state(path, previous_state)
-    desired = _project(target, snapshot, top=top, display_links=display_links)
+    intent_path = path.with_suffix(".pending.json")
+    pending_field = support._read_state(intent_path).get("display_field", DISPLAY_LINK_FIELD) if intent_path.exists() else None
+    if display_field and pending_field and display_field != pending_field:
+        raise ValueError("飞书超链接列在新增批次确认前改名，请先核对待写记录。")
+    _match_display_field(known, current, display_field)
+    desired = _project(target, snapshot, top=top, display_field=display_field)
     if not previous_state.get("stable_keys") and (top or not previous_state.get("fifo")):
         identities = {item["key"]: item.get("register_key", item["key"])
                       for data in (snapshot, previous) for item in data["documents"]["topics"]["records"]}
@@ -386,7 +392,6 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
             raise ValueError("登记表没有足够的新增容量。")
     else:
         plan_rows, plan_links = current, links
-    intent_path = path.with_suffix(".pending.json")
     pending_create, create_batches, old_intent = _load_create_intent(intent_path, target, snapshot["marker"], desired)
     reserved, updates, creates, remove, protected = _plan(target, plan_rows, plan_links, known, desired, pending_create)
     fifo_remove = sorted({record_id for key, record_id in evict.items() if key not in merged} & current.keys()) if not top else []
@@ -406,7 +411,8 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
         create_batches.extend({"keys": keys, "digest": _create_digest(keys, desired)}
                               for keys in _batches(new_creates))
         support._write_state(intent_path, {"table": target.table_id, "marker": snapshot["marker"],
-                                         "batches": create_batches, "display_links": display_links})
+                                         "batches": create_batches, "display_links": bool(display_field),
+                                         "display_field": display_field})
     for batch in _batches(updates):
         sync._batch(target, "update", batch)
     if merge_remove:
@@ -440,7 +446,7 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
     lineage = {key: sorted(current_members.get(key) or old_members[key]) for key in state
                if key in current_members or key in old_members}
     committed = {"table": target.table_id, "records": state, "stable_keys": True, "lineage": lineage,
-                 "display_links": display_links}
+                 "display_links": bool(display_field)}
     if not top:
         committed.update(fifo=True, retired=sorted(retired), marker=snapshot["marker"])
     support._write_state(path, committed)
@@ -474,10 +480,10 @@ def _ensure_updated_field(target):
         raise ValueError("登记表最近更新时间未能确认为飞书系统字段。")
 
 
-def _ensure_display_field(target):
+def _ensure_display_field(target, *, top=False):
     def get_field():
-        return next((row for row in sync._paginated(target, "GET", "/fields")
-                     if row.get("field_name") == DISPLAY_LINK_FIELD), None)
+        fields = {row.get("field_name"): row for row in sync._paginated(target, "GET", "/fields")}
+        return (fields.get(TOP_DISPLAY_LINK_FIELD) if top else None) or fields.get(DISPLAY_LINK_FIELD)
 
     field = get_field()
     if field is None:
@@ -487,13 +493,30 @@ def _ensure_display_field(target):
         field = get_field()
     if field is None or field.get("type") != 15:
         raise ValueError("飞书「语海详情」列须使用超链接类型。")
+    return field["field_name"]
 
 
-def _backfill_display_links(target, path):
+def _match_display_field(known, current, display_field):
+    if display_field != TOP_DISPLAY_LINK_FIELD:
+        return
+    for entry in known.values():
+        fields = entry["fields"]
+        if DISPLAY_LINK_FIELD not in fields:
+            continue
+        row = current.get(entry["id"], {})
+        value = fields[DISPLAY_LINK_FIELD]
+        if (display_field in fields or sync._value(row.get(display_field)) != sync._value(value)
+                or sync._value(row.get(DISPLAY_LINK_FIELD))):
+            raise ValueError("飞书排名表超链接列改名后内容无法核对。")
+        fields[display_field] = fields.pop(DISPLAY_LINK_FIELD)
+
+
+def _backfill_display_links(target, path, display_field=DISPLAY_LINK_FIELD):
     """Format known guest URLs in place and keep the record ownership journal current."""
     known = _load_table_state(path, target)
     state = support._read_state(path)
     current, _ = _read_rows(target)
+    _match_display_field(known, current, display_field)
     desired, updates = {}, []
     for key, entry in known.items():
         record_id, fields = entry["id"], entry["fields"]
@@ -503,22 +526,22 @@ def _backfill_display_links(target, path):
             raise ValueError("飞书历史记录的访客链接已变化，无法安全迁移。")
         value = _display_link(key, url)
         desired[record_id] = value
-        if sync._value(actual.get(DISPLAY_LINK_FIELD)) != value:
-            updates.append({"record_id": record_id, "fields": {DISPLAY_LINK_FIELD: value}})
+        if sync._value(actual.get(display_field)) != value:
+            updates.append({"record_id": record_id, "fields": {display_field: value}})
 
     for batch in _batches(updates):
         sync._batch(target, "update", batch)
     latest, _ = _read_rows(target) if updates else (current, None)
     if set(latest) != set(current) or any(
-        {name: value for name, value in row.items() if name != DISPLAY_LINK_FIELD}
-        != {name: value for name, value in current[record_id].items() if name != DISPLAY_LINK_FIELD}
-        or (record_id in desired and sync._value(row.get(DISPLAY_LINK_FIELD)) != desired[record_id])
-        or (record_id not in desired and row.get(DISPLAY_LINK_FIELD) != current[record_id].get(DISPLAY_LINK_FIELD))
+        {name: value for name, value in row.items() if name != display_field}
+        != {name: value for name, value in current[record_id].items() if name != display_field}
+        or (record_id in desired and sync._value(row.get(display_field)) != desired[record_id])
+        or (record_id not in desired and row.get(display_field) != current[record_id].get(display_field))
         for record_id, row in latest.items()
     ):
         raise ValueError("飞书历史链接未完整回读，请重试核对。")
     for entry in known.values():
-        entry["fields"][DISPLAY_LINK_FIELD] = desired[entry["id"]]
+        entry["fields"][display_field] = desired[entry["id"]]
     updated_state = {**state, "records": known, "display_links": True}
     if updated_state != state:
         support._write_state(path, updated_state)
@@ -540,10 +563,9 @@ def _links_only(state_dir):
         paths = ((target, state_dir / "full-table.json"), (top_target, state_dir / "top-table.json"))
         for table, path in paths:
             _load_table_state(path, table)
-        for table, _ in paths:
-            _ensure_display_field(table)
-        return {"status": "links_updated", "all": _backfill_display_links(*paths[0]),
-                "top": _backfill_display_links(*paths[1])}
+        fields = (_ensure_display_field(target), _ensure_display_field(top_target, top=True))
+        return {"status": "links_updated", "all": _backfill_display_links(*paths[0], fields[0]),
+                "top": _backfill_display_links(*paths[1], fields[1])}
 
 
 def run(state_dir, apply, *, refresh=False, dashboard_only=False):
@@ -601,14 +623,12 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
             old_intent = any(path.with_suffix(".pending.json").exists()
                              and not support._read_state(path.with_suffix(".pending.json")).get("display_links")
                              for path in active_states)
-            display_links = not old_intent
-            if display_links:
-                _ensure_display_field(target)
-                _ensure_display_field(top_target)
+            original_field = None if old_intent else _ensure_display_field(target)
+            top_field = None if old_intent else _ensure_display_field(top_target, top=True)
             original_result = _sync_table(target, full_state, stage, previous, allow_writes=allow_writes,
-                                          display_links=display_links)
+                                          display_field=original_field)
             top_result = _sync_table(top_target, top_state, stage, previous, top=True,
-                                     allow_writes=allow_writes, display_links=display_links)
+                                     allow_writes=allow_writes, display_field=top_field)
             stage = {**stage, "published_at": int(time.time()), "register_count": original_result["topics"],
                      "published_sops": support._sop_inventory(previous, stage)}
             support._write_state(published, stage)
