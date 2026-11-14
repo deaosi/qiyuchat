@@ -1,0 +1,246 @@
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { ArrowUpRight, ChevronLeft, ChevronRight, Search } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { useApi } from '@/hooks/use-api'
+import { normalizePair } from '@/lib/api'
+import { LoadingState, RefreshDataButton } from './loading-state'
+import { QADetail } from './qa-detail'
+
+const pageSize = 20
+const numberFormat = new Intl.NumberFormat('zh-CN')
+const timeFormat = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+})
+
+type Ticket = {
+  id: string
+  title: string
+  status: string
+  priority: string
+  owner: string
+  created_at: number | null
+  updated_at: number | null
+  linked_session_count: number
+}
+type TicketPage = { items: Ticket[]; total: number; offset: number; limit: number; has_more: boolean }
+type TicketEvent = {
+  id: string
+  action: string
+  operator: string
+  time: number | null
+  details: { label: string; value: string }[]
+}
+type LinkedSession = { session_id: string; started_at: number | null; qa_id: number | null }
+type TicketDetail = {
+  ticket: Ticket & { description: string; category?: string; template?: string }
+  history: TicketEvent[]
+  sessions: LinkedSession[]
+  history_available: boolean
+}
+const statuses = { all: '全部状态', '1': '已提交', '5': '待申领', '10': '处理中', '20': '已完结' } as const
+type TicketStatus = keyof typeof statuses
+type Filters = { q: string; start: string; end: string; ticket_status: TicketStatus }
+const emptyFilters: Filters = { q: '', start: '', end: '', ticket_status: 'all' }
+
+function ticketTime(value: number | null): string {
+  if (typeof value !== 'number' || value <= 0 || !Number.isFinite(new Date(value).getTime())) return '—'
+  return timeFormat.format(value).replaceAll('/', '-')
+}
+
+function TicketError({ error, retry }: { error: string; retry: () => void }) {
+  return <div role="alert" className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-sm text-destructive">
+    <p>{error}</p><Button size="sm" variant="outline" onClick={retry}>重试</Button>
+  </div>
+}
+
+function TicketHistory({ history, available, reload }: { history: TicketEvent[]; available: boolean; reload: () => void }) {
+  if (!available) return <TicketError error="暂时无法读取七鱼工单处理记录。" retry={reload} />
+  if (!history.length) return <p className="text-sm text-muted-foreground">暂无工单处理记录。</p>
+  return <ol className="divide-y rounded-lg border">
+    {history.map((event, index) => <li key={`${event.id}-${index}`} className="space-y-2 p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <p className="break-words text-sm font-medium">{event.action || '工单操作'}</p>
+        <p className="shrink-0 text-xs tabular-nums text-muted-foreground">{ticketTime(event.time)}</p>
+      </div>
+      {event.operator && <p className="text-xs text-muted-foreground">{event.operator}</p>}
+      {event.details.length > 0 && <dl className="space-y-2 text-sm leading-6">
+        {event.details.map((field, i) => <div key={`${field.label}-${i}`}>
+          {field.label && <dt className="text-xs text-muted-foreground">{field.label}</dt>}
+          <dd className="whitespace-pre-wrap [overflow-wrap:anywhere]">{field.value}</dd>
+        </div>)}
+      </dl>}
+    </li>)}
+  </ol>
+}
+
+function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus }: {
+  id: string
+  refreshKey: number
+  onClose: () => void
+  onCloseAutoFocus: (event: Event) => void
+}) {
+  const details = useApi<TicketDetail>('tickets/detail', { source: 'local', id }, refreshKey)
+  const [session, setSession] = useState<LinkedSession | null>(null)
+  const data = details.data
+  return <Sheet open onOpenChange={open => { if (!open) onClose() }}>
+    <SheetContent className="w-full gap-0 sm:max-w-2xl" onCloseAutoFocus={onCloseAutoFocus}>
+      <SheetHeader className="border-b px-5 py-5 pr-12 sm:px-6 sm:pr-12">
+        <SheetTitle className="text-lg leading-6 [overflow-wrap:anywhere]">{data?.ticket.title || '工单详情'}</SheetTitle>
+        <SheetDescription>七鱼工单 #{id}</SheetDescription>
+      </SheetHeader>
+      <div className="min-h-0 flex-1 overflow-auto px-5 py-5 sm:px-6">
+        {details.loading ? <LoadingState label="正在读取七鱼工单…" /> : <div className="space-y-6">
+          {details.error && <TicketError error={details.error} retry={details.retry} />}
+          {data && <>
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-4 rounded-lg border bg-muted/25 p-4 text-sm sm:grid-cols-3">
+              {[
+                ['状态', data.ticket.status], ['优先级', data.ticket.priority], ['受理人', data.ticket.owner],
+                ['创建时间', ticketTime(data.ticket.created_at)], ['更新时间', ticketTime(data.ticket.updated_at)],
+                ...(data.ticket.category ? [['工单分类', data.ticket.category]] : []),
+                ...(data.ticket.template ? [['工单模板', data.ticket.template]] : []),
+              ].map(([name, value]) => <div key={name} className="min-w-0">
+                <dt className="mb-1 text-xs text-muted-foreground">{name}</dt>
+                <dd className="tabular-nums [overflow-wrap:anywhere]">{value || '—'}</dd>
+              </div>)}
+            </dl>
+            <section aria-label="工单描述" className="space-y-2">
+              <h3 className="text-sm font-semibold">工单描述</h3>
+              {data.ticket.description ? <p className="whitespace-pre-wrap rounded-lg border px-4 py-3 text-sm leading-7 [overflow-wrap:anywhere]">{data.ticket.description}</p>
+                : <p className="text-sm text-muted-foreground">暂无描述。</p>}
+            </section>
+            <section aria-label="处理记录" className="space-y-2">
+              <h3 className="text-sm font-semibold">处理记录</h3>
+              <TicketHistory history={data.history} available={data.history_available} reload={details.retry} />
+            </section>
+            <section aria-label="关联会话" className="space-y-2">
+              <h3 className="text-sm font-semibold">关联会话</h3>
+              {data.sessions.length ? <ul className="divide-y rounded-lg border">{data.sessions.map(item => <li key={item.session_id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm">
+                <span className="break-all">{item.session_id}<span className="ml-2 text-xs text-muted-foreground">{ticketTime(item.started_at)}</span></span>
+                {item.qa_id !== null && <Button variant="outline" size="sm" aria-expanded={session?.session_id === item.session_id}
+                  onClick={() => setSession(current => current?.session_id === item.session_id ? null : item)}>
+                  {session?.session_id === item.session_id ? '收起会话' : '查看会话'}
+                </Button>}
+              </li>)}</ul> : <p className="text-sm text-muted-foreground">语海暂未记录与该工单关联的会话。</p>}
+              {session && <div className="rounded-lg border p-4">
+                <QADetail pair={normalizePair({ qa_id: session.qa_id, session_id: session.session_id, asked_at: session.started_at })}
+                  sessionContext embedded onClose={() => setSession(null)} />
+              </div>}
+            </section>
+          </>}
+        </div>}
+      </div>
+    </SheetContent>
+  </Sheet>
+}
+
+export function TicketWorkspace({ selected, onSelect, refreshKey = 0 }: {
+  selected: string | null
+  onSelect: (id: string | null) => void
+  refreshKey?: number
+}) {
+  const [draft, setDraft] = useState<Filters>(emptyFilters)
+  const [filters, setFilters] = useState<Filters>(emptyFilters)
+  const [offset, setOffset] = useState(0)
+  const [validation, setValidation] = useState('')
+  const opener = useRef<HTMLButtonElement>(null)
+  const title = useRef<HTMLHeadingElement>(null)
+  const query = useApi<TicketPage>('tickets', { source: 'local', ...filters, ticket_status: filters.ticket_status === 'all' ? undefined : filters.ticket_status, offset, limit: pageSize }, refreshKey)
+  const data = query.data
+  const total = data?.total ?? 0
+  const finalOffset = Math.max(0, Math.ceil(total / pageSize) - 1) * pageSize
+  const correctingPage = data !== null && !data.has_more && !data.items.length && offset > finalOffset
+  useEffect(() => {
+    if (correctingPage) setOffset(finalOffset)
+  }, [correctingPage, finalOffset])
+
+  function search(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (draft.start && draft.end && draft.start > draft.end) {
+      setValidation('开始日期不能晚于结束日期。')
+      return
+    }
+    setValidation('')
+    setFilters({ ...draft, q: draft.q.trim() })
+    setOffset(0)
+  }
+
+  function reset() {
+    setDraft(emptyFilters)
+    setFilters(emptyFilters)
+    setValidation('')
+    setOffset(0)
+  }
+
+  return <Card className="min-w-0">
+    <CardHeader className="gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <CardTitle><h2 ref={title} tabIndex={-1}>七鱼工单</h2></CardTitle>
+        <RefreshDataButton onRefresh={query.retry} />
+      </div>
+      <form role="search" aria-label="筛选工单" className="flex flex-wrap items-end gap-3" onSubmit={search}>
+        <label className="grid min-w-40 flex-1 gap-1.5 text-xs text-muted-foreground sm:max-w-72">工单搜索
+          <Input type="search" maxLength={100} value={draft.q} placeholder="工单编号或标题" onChange={event => setDraft(current => ({ ...current, q: event.target.value }))} />
+        </label>
+        <label className="grid gap-1.5 text-xs text-muted-foreground">创建日期从
+          <Input type="date" min="2000-01-01" max="2100-12-31" value={draft.start} onChange={event => setDraft(current => ({ ...current, start: event.target.value }))} />
+        </label>
+        <label className="grid gap-1.5 text-xs text-muted-foreground">创建日期至
+          <Input type="date" min="2000-01-01" max="2100-12-31" value={draft.end} onChange={event => setDraft(current => ({ ...current, end: event.target.value }))} />
+        </label>
+        <div className="grid gap-1.5 text-xs text-muted-foreground">
+          <span id="ticket-status-label">状态</span>
+          <Select value={draft.ticket_status} onValueChange={value => { if (Object.hasOwn(statuses, value)) setDraft(current => ({ ...current, ticket_status: value as TicketStatus })) }}>
+            <SelectTrigger className="w-28" aria-labelledby="ticket-status-label"><SelectValue /></SelectTrigger>
+            <SelectContent>{Object.entries(statuses).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent>
+          </Select>
+        </div>
+        <Button type="submit" variant="outline"><Search />查询</Button>
+        <Button type="button" variant="ghost" onClick={reset}>重置</Button>
+      </form>
+      {validation && <p className="text-sm text-destructive" role="alert">{validation}</p>}
+      {(!filters.start && !filters.end) && <p className="text-xs text-muted-foreground">默认显示最近 30 天创建的工单。</p>}
+    </CardHeader>
+    <CardContent className="min-w-0 space-y-3">
+      {query.error && <TicketError error={query.error} retry={query.retry} />}
+      {query.loading || correctingPage ? <LoadingState label="正在读取七鱼工单列表…" /> : data && (data.items.length ?
+        <div className="overflow-hidden rounded-lg border">
+          <Table className="min-w-[780px]">
+            <TableHeader className="bg-muted/45"><TableRow className="[&_th]:px-4">
+              <TableHead className="w-[34%]">工单</TableHead><TableHead>状态</TableHead><TableHead>优先级</TableHead>
+              <TableHead>受理人</TableHead><TableHead>创建时间</TableHead><TableHead>更新时间</TableHead>
+              <TableHead><span className="sr-only">操作</span></TableHead>
+            </TableRow></TableHeader>
+            <TableBody>{data.items.map(item => <TableRow key={item.id} className="[&_td]:px-4 [&_td]:py-3">
+              <TableCell className="whitespace-normal"><p className="font-medium [overflow-wrap:anywhere]">{item.title || '未填写标题'}</p><p className="mt-1 text-xs tabular-nums text-muted-foreground">#{item.id}{item.linked_session_count > 0 && ` · ${numberFormat.format(item.linked_session_count)} 个关联会话`}</p></TableCell>
+              <TableCell>{item.status ? <Badge variant="outline" className="font-normal">{item.status}</Badge> : '—'}</TableCell>
+              <TableCell>{item.priority || '—'}</TableCell><TableCell className="whitespace-normal">{item.owner || '—'}</TableCell>
+              <TableCell className="text-xs tabular-nums text-muted-foreground">{ticketTime(item.created_at)}</TableCell>
+              <TableCell className="text-xs tabular-nums text-muted-foreground">{ticketTime(item.updated_at)}</TableCell>
+              <TableCell className="text-right"><Button variant="ghost" size="sm" aria-label={`查看工单 ${item.id}`} onClick={event => {
+                opener.current = event.currentTarget
+                onSelect(item.id)
+              }}>详情<ArrowUpRight /></Button></TableCell>
+            </TableRow>)}</TableBody>
+          </Table>
+        </div> : <p role="status" className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">当前筛选没有匹配的工单。</p>)}
+      {data && !correctingPage && total > 0 && <nav aria-label="工单分页" className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+        <span aria-live="polite">第 {numberFormat.format(data.offset + 1)}–{numberFormat.format(data.offset + data.items.length)} 条，共 {numberFormat.format(total)} 条</span>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" disabled={offset === 0 || query.refreshing} onClick={() => setOffset(current => Math.max(0, current - pageSize))}><ChevronLeft />上一页</Button>
+          <Button size="sm" variant="outline" disabled={!data.has_more || query.refreshing} onClick={() => setOffset(current => current + pageSize)}>下一页<ChevronRight /></Button>
+        </div>
+      </nav>}
+      {selected && <TicketDetails key={selected} id={selected} refreshKey={refreshKey} onClose={() => onSelect(null)} onCloseAutoFocus={event => {
+        const focusTarget = opener.current?.isConnected ? opener.current : title.current
+        if (focusTarget) { event.preventDefault(); focusTarget.focus({ preventScroll: true }) }
+        opener.current = null
+      }} />}
+    </CardContent>
+  </Card>
+}

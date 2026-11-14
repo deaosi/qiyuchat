@@ -1,6 +1,7 @@
 import type { QAPair } from '@/lib/demo-data'
 import { withRequestActivity } from '@/lib/request-activity'
 import { isChatAnswerMode } from '@/lib/voc-answer-mode'
+import { readTicketLink, ticketHref } from '@/lib/ticket-link'
 
 export interface ApiFilters {
   source: 'local'
@@ -13,6 +14,7 @@ export interface ApiFilters {
   cluster?: string | number
   customer?: string
   q?: string
+  ticket_status?: '1' | '5' | '10' | '20'
   entity_q?: string
   entity_sort?: 'questions' | 'unanswered' | 'recent'
   cluster_members?: 'repeated' | 'single'
@@ -99,7 +101,10 @@ export function apiUrl(name: string, filters: ApiFilters): string {
 
 async function readResponse<T>(response: Response, redirectOnUnauthorized = true): Promise<T> {
   if (response.status === 401) {
-    if (redirectOnUnauthorized && window.location.pathname !== '/login') window.location.assign('/login')
+    if (redirectOnUnauthorized && window.location.pathname !== '/login') {
+      const ticketId = readTicketLink(window.location.hash)
+      window.location.assign(ticketId ? `/login${ticketHref(ticketId)}` : '/login')
+    }
     throw new ApiError('登录已过期，请重新登录。', 401)
   }
   let data: unknown
@@ -586,6 +591,34 @@ function hasDirectoryPage(data: Record<string, unknown>): boolean {
   return hasCounts(data, ['total', 'offset', 'limit']) && isRecord(data.totals) && hasCounts(data.totals, ['questions', 'unanswered'])
 }
 
+function isTicketTime(value: unknown): boolean {
+  return value === null || (typeof value === 'number' && Number.isFinite(new Date(value).getTime()) && value > 0)
+}
+
+function isTicketRow(data: unknown): data is Record<string, unknown> {
+  return isRecord(data) && typeof data.id === 'string' && /^[1-9][0-9]{0,18}$/.test(data.id)
+    && ['title', 'status', 'priority', 'owner'].every(field => typeof data[field] === 'string')
+    && isTicketTime(data.created_at) && isTicketTime(data.updated_at) && isCount(data.linked_session_count)
+}
+
+function validateTicketResponse(name: string, data: unknown, filters: ApiFilters): void {
+  if (name !== 'tickets' && name !== 'tickets/detail') return
+  const valid = isRecord(data) && (name === 'tickets'
+    ? hasCounts(data, ['total', 'offset', 'limit']) && typeof data.has_more === 'boolean'
+      && Array.isArray(data.items) && data.items.every(isTicketRow)
+    : isTicketRow(data.ticket) && data.ticket.id === String(filters.id) && typeof data.ticket.description === 'string'
+      && (data.ticket.category === undefined || typeof data.ticket.category === 'string')
+      && (data.ticket.template === undefined || typeof data.ticket.template === 'string')
+      && typeof data.history_available === 'boolean' && Array.isArray(data.history)
+      && data.history.every(event => isRecord(event) && typeof event.id === 'string' && typeof event.action === 'string'
+        && typeof event.operator === 'string' && isTicketTime(event.time) && Array.isArray(event.details)
+        && event.details.every(field => isRecord(field) && typeof field.label === 'string' && typeof field.value === 'string'))
+      && Array.isArray(data.sessions) && data.sessions.every(session => isRecord(session)
+        && typeof session.session_id === 'string' && isTicketTime(session.started_at)
+        && (session.qa_id === null || typeof session.qa_id === 'number' && Number.isSafeInteger(session.qa_id) && session.qa_id > 0)))
+  if (!valid) throw new ApiError('工单接口返回的数据不完整，请刷新后重试。', 502)
+}
+
 function validateGetResponse(name: string, data: unknown, filters: ApiFilters): void {
   const paged = filters.limit !== undefined || filters.offset !== undefined || filters.entity_q !== undefined || filters.entity_sort !== undefined
   let valid = true
@@ -718,6 +751,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
       credentials: 'same-origin', cache: 'no-store', signal, ...(activity.prefetch ? { priority: 'low' } : {}),
     }), !activity.prefetch)
     validateGetResponse(name, data, filters)
+    validateTicketResponse(name, data, filters)
     validateVocResponse(name, data)
     validateVoc2Response(name, data, filters.workbench === 1)
     if (filters.first_page && (name === 'voc2/issue-pilot' || name === 'voc2/playbooks' || name === 'voc2/complete-sops')) {

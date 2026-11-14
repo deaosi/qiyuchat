@@ -18,6 +18,7 @@ from src import voc_feishu_sync as sync
 BATCH_SIZE = 100
 REGISTER_LIMIT = 1500
 UPDATED_FIELD = "最近更新时间"
+_SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
 
 
 def _validate(snapshot):
@@ -551,23 +552,53 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
         return publish(stage)
 
 
+def _run_schedule(state_dir, *, refresh):
+    from deploy.feishu_sync import tickets
+
+    try:
+        result = run(state_dir, True, refresh=refresh)
+    except _SYNC_ERRORS as exc:
+        message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "全量同步的数据暂不可核验。"
+        result = {"status": "failed", "message": message}
+    try:
+        result["tickets"] = tickets.run(state_dir)
+    except _SYNC_ERRORS as exc:
+        message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "工单同步的数据暂不可核验。"
+        result["tickets"] = {"status": "failed", "message": message}
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--dashboard-only", action="store_true", help="Refresh the latest log without publishing the tables.")
+    parser.add_argument("--tickets-only", action="store_true", help="Only synchronize the Qiyu ticket table.")
     parser.add_argument("--state-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.refresh and not args.apply:
         parser.error("--refresh requires --apply")
     if args.dashboard_only and (not args.apply or args.refresh):
         parser.error("--dashboard-only requires --apply and cannot be used with --refresh")
+    if args.tickets_only and (not args.apply or args.refresh or args.dashboard_only):
+        parser.error("--tickets-only requires --apply and is independent of other modes")
+    state_dir = args.state_dir.absolute()
     try:
-        result = run(args.state_dir.absolute(), args.apply, refresh=args.refresh, dashboard_only=args.dashboard_only)
-    except (ValueError, TypeError, KeyError, OSError, sync.SyncError) as exc:
+        if args.tickets_only:
+            from deploy.feishu_sync import tickets
+
+            result = tickets.run(state_dir)
+        elif args.apply and not args.dashboard_only:
+            result = _run_schedule(state_dir, refresh=args.refresh)
+        else:
+            result = run(state_dir, args.apply, refresh=args.refresh, dashboard_only=args.dashboard_only)
+    except _SYNC_ERRORS as exc:
         message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "全量同步的数据暂不可核验。"
         raise SystemExit(message) from None
     print(json.dumps(result, ensure_ascii=True))
+    ticket_result = result.get("tickets")
+    if result["status"] == "failed" or isinstance(ticket_result, dict) and ticket_result.get("status") == "failed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

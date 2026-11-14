@@ -23,7 +23,7 @@ from .. import voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
-from . import admin_keys, api, case_media, guest_evidence
+from . import admin_keys, api, case_media, guest_evidence, tickets
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
@@ -34,6 +34,7 @@ PANEL_SCRIPT = Path(__file__).with_name("panel.js")
 PANEL_PATHS = frozenset(("/panel", "/panel.js", "/api/panel/keys"))
 SESSION_AGE = 30 * 86400
 MANAGED_SESSION = re.compile(r"s1\.([a-f0-9]{32})\.([0-9]{1,12})\.([a-f0-9]{32})\.([a-f0-9]{64})")
+TICKET_LOGIN_TARGET = re.compile(r"/#tickets\?id=[1-9][0-9]{0,18}")
 # app.get_db() 切库时会关闭旧连接；查询和写入必须持有同一把锁。
 DB_LOCK = threading.RLock()
 IMAGE_SLOTS = threading.BoundedSemaphore(3)
@@ -277,13 +278,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _login_html(self, error: str = "", panel: bool = False) -> bytes:
+    def _login_html(self, error: str = "", panel: bool = False, next_ticket: str = "") -> bytes:
         template = LOGIN_PAGE.read_text(encoding="utf-8")
-        next_field = '      <input type="hidden" name="next" value="/panel">\n' if panel else ""
+        destination = "/panel" if panel else next_ticket
+        next_field = f'      <input type="hidden" name="next" value="{escape(destination)}">\n' if destination else ""
         return template.replace("<!--LOGIN_ERROR-->", escape(error)).replace("      <!--LOGIN_NEXT-->\n", next_field).encode("utf-8")
 
-    def _send_login(self, error: str = "", status: int = 401, *, panel: bool = False) -> None:
-        self._send(self._login_html(error, panel), "text/html; charset=utf-8", status)
+    def _send_login(self, error: str = "", status: int = 401, *, panel: bool = False, next_ticket: str = "") -> None:
+        self._send(self._login_html(error, panel, next_ticket), "text/html; charset=utf-8", status)
 
     def _panel_forbidden(self, *, page: bool = False) -> None:
         message = "此页面仅对使用恒密钥登录的管理员开放。"
@@ -383,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"keys": self.server.key_store.list()})
             elif path == "/api/detail/image":
                 self._case_image(qs)
+            elif path in ("/api/tickets", "/api/tickets/detail"):
+                self._ticket_api(path, qs)
             elif path.startswith("/api/voc2/"):
                 # VOC queries own their SQLite connections. A slow ranking or
                 # knowledge request must not hold the shared dashboard DB lock.
@@ -399,6 +403,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             log.exception("查询失败")
             self._json({"error": "本地查询失败，请重试并查看服务日志"}, 500)
+
+    def _ticket_api(self, path: str, qs: dict[str, list[str]]) -> None:
+        cfg = self._cfg(qs)
+        try:
+            if path == "/api/tickets/detail":
+                response = tickets.ticket_detail(cfg, _str(qs, "id"))
+            else:
+                response = tickets.list_tickets(
+                    cfg, start=_str(qs, "start"), end=_str(qs, "end"), q=_str(qs, "q"),
+                    offset=_int(qs, "offset", 0), limit=_int(qs, "limit", 20),
+                    status=_str(qs, "ticket_status"),
+                )
+        except tickets.TicketError as error:
+            self._json({"error": str(error)}, error.http_status)
+            return
+        self._json(response)
 
     def _guest_asset(self, path: str, suffix: str) -> None:
         name = path.removeprefix(GUEST_ASSET_PREFIX)
@@ -657,24 +677,26 @@ class Handler(BaseHTTPRequestHandler):
         data = self.rfile.read(length).decode("utf-8", "replace")
         form = parse_qs(data, max_num_fields=10)
         key = (form.get("key") or [""])[0].strip()
-        panel = form.get("next") == ["/panel"]
+        next_values = form.get("next", [])
+        panel = next_values == ["/panel"]
+        next_ticket = next_values[0] if len(next_values) == 1 and TICKET_LOGIN_TARGET.fullmatch(next_values[0]) else ""
         if not self._need_auth():
-            self._redirect("/")
+            self._redirect(next_ticket or "/")
             return
         if self._permanent_key_ok(key):
-            self._redirect("/panel" if panel else "/", self._cookie_header(key))
+            self._redirect("/panel" if panel else next_ticket or "/", self._cookie_header(key))
             return
         if key_id := self.server.key_store.identify(key):
             if panel:
                 self._panel_forbidden(page=True)
             else:
-                self._redirect("/", self._cookie_header(self._managed_session(key_id)))
+                self._redirect(next_ticket or "/", self._cookie_header(self._managed_session(key_id)))
             return
         self._note_fail()
         if self._rate_limited():
-            self._send_login("尝试次数过多，请 10 分钟后再试", 429, panel=panel)
+            self._send_login("尝试次数过多，请 10 分钟后再试", 429, panel=panel, next_ticket=next_ticket)
             return
-        self._send_login("密钥不正确", panel=panel)
+        self._send_login("密钥不正确", panel=panel, next_ticket=next_ticket)
 
     def _panel_write(self, data: bytes) -> None:
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()

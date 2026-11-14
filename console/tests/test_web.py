@@ -655,6 +655,23 @@ class TestAdminKey(LocalFixture):
         status, _, _ = self.call("/api/summary", headers={"X-Admin-Key": self.KEY})
         self.assertEqual(status, 200)
 
+    def test_ticket_destination_survives_login_and_rejects_external_redirect(self):
+        from urllib.parse import urlencode
+
+        target = "/#tickets?id=123456"
+        body = urlencode({"key": self.KEY, "next": target}).encode()
+        status, _, headers = self.call("/login", method="POST", body=body)
+        self.assertEqual((status, headers["Location"]), (302, target))
+
+        body = urlencode({"key": "invalid", "next": target}).encode()
+        status, html, _ = self.call("/login", method="POST", body=body)
+        self.assertEqual(status, 401)
+        self.assertIn(target.encode(), html)
+
+        body = urlencode({"key": self.KEY, "next": "//example.test"}).encode()
+        status, _, headers = self.call("/login", method="POST", body=body)
+        self.assertEqual((status, headers["Location"]), (302, "/"))
+
     def panel_write(self, body, *, headers=None):
         auth = {"X-Admin-Key": self.KEY, "Origin": self.origin, "X-Local-Request": "1",
                 "Content-Type": "application/json"}

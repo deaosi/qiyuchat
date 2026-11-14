@@ -22,37 +22,36 @@ def _cli(target: sync.Target, command: str, *args: str) -> dict:
         result = subprocess.run(argv, env=sync._cli_environment(), stdin=subprocess.DEVNULL,
                                 capture_output=True, timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
-        raise sync.SyncError("飞书 Top 100 数据表操作暂时无法完成。", 503) from None
+        raise sync.SyncError("飞书数据表操作暂时无法完成。", 503) from None
     value = sync._parse_json(result.stdout)
     if result.returncode or value.get("ok") is not True or value.get("identity") != "bot":
         raise sync._cli_error(sync._parse_json(result.stderr) or value)
     data = value.get("data")
     if not isinstance(data, dict):
-        raise sync.SyncError("飞书 Top 100 数据表响应不完整。")
+        raise sync.SyncError("飞书数据表响应不完整。")
     return data
 
 
-def _find_table(original: sync.Target) -> str | None:
+def _find_table(original: sync.Target, table_name: str) -> str | None:
     result = _cli(original, "+table-list")
     tables = result.get("tables")
     if (not isinstance(tables, list) or result.get("total") != len(tables)
             or not all(isinstance(table, dict) for table in tables)
             or not any(table.get("id") == original.table_id for table in tables)):
         raise sync.SyncError("无法核对当前多维表格及原高频问题表。")
-    matches = [table.get("id") for table in tables if table.get("name") == TABLE_NAME]
+    matches = [table.get("id") for table in tables if table.get("name") == table_name]
     if not matches:
         return None
     if (len(matches) != 1 or not isinstance(matches[0], str)
             or not _TABLE_ID.fullmatch(matches[0]) or matches[0] == original.table_id):
-        raise sync.SyncError("飞书中存在无法唯一识别的高频问题 Top 100 数据表。", 409)
+        raise sync.SyncError(f"飞书中存在无法唯一识别的{table_name}数据表。", 409)
     return matches[0]
 
 
-def _create_table(original: sync.Target, schema: dict[str, int]) -> str:
-    fields = [{"name": name, "type": "number" if kind == 2 else "text"} for name, kind in schema.items()]
+def _create_table(original: sync.Target, table_name: str, fields: list[dict]) -> str:
     creation_error = None
     try:
-        _cli(original, "+table-create", "--name", TABLE_NAME, "--fields", json.dumps(fields, ensure_ascii=False))
+        _cli(original, "+table-create", "--name", table_name, "--fields", json.dumps(fields, ensure_ascii=False))
     except sync.SyncError as error:
         creation_error = error
     # A timed-out command may already have created the table. Reconcile by name
@@ -60,12 +59,12 @@ def _create_table(original: sync.Target, schema: dict[str, int]) -> str:
     for delay in (0, 1, 2):
         if delay:
             time.sleep(delay)
-        table = _find_table(original)
+        table = _find_table(original, table_name)
         if table:
             return table
     if creation_error:
         raise creation_error
-    raise sync.SyncError("飞书暂未返回刚创建的高频问题 Top 100 数据表。", 503)
+    raise sync.SyncError(f"飞书暂未返回刚创建的{table_name}数据表。", 503)
 
 
 def _destination(original: sync.Target, table_id: str, view_id: str = "") -> str:
@@ -116,11 +115,12 @@ def ensure_top(original_target: sync.Target, *, apply: bool) -> sync.Target | No
     fields = {role: original.fields[role] for role in ("title", "detail", "source", "summary")}
     fields.update(rank="排名", consultations="咨询次数", period="统计区间")
     expected = {name: (2 if role in ("rank", "consultations") else 1) for role, name in fields.items()}
-    table_id = _find_table(original)
+    table_id = _find_table(original, TABLE_NAME)
     if not table_id:
         if not apply:
             return None
-        table_id = _create_table(original, expected)
+        definitions = [{"name": name, "type": "number" if kind == 2 else "text"} for name, kind in expected.items()]
+        table_id = _create_table(original, TABLE_NAME, definitions)
 
     target = replace(original, table_id=table_id, destination=_destination(original, table_id), fields=fields)
     rows = _field_rows(target, expected)

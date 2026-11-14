@@ -1,4 +1,14 @@
 (() => {
+  const loginForm = document.querySelector('form[action="/login"]');
+  if (loginForm && !loginForm.elements.namedItem('next') &&
+      /^#tickets\?id=[1-9][0-9]{0,18}$/.test(location.hash)) {
+    const next = document.createElement('input');
+    next.type = 'hidden';
+    next.name = 'next';
+    next.value = '/' + location.hash;
+    loginForm.append(next);
+  }
+
   const page = document.documentElement;
   const canvas = document.querySelector('#landscape');
   const hasLoginError = Boolean(document.querySelector('#login-status')?.textContent.trim());
