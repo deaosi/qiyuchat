@@ -11,6 +11,7 @@ import { useApi } from '@/hooks/use-api'
 import { normalizePair } from '@/lib/api'
 import { LoadingState, RefreshDataButton } from './loading-state'
 import { QADetail } from './qa-detail'
+import { TicketImagePreview } from './ticket-image-preview'
 
 const pageSize = 20
 const numberFormat = new Intl.NumberFormat('zh-CN')
@@ -63,27 +64,14 @@ function TicketError({ error, retry }: { error: string; retry: () => void }) {
   </div>
 }
 
-function TicketImage({ name, url }: TicketAttachment) {
-  const [failed, setFailed] = useState(false)
-  return <figure className="space-y-2">
-    {failed ? <p className="text-sm text-muted-foreground">图片暂不可查看</p> :
-      <img src={url} alt={name || '工单截图'} loading="lazy" decoding="async" referrerPolicy="no-referrer"
-        onError={() => setFailed(true)} className="block h-auto max-w-full rounded-md border bg-background object-contain" />}
-    <div className="flex flex-wrap gap-2">
-      <Button asChild variant="outline" size="xs"><a href={url} target="_blank" rel="noreferrer">查看原图</a></Button>
-      {!failed && <Button asChild variant="outline" size="xs"><a href={`${url}&download=1`} download>下载原图</a></Button>}
-    </div>
-  </figure>
-}
-
 function TicketAttachments({ images = [], attachments = [] }: { images?: TicketAttachment[]; attachments?: TicketAttachment[] }) {
   return <div className="space-y-3">
-    {images.map(image => <TicketImage key={image.url} {...image} />)}
     {attachments.length > 0 && <ul className="space-y-2">{attachments.map(file => <li key={file.url}>
       <Button asChild variant="outline" size="sm" className="h-auto max-w-full whitespace-normal py-1.5 text-left [overflow-wrap:anywhere]">
-        <a href={file.url} target="_blank" rel="noreferrer">{file.name || '查看附件'}</a>
+        <a href={file.url} download>{file.name || '下载附件'}</a>
       </Button>
     </li>)}</ul>}
+    {images.map(image => <TicketImagePreview key={image.url} {...image} />)}
   </div>
 }
 
@@ -98,22 +86,27 @@ function TicketForm({ ticket }: { ticket: TicketDetail['ticket'] }) {
   const fields = ticket.fields ?? []
   const priority = fields.find(field => field.label === '优先级')
   const request = fields.find(field => field.label === '问题需求')
+  const attachmentField = fields.find(field => /附件|截图/.test(field.label))
   const fieldUrls = new Set(fields.flatMap(field => [...(field.images ?? []), ...(field.attachments ?? [])].map(file => file.url)))
   const images = (ticket.images ?? []).filter(file => !fieldUrls.has(file.url))
   const attachments = (ticket.attachments ?? []).filter(file => !fieldUrls.has(file.url))
   const hasMedia = images.length > 0 || attachments.length > 0
   return <dl aria-label="工单提报" className="space-y-3">
     <TicketFormRow label="优先级">{priority?.value || ticket.priority || '—'}</TicketFormRow>
-    {fields.filter(field => field.label !== '优先级').map((field, index) => <TicketFormRow label={field.label} key={`${field.label}-${index}`}>
-      {field.value && <p className="whitespace-pre-wrap">{field.value}</p>}
-      {field.images?.length || field.attachments?.length ?
-        <div className={field.value ? 'mt-2' : ''}><TicketAttachments images={field.images} attachments={field.attachments} /></div> :
-        !field.value && <span className="text-muted-foreground">—</span>}
-    </TicketFormRow>)}
+    {fields.filter(field => field.label !== '优先级').map((field, index) => {
+      const fieldImages = field === attachmentField ? [...(field.images ?? []), ...images] : field.images
+      const fieldAttachments = field === attachmentField ? [...(field.attachments ?? []), ...attachments] : field.attachments
+      return <TicketFormRow label={field.label} key={`${field.label}-${index}`}>
+        {field.value && <p className="whitespace-pre-wrap">{field.value}</p>}
+        {fieldImages?.length || fieldAttachments?.length ?
+          <div className={field.value ? 'mt-2' : ''}><TicketAttachments images={fieldImages} attachments={fieldAttachments} /></div> :
+          !field.value && <span className="text-muted-foreground">{field === attachmentField ? '暂无附件。' : '—'}</span>}
+      </TicketFormRow>
+    })}
     {(!request || (ticket.description && ticket.description !== request.value)) && <TicketFormRow label={request ? '工单描述' : '问题需求'}>
       <p className="min-h-12 whitespace-pre-wrap">{ticket.description || '—'}</p>
     </TicketFormRow>}
-    {(hasMedia || !fields.some(field => field.images?.length || field.attachments?.length || /附件|截图/.test(field.label))) &&
+    {!attachmentField && (hasMedia || !fields.some(field => field.images?.length || field.attachments?.length)) &&
       <TicketFormRow label="附件／截图">{hasMedia ? <TicketAttachments images={images} attachments={attachments} /> :
         <span className="text-muted-foreground">暂无附件。</span>}</TicketFormRow>}
   </dl>

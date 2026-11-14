@@ -15,8 +15,8 @@ const fetchApi = vi.fn(async (path: string) => {
     ticket: { ...ticket, description: '', fields: [
       { label: '平台&版本', value: '抖音 · Windows' },
       { label: '问题需求', value: '核对订单明细。' },
-      { label: '附件/截图', value: '', images: [{ url: '/api/tickets/attachment?file=example', name: '订单截图' }] },
-    ] },
+      { label: '附件/截图', value: '', images: [{ url: '/api/tickets/media?token=example', name: '订单截图' }] },
+    ], attachments: [{ url: '/api/tickets/media?token=document', name: '订单明细.pdf' }] },
     history: [{ id: '783', action: '回复工单', operator: '测试客服', time: ticket.updated_at, details: [{ label: '回复', value: '处理已记录。' }] }],
     history_available: true,
     sessions: [{ session_id: 'linked-session', started_at: ticket.created_at, qa_id: 24 }],
@@ -50,9 +50,6 @@ describe('七鱼工单', () => {
     const detail = within(popup)
     expect(detail.getByText('核对订单明细。')).toBeTruthy()
     expect(detail.getByText('抖音 · Windows')).toBeTruthy()
-    expect(detail.getByRole('img', { name: '订单截图' }).getAttribute('src')).toBe('/api/tickets/attachment?file=example')
-    expect(detail.getByRole('link', { name: '查看原图' }).getAttribute('href')).toBe('/api/tickets/attachment?file=example')
-    expect(detail.getByRole('link', { name: '下载原图' }).getAttribute('href')).toBe('/api/tickets/attachment?file=example&download=1')
     expect(detail.getByText('处理已记录。')).toBeTruthy()
     expect(detail.getByText(`七鱼工单 #${id} · 处理中`)).toBeTruthy()
     expect(fetchApi.mock.calls.some(([path]) => path.startsWith('/api/tickets/detail?') && new URL(path, location.origin).searchParams.get('id') === id)).toBe(true)
@@ -72,6 +69,29 @@ describe('七鱼工单', () => {
     await screen.findByRole('dialog', { name: ticket.title })
     act(() => { history.replaceState(null, '', '#tickets'); window.dispatchEvent(new PopStateEvent('popstate')) })
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('places uploaded files ahead of screenshots and opens the image preview directly', async () => {
+    history.replaceState(null, '', `#tickets?id=${id}`)
+    render(<QiyuApp />)
+    const popup = await screen.findByRole('dialog', { name: ticket.title })
+    const detail = within(popup)
+    const screenshot = detail.getByRole('button', { name: '查看图片：订单截图' })
+    const file = detail.getByRole('link', { name: '订单明细.pdf' })
+    expect(file.hasAttribute('download')).toBe(true)
+    expect(file.compareDocumentPosition(screenshot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const image = within(screenshot).getByRole('img', { name: '订单截图' })
+    expect(image.getAttribute('src')).toBe('/api/tickets/media?token=example')
+    expect(detail.queryByText('查看原图')).toBeNull()
+    expect(detail.queryByText('下载原图')).toBeNull()
+
+    fireEvent.click(image)
+    const preview = await screen.findByRole('dialog', { name: '工单图片预览' })
+    expect(within(preview).getByRole('slider', { name: '缩放比例' })).toBeTruthy()
+    fireEvent.keyDown(preview, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: '工单图片预览' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: ticket.title })).toBe(popup)
+    expect(location.hash).toBe(`#tickets?id=${id}`)
   })
 
   it('sends only work order filters and keeps them when turning the page', async () => {
