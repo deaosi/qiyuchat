@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from ..config import Settings
 from ..qiyu.ticket import TicketClient, TicketError, _id
 from ..voc_assets import connection, transaction
-from . import case_media, guest_evidence, ticket_media, tickets
+from . import case_media, case_senders, guest_evidence, ticket_media, tickets
 
 
 PUBLIC_PATH = "/guest/ticket/"
@@ -29,6 +29,17 @@ _TEST_PLACEHOLDER = re.compile(r"(?:测试|test|demo|sample)(?:[-_ ]?[0-9]{1,3})
 _SOFTWARE_VERSION = re.compile(r"[vV]?\d{1,4}(?:\.\d{1,4}){1,3}")
 _REPORT_VALUES = {"是", "否", "已点击", "未点击", "yes", "no", "true", "false"}
 _BEARER_TOKEN = re.compile(r"\b(Bearer)[ \t]+[A-Za-z0-9_./+~=-]{8,}", re.I)
+_DISPLAY_LABELS = {"客户群": "客户群名称", "客户群名称": "客户群名称", "店铺名": "店铺名",
+                   "店铺名称": "店铺名", "商家名称": "商家名称"}
+_IDENTIFIER_KEYS = ("id", "userId", "externalUserId", "staffId", "holderId", "creatorId", "applyStaffId",
+                    "groupId", "staffAccount", "userMobile", "userEmail", "crmId", "crmForeignId",
+                    "crmUserEmail", "crmUserPhone", "connectionId")
+_USER_ACCOUNT = re.compile(r"(?<![a-z0-9_-])(?:wxid_[a-z0-9_-]+|w[mo][a-z0-9_-]{16,})(?![a-z0-9_-])", re.I)
+_LABELED_SECRET = re.compile(
+    r"""(密码|口令|密钥|验证码|token\b|api[_ -]?key\b)\s*[:：=]\s*(?:"[^"\n]+"|'[^'\n]+'|[^\s，。；！？、<>'"]+)""",
+    re.I,
+)
+_REDACTION = re.compile(r"\[(?:名称|链接|标识)已隐藏\]|\[(?:详细地址)?已脱敏\]")
 _MAX_IMAGES = 16
 _CACHE_SECONDS = 30
 _CACHE_LIMIT = 128
@@ -89,19 +100,7 @@ def matches(cfg: Settings, ticket_id: str, url: str) -> bool:
     return number is not None and str(number) == ticket_id
 
 
-def _private_values(raw: dict, custom: list[dict]) -> re.Pattern[str] | None:
-    ticket_id = _id(raw.get("id"))
-    values = {str(ticket_id)} if ticket_id is not None else set()
-    for key in ("userName", "staffName", "holderName", "creatorName", "applyStaffName", "groupName", "userId", "userMobile", "userEmail"):
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            values.add(value.strip())
-    for field in custom:
-        name = field.get("name")
-        if isinstance(name, str) and any(part in name for part in ("客户群", "负责人", "店铺名", "商家名称", "联系")):
-            value, _ = tickets._field_value(field.get("value"), 180)
-            if value and not _TEST_PLACEHOLDER.fullmatch(value):
-                values.add(value)
+def _name_pattern(values: set[str]) -> re.Pattern[str] | None:
     pieces = []
     for value in sorted(values, key=lambda value: (-len(value), value)):
         pattern = re.escape(value)
@@ -114,12 +113,51 @@ def _private_values(raw: dict, custom: list[dict]) -> re.Pattern[str] | None:
 def _guest_text(value: object, names: re.Pattern[str] | None) -> str:
     if isinstance(value, str):
         value = _BEARER_TOKEN.sub(r"\1 [已脱敏]", value)
-    return guest_evidence._clean_projection(value, names)
+        value = _LABELED_SECRET.sub(r"\1 [已脱敏]", value)
+        value = _USER_ACCOUNT.sub("[标识已隐藏]", value)
+    text = guest_evidence._clean_projection(value, names)
+    if _REDACTION.search(text) and not any(char.isalnum() for char in _REDACTION.sub("", text)):
+        return ""
+    return text
+
+
+def _identities(raw: dict, custom: list[dict]) -> tuple[re.Pattern[str] | None, dict[str, str]]:
+    identifiers = tuple(raw.get(key) for key in _IDENTIFIER_KEYS)
+    values = {str(value).strip() for value in identifiers if type(value) in (int, str) and len(str(value).strip()) >= 4}
+    if ticket_id := _id(raw.get("id")):
+        values.add(str(ticket_id))
+    for key in ("staffName", "holderName", "creatorName", "applyStaffName"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip())
+    candidates = []
+    for field in custom:
+        label = field.get("name")
+        if not isinstance(label, str):
+            continue
+        if label in _DISPLAY_LABELS:
+            display, _ = tickets._field_value(field.get("value"), 300)
+            candidates.append((_DISPLAY_LABELS[label], display))
+        elif any(part in label for part in ("客户群", "负责人", "店铺名", "商家名称", "联系")):
+            value, _ = tickets._field_value(field.get("value"), 180)
+            if value and not _TEST_PLACEHOLDER.fullmatch(value):
+                values.add(value)
+    candidates.extend((("客户名称", raw.get("userName")), ("客户群名称", raw.get("groupName"))))
+
+    display_fields = {}
+    internal = _name_pattern(values)
+    for label, raw_name in candidates:
+        name = case_senders._guest_nickname(raw_name, identifiers)
+        if name and "***" not in name and not _REDACTION.search(name) and _guest_text(name, internal) == name:
+            display_fields.setdefault(label, name)
+        elif isinstance(raw_name, str) and raw_name.strip():
+            values.add(raw_name.strip())
+    return _name_pattern(values), display_fields
 
 
 def _project(raw: dict, token: str) -> tuple[dict, dict[str, str]]:
     custom = tickets._attachments(raw.get("custom"))
-    names = _private_values(raw, custom)
+    names, display_fields = _identities(raw, custom)
     media = {}
 
     def snapshots(items: list[dict]) -> list[dict]:
@@ -137,7 +175,7 @@ def _project(raw: dict, token: str) -> tuple[dict, dict[str, str]]:
             images.append({"name": f"工单截图 {len(media)}", "url": f"{PUBLIC_PATH}{token}/images/{image_id}"})
         return images
 
-    fields = []
+    fields = [{"label": label, "value": name} for label, name in display_fields.items()]
     for field in custom:
         label = field.get("name")
         if not isinstance(label, str) or label not in _FIELDS:

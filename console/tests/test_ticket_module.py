@@ -226,10 +226,10 @@ class TicketModuleTests(LocalFixture):
         self.assertNotIn("581000", first)
         path, other = urlsplit(first).path, urlsplit(second).path
         shot = "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef?signature=secret"
-        detail = {"id": 581000, "title": "隐私商家名下单失败", "status": 10, "priority": 8,
-                  "holderName": "技术内部人员", "content": "隐私商家名 设备报错 13812345678 http://example.org/key 工单号 581000",
+        detail = {"id": 581000, "title": "示例商家下单失败", "status": 10, "priority": 8,
+                  "holderName": "技术内部人员", "content": "示例商家 设备报错 技术内部人员接单 13812345678 http://example.org/key 工单号 581000",
                   "custom": [
-                      {"name": "店铺名", "value": "隐私商家名"},
+                      {"name": "店铺名", "value": "示例商家"},
                       {"name": "平台&版本", "value": "抖音"},
                       {"name": "附件/截图", "value": json.dumps([{"name": "隐私图片名.png", "url": shot},
                           {"name": "私有原文件.pdf", "url": "https://shop.qiyukf.net/1123456789abcdef0123456789abcdef"}])},
@@ -263,12 +263,16 @@ class TicketModuleTests(LocalFixture):
             payload = json.loads(re.search(rb'<script[^>]+>(.+?)</script>', body).group(1))
             self.assertEqual(payload["kind"], "ticket")
             self.assertEqual(payload["ticket"]["priority"], "紧急")
-            self.assertEqual(payload["ticket"]["fields"][0], {"label": "平台&版本", "value": "抖音"})
+            self.assertEqual(payload["ticket"]["title"], "示例商家下单失败")
+            self.assertEqual(payload["ticket"]["fields"][:2], [
+                {"label": "店铺名", "value": "示例商家"},
+                {"label": "平台&版本", "value": "抖音"},
+            ])
             raw_data = body.decode("utf-8")
-            for private in ("581000", "隐私商家名", "技术内部人员", "内网答复", "13812345678", "example.org",
+            for private in ("581000", "技术内部人员", "内网答复", "13812345678", "example.org",
                             "私有原文件", "隐私图片名", "signature=secret", "internal-log"):
                 self.assertNotIn(private, raw_data)
-            asset = payload["ticket"]["fields"][1]["images"][0]["url"]
+            asset = payload["ticket"]["fields"][2]["images"][0]["url"]
             self.assertTrue(asset.startswith(path + "/images/"))
             status, headers, body = self.fetch_raw(asset, admin=False)
             self.assertEqual((status, headers.get_content_type()), (200, "image/png"))
@@ -282,10 +286,10 @@ class TicketModuleTests(LocalFixture):
         detail = {
             "id": 581010,
             "title": "测试1",
-            "userName": "实际访客名称",
+            "userName": "采购小许",
             "holderName": "否",
-            "content": ("实际访客名称反馈测试1失败 联系人 user-private@example.org 13812345678 "
-                        "token=private-token Authorization: Bearer private.bearer.value"),
+            "content": ("采购小许反馈测试1失败 联系人 user-private@example.org 13812345678 "
+                        "token=private-token Authorization: Bearer private.bearer.value 密码：短密钥"),
             "custom": [
                 {"name": "店铺名", "value": "测试1"},
                 {"name": "客户群名称", "value": "测试1"},
@@ -300,13 +304,35 @@ class TicketModuleTests(LocalFixture):
         payload, _ = ticket_guest._project(detail, "A" * 43)
         guest = payload["ticket"]
         self.assertEqual(guest["title"], "测试1")
-        self.assertIn("反馈测试1失败", guest["description"])
+        self.assertIn("采购小许反馈测试1失败", guest["description"])
         self.assertEqual({field["label"]: field["value"] for field in guest["fields"]}, {
+            "店铺名": "测试1", "客户群名称": "测试1", "商家名称": "v1.2.3", "客户名称": "采购小许",
             "平台&版本": "测试1", "软件版本": "v1.2.3",
             "是否已点击报告问题": "否", "问题需求": "测试1失败",
         })
-        for private in ("实际访客名称", "user-private@example.org", "13812345678",
-                        "private-token", "private.bearer.value", "581010"):
+        for private in ("user-private@example.org", "13812345678",
+                        "private-token", "private.bearer.value", "短密钥", "581010"):
+            self.assertNotIn(private, json.dumps(payload, ensure_ascii=False))
+
+    def test_guest_ticket_hides_account_aliases_and_internal_name_collisions(self):
+        detail = {
+            "id": 581011, "title": "581011", "userName": "12345678", "userId": 12345678,
+            "holderName": "内部负责人", "groupName": "内部负责人", "content": "内部负责人",
+            "custom": [
+                {"name": "店铺名称", "value": "客户门店"},
+                {"name": "店铺名", "value": "客户门店"},
+                {"name": "商家名称", "value": "内部负责人"},
+                {"name": "问题需求", "value": "内部负责人处理 12345678"},
+                {"name": "软件版本", "value": "内部负责人"},
+            ],
+        }
+        payload, _ = ticket_guest._project(detail, "A" * 43)
+        guest = payload["ticket"]
+        self.assertEqual(guest["title"], "工单详情")
+        self.assertEqual(guest["description"], "")
+        self.assertEqual(guest["fields"], [{"label": "店铺名", "value": "客户门店"},
+                                          {"label": "问题需求", "value": "[名称已隐藏]处理 [名称已隐藏]"}])
+        for private in ("581011", "12345678", "内部负责人"):
             self.assertNotIn(private, json.dumps(payload, ensure_ascii=False))
 
     def test_guest_ticket_without_identity_does_not_redact_empty_matches(self):
