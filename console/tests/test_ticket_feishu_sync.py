@@ -193,3 +193,46 @@ class TestTicketFeishuSync(unittest.TestCase):
               patch.object(tickets.support, "target_table") as target_table):
             self.assertEqual(tickets.run(Path(".")), {"status": "maintenance"})
         target_table.assert_not_called()
+
+    def test_incremental_checkpoints_do_not_drop_failed_feishu_read(self):
+        from deploy.feishu_sync import support
+
+        now = 1_794_600_000
+        state = Path(self.cfg.runtime.state_dir)
+        setup_path = state / "ticket-table-setup.json"
+        cursor_path = state / "ticket-incremental.json"
+        support._write_state(setup_path, {"table_id": self.target.table_id, "positioned_field_id": "fldSubmitter",
+                                         "guest_links_migrated": True})
+        before = now * 1000 - 60_000
+        original = {"table_id": self.target.table_id, "schema_at": before, "qiyu_until": before,
+                    "feishu_until": before - 15_000, "reconciled_at": before, "daily_at": before,
+                    "feedback_retry_at": before, "daily_feedback_at": before}
+        support._write_state(cursor_path, original)
+        coverage = {"created_scope": "qiyu", "updated_scope": "qiyu"}
+        with (patch.object(tickets, "settings", return_value=self.cfg),
+              patch.object(tickets.support, "target_table", return_value=self.target),
+              patch.object(tickets, "time", return_value=now),
+              patch.object(tickets, "_table") as table,
+              patch.object(tickets, "_import_feedback", side_effect=sync.SyncError("network issue")) as receive,
+              patch.object(tickets, "_incremental_projection", return_value=({}, coverage, {})) as project):
+            result = tickets.run(state, incremental=True)
+        self.assertEqual(result["status"], "partial")
+        receive.assert_called_once()
+        self.assertEqual(receive.call_args.kwargs["window"], (before - 75_000, now * 1000 - 15_000))
+        project.assert_called_once_with(self.cfg, before - 60_000, now * 1000)
+        self.assertEqual(support._read_state(cursor_path),
+                         {**original, "qiyu_until": now * 1000})
+        table.assert_not_called()
+
+    def test_feedback_waits_if_record_is_edited_during_scan(self):
+        source = {"id": "42", "title": "工单"}
+        fields = tickets._projection(self.cfg, [source])["42"]
+        fields.update({"技术回复": "正在填写", tickets.ticket_reply_delta.TIME_FIELD: 101})
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(tickets, "_technical_rows", return_value={"42": "recFixture42"}),
+              patch.object(tickets.ticket_feedback, "ingest") as ingest):
+            result = tickets._import_feedback(self.cfg, self.target, window=(0, 100))
+        self.assertEqual(result["checked"], 1)
+        ingest.assert_not_called()
+        self.assertFalse(self.writes)

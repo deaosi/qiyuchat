@@ -67,6 +67,7 @@ class TestTicketFeedback(unittest.TestCase):
                           side_effect=[TicketError("七鱼暂时不可用"), True]) as write:
             failed = self.ingest()
             self.assertIsNone(failed["returned_at"])
+            self.assertEqual(ticket_feedback.retry_records(self.cfg), {"9007199254740993": "recExample1"})
             saved = ticket_feedback.get(self.cfg, "9007199254740993")
             self.assertEqual(saved["writeback_status"], "failed")
             self.assertEqual(saved["error"], "七鱼暂时不可用")
@@ -75,6 +76,7 @@ class TestTicketFeedback(unittest.TestCase):
             self.ingest()
             self.assertEqual(write.call_count, 2)
         self.assertEqual(ticket_feedback.get(self.cfg, "9007199254740993")["writeback_status"], "succeeded")
+        self.assertEqual(ticket_feedback.retry_records(self.cfg), {})
 
     def test_unconfirmed_native_reply_only_reconciles_sevenfish_log(self):
         with patch.object(ticket_feedback.TicketClient, "post_feedback",

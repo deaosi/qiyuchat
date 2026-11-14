@@ -670,6 +670,7 @@ def main():
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--dashboard-only", action="store_true", help="Refresh the latest log without publishing the tables.")
     parser.add_argument("--tickets-only", action="store_true", help="Only synchronize the Qiyu ticket table.")
+    parser.add_argument("--ticket-incremental", action="store_true", help="Use saved ticket sync checkpoints.")
     parser.add_argument("--links-only", action="store_true", help="Format existing topic and SOP guest links without changing their destinations.")
     parser.add_argument("--state-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -679,6 +680,8 @@ def main():
         parser.error("--dashboard-only requires --apply and cannot be used with --refresh")
     if args.tickets_only and (not args.apply or args.refresh or args.dashboard_only):
         parser.error("--tickets-only requires --apply and is independent of other modes")
+    if args.ticket_incremental and not args.tickets_only:
+        parser.error("--ticket-incremental requires --tickets-only")
     if args.links_only and (not args.apply or args.refresh or args.dashboard_only or args.tickets_only):
         parser.error("--links-only requires --apply and is independent of other modes")
     state_dir = args.state_dir.absolute()
@@ -686,7 +689,7 @@ def main():
         if args.tickets_only:
             from deploy.feishu_sync import tickets
 
-            result = tickets.run(state_dir)
+            result = tickets.run(state_dir, incremental=args.ticket_incremental)
         elif args.links_only:
             result = _links_only(state_dir)
         else:

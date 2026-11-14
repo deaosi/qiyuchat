@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS ticket_feedback (
     written_at INTEGER,
     error TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS ticket_feedback_retry
+ON ticket_feedback(writeback_status) WHERE writeback_status IN ('pending', 'failed', 'uncertain');
 """
 _PUBLIC = """SELECT status, reply, resolved_version, feishu_url, received_at,
                    writeback_status, written_at, error
@@ -152,3 +154,16 @@ def get(cfg: Settings, ticket_id: str) -> dict | None:
             return None
         row = conn.execute(_PUBLIC, (ticket_id,)).fetchone()
     return dict(row) if row is not None else None
+
+
+def retry_records(cfg: Settings) -> dict[str, str]:
+    path = _path(cfg)
+    if not path.is_file():
+        return {}
+    with connection(path) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ticket_feedback'").fetchone():
+            return {}
+        return dict(conn.execute("""
+            SELECT ticket_id, record_id FROM ticket_feedback
+            WHERE writeback_status IN ('pending', 'failed', 'uncertain')
+        """))

@@ -6,9 +6,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import re
-from time import monotonic
+from time import monotonic, time
 
-from deploy.feishu_sync import support, top
+from deploy.feishu_sync import support, ticket_delta, ticket_reply_delta, top
 from src import ticket_feedback
 from src import voc_feishu_sync as sync
 from src.config import settings
@@ -26,6 +26,10 @@ UPDATED_DAYS = 7
 MATCH_SIZE = 20
 DETAIL_LIMIT = 12
 DETAIL_BUDGET_SECONDS = 25
+_MINUTE = 60_000
+_RECONCILE = 10 * _MINUTE
+_DAY = 24 * 60 * _MINUTE
+_FEEDBACK_QUIET_MS = 15_000
 _ZONE = timezone(timedelta(hours=8))
 _ID = re.compile(r"[1-9][0-9]{0,18}")
 _FIELDS = {"key": "工单ID", "title": "工单标题", "status": "状态", "priority": "优先级", "submitter": "提报人",
@@ -44,7 +48,7 @@ def _column_specs() -> dict:
     return specs
 
 
-def _table(report: sync.Target) -> tuple[sync.Target, str]:
+def _table(report: sync.Target, *, incremental=False) -> tuple[sync.Target, str]:
     table_id = top._find_table(report, TABLE_NAME)
     if table_id is None:
         definitions = [
@@ -64,13 +68,16 @@ def _table(report: sync.Target) -> tuple[sync.Target, str]:
             or fields[_FIELDS["key"]].get("is_primary") is not True):
         raise sync.SyncError("飞书七鱼工单表字段不匹配。", 409)
     definitions = _column_specs()
+    if incremental:
+        name = ticket_reply_delta.TIME_FIELD
+        definitions[name] = {"name": name, "type": "updated_at", "style": {"format": "yyyy-MM-dd HH:mm"}}
     for name, definition in definitions.items():
         if name not in fields:
             top._cli(target, "+field-create", "--table-id", table_id, "--json", json.dumps(definition, ensure_ascii=False))
     if not set(definitions) <= fields.keys():
         fields = {row.get("field_name"): row for row in sync._paginated(target, "GET", "/fields") if isinstance(row, dict)}
     for name in definitions:
-        expected = 5 if name == _OUTPUT["returned_at"] else 1
+        expected = {_OUTPUT["returned_at"]: 5, ticket_reply_delta.TIME_FIELD: ticket_reply_delta.TIME_FIELD_TYPE}.get(name, 1)
         allowed = (1, 3) if name == _INPUT["status"] else (expected,)
         if fields.get(name, {}).get("type") not in allowed:
             raise sync.SyncError(f"飞书七鱼工单表字段名称或类型不匹配：{name}。", 409)
@@ -319,13 +326,15 @@ def _submitters(cfg, desired, staff_ids, state_dir):
             "deferred": deferred, "unavailable": unavailable}
 
 
-def _enrich(cfg, desired, state_dir):
+def _enrich(cfg, desired, state_dir, *, incremental=False):
+    if not desired:
+        return {"fetched": 0, "failed": 0, "deferred": 0}
     cache_path = state_dir / "ticket-summaries.json"
     cache = support._read_state(cache_path) if cache_path.exists() else {}
     if not isinstance(cache, dict):
         raise ValueError("工单摘要缓存无法读取。")
     client = TicketClient(cfg.qiyu)
-    next_cache = {}
+    next_cache = dict(cache) if incremental else {}
     names = None
     names_loaded = False
     fetched = failures = deferred = 0
@@ -386,46 +395,66 @@ def _feedback(fields):
     return {role: value.strip() for role, value in cells.items()}
 
 
-def _technical_rows(cfg, target):
+def _technical_rows(cfg, target, *, window=None):
     records = {}
     ids = set()
-    columns = [_FIELDS["key"], _FIELDS["source"], *_INPUT.values(), *_OUTPUT.values()]
+    columns = [_FIELDS["key"], _FIELDS["source"], *_INPUT.values()]
     query = {"field_names": columns, "filter": {"conjunction": "or", "conditions": [
         {"field_name": name, "operator": "isNotEmpty", "value": []} for name in _INPUT.values()
     ]}}
-    for page in _record_pages(target, query):
-        for row in page:
-            record_id = row.get("record_id") if isinstance(row, dict) else None
-            fields = row.get("fields") if isinstance(row, dict) else None
-            if not isinstance(record_id, str) or not sync._RECORD_ID.fullmatch(record_id) or not isinstance(fields, dict):
-                raise sync.SyncError("飞书技术回复记录格式无法核对。")
-            feedback = _feedback(fields)
-            if not any(feedback.values()):
-                continue
-            key = sync._value(fields.get(_FIELDS["key"]))
-            if (not isinstance(key, str) or not _ID.fullmatch(key) or key in records or record_id in ids
-                    or not _source_matches(cfg, key, fields.get(_FIELDS["source"]))):
-                raise sync.SyncError("飞书技术回复无法唯一匹配七鱼工单，请核对工单ID及语海详情。", 409)
-            ids.add(record_id)
-            records[key] = record_id
+    if window is None:
+        rows = (row for page in _record_pages(target, query) for row in page)
+    else:
+        rows = ticket_reply_delta.read(target, since_ms=window[0], until_ms=window[1],
+                                       field_names=columns, filters=query["filter"])
+    for row in rows:
+        record_id = row.get("record_id") if isinstance(row, dict) else None
+        fields = row.get("fields") if isinstance(row, dict) else None
+        if not isinstance(record_id, str) or not sync._RECORD_ID.fullmatch(record_id) or not isinstance(fields, dict):
+            raise sync.SyncError("飞书技术回复记录格式无法核对。")
+        feedback = _feedback(fields)
+        if not any(feedback.values()):
+            continue
+        key = sync._value(fields.get(_FIELDS["key"]))
+        if (not isinstance(key, str) or not _ID.fullmatch(key) or key in records or record_id in ids
+                or not _source_matches(cfg, key, fields.get(_FIELDS["source"]))):
+            raise sync.SyncError("飞书技术回复无法唯一匹配七鱼工单，请核对工单ID及语海详情。", 409)
+        ids.add(record_id)
+        records[key] = record_id
     return records
 
 
-def _import_feedback(cfg, target):
-    rows = _technical_rows(cfg, target)
+def _import_feedback(cfg, target, *, window=None, retry=False):
+    rows = _technical_rows(cfg, target) if window is None else _technical_rows(cfg, target, window=window)
+    # Durable pending or ambiguous writes remain eligible after the time window has moved on.
+    retries = ticket_feedback.retry_records(cfg) if retry else {}
+    for key, record in retries.items():
+        if key in rows and rows[key] != record:
+            raise sync.SyncError("飞书技术回复的记录关联已变化。", 409)
+        rows.setdefault(key, record)
     keys = list(rows)
     lookup = replace(target, fields={"key": _FIELDS["key"], "source": _FIELDS["source"],
                                     **{"input_" + key: name for key, name in _INPUT.items()},
-                                    **{"output_" + key: name for key, name in _OUTPUT.items()}})
+                                    **{"output_" + key: name for key, name in _OUTPUT.items()},
+                                    **({"modified": ticket_reply_delta.TIME_FIELD} if window else {})})
     imported = uncertain = failed = 0
     for offset in range(0, len(keys), MATCH_SIZE):
         group = keys[offset:offset + MATCH_SIZE]
         verified = sync._existing(lookup, dict.fromkeys(group))
-        if set(verified) != set(group) or any(verified[key]["record_id"] != rows[key] for key in group):
+        if any((key not in verified and key not in retries)
+               or (key in verified and verified[key]["record_id"] != rows[key]) for key in group):
             raise sync.SyncError("飞书技术回复所在记录已变动，请重试。", 409)
         updates = []
         for key in group:
+            if key not in verified:
+                continue
             fields = verified[key]["fields"]
+            if window is not None:
+                modified = fields.get(ticket_reply_delta.TIME_FIELD)
+                if type(modified) is not int:
+                    raise sync.SyncError("无法核对飞书工单的最近修改时间。", 409)
+                if modified > window[1]:
+                    continue
             if not _source_matches(cfg, key, fields.get(_FIELDS["source"])):
                 raise sync.SyncError("飞书技术回复的语海详情已变动，请核对来源。", 409)
             feedback = _feedback(fields)
@@ -448,7 +477,20 @@ def _import_feedback(cfg, target):
     return {"checked": len(rows), "imported": imported, "awaiting_review": uncertain, "failed": failed}
 
 
-def run(state_dir):
+def _incremental_projection(cfg, start, end):
+    items, coverage = ticket_delta.read(cfg, start, end)
+    desired = _projection(cfg, items, _private_names(cfg, {}) if items else None)
+    return desired, coverage, {item["id"]: item["submitter_id"] for item in items}
+
+
+def _recent_checkpoint(state, key, upper, ordinary, replay=None):
+    previous = state.get(key)
+    if type(previous) is not int or previous < 0 or previous > upper:
+        return max(0, upper - (replay or ordinary))
+    return max(0, min(previous - ordinary, upper - replay) if replay else previous - ordinary)
+
+
+def run(state_dir, *, incremental=False):
     """Pull technical responses even for older tickets and export recent Qiyu work."""
     support._safe_state(state_dir)
     cfg = settings()
@@ -458,29 +500,78 @@ def run(state_dir):
         raise ValueError("生产侧工单数据未配置。")
     report = support.target_table(state_dir)
     inserted, changed = 0, 0
-    with sync._write_lock(report.lock_path):
-        target, submitter_field_id = _table(report)
+    lock = report.lock_path.with_name("ticket-table.lock")
+    with sync._write_lock(lock):
+        now = int(time() * 1000)
         setup_path = state_dir / "ticket-table-setup.json"
         setup = support._read_state(setup_path) if setup_path.exists() else {}
-        if not isinstance(setup, dict) or setup.get("table_id") != target.table_id:
+        if not isinstance(setup, dict):
+            raise ValueError("工单表的设置记录无效。")
+        state_path = state_dir / "ticket-incremental.json"
+        state = support._read_state(state_path) if incremental and state_path.exists() else {}
+        if not isinstance(state, dict):
+            raise ValueError("工单同步时间记录无效。")
+        schema_at = state.get("schema_at", 0)
+        table_id = state.get("table_id")
+        if (incremental and type(schema_at) is int and 0 <= now - schema_at < _RECONCILE
+                and isinstance(table_id, str) and top._TABLE_ID.fullmatch(table_id)
+                and setup.get("table_id") == table_id and setup.get("positioned_field_id")):
+            target = replace(report, table_id=table_id, destination=top._destination(report, table_id),
+                             fields={**_FIELDS, **_DETAIL})
+            submitter_field_id = setup["positioned_field_id"]
+        else:
+            target, submitter_field_id = _table(report, incremental=True) if incremental else _table(report)
+            if state.get("table_id") != target.table_id:
+                state = {"table_id": target.table_id}
+            state["schema_at"] = now
+        if setup.get("table_id") != target.table_id:
             setup = {"table_id": target.table_id}
+        reconcile = incremental and now - state.get("reconciled_at", 0) >= _RECONCILE
+        retry_feedback = incremental and now - state.get("feedback_retry_at", 0) >= _RECONCILE
+        daily = incremental and now - state.get("daily_at", 0) >= _DAY
+        daily_feedback = incremental and now - state.get("daily_feedback_at", 0) >= _DAY
+        feedback_end = now - _FEEDBACK_QUIET_MS
+        feedback_start = (0 if daily_feedback else _recent_checkpoint(
+            state, "feishu_until", feedback_end, _MINUTE, _RECONCILE * 2 if retry_feedback else None))
         try:
-            feedback = _import_feedback(cfg, target)
+            if incremental:
+                feedback = _import_feedback(cfg, target, window=(feedback_start, feedback_end), retry=retry_feedback)
+                state["feishu_until"] = feedback_end
+                if retry_feedback:
+                    state["feedback_retry_at"] = now
+                if daily_feedback:
+                    state["daily_feedback_at"] = now
+                support._write_state(state_path, state)
+            else:
+                feedback = _import_feedback(cfg, target)
         except _SYNC_ERRORS as exc:
             message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "飞书技术回复暂无法核对。"
             feedback = {"status": "failed", "message": message}
+        previous_qiyu = state.get("qiyu_until", 0)
+        catch_up = type(previous_qiyu) is int and 0 < previous_qiyu < now - _DAY
+        broad_read = not incremental or (daily and not catch_up)
         try:
-            desired, coverage, staff_ids = _recent(cfg, datetime.now(_ZONE).date())
+            if not broad_read:
+                start = _recent_checkpoint(state, "qiyu_until", now, _MINUTE,
+                                           _RECONCILE * 2 if reconcile else None)
+                # Advance through long outages in fixed slices instead of exceeding Qiyu's range limit.
+                end = min(now, start + _DAY)
+                desired, coverage, staff_ids = _incremental_projection(cfg, start, end)
+            else:
+                end = now
+                desired, coverage, staff_ids = _recent(cfg, datetime.now(_ZONE).date())
         except TicketError as exc:
             raise sync.SyncError("无法读取七鱼工单，请核对七鱼接口状态或权限。", exc.http_status) from None
         if maintenance(cfg):
             return {"status": "maintenance"}
         try:
-            submitters = _submitters(cfg, desired, staff_ids, state_dir)
+            submitters = (_submitters(cfg, desired, staff_ids, state_dir) if desired else
+                          {"fetched": 0, "filled": 0, "pending": 0, "deferred": 0, "unavailable": 0})
         except (OSError, ValueError):
             submitters = {"status": "failed", "message": "工单提报人缓存暂不可核对。"}
         try:
-            details = _enrich(cfg, desired, state_dir)
+            details = (_enrich(cfg, desired, state_dir, incremental=True) if not broad_read
+                       else _enrich(cfg, desired, state_dir))
         except (OSError, ValueError, TypeError, KeyError):
             details = {"status": "failed", "message": "工单摘要缓存暂不可核对。"}
         keys = sorted(desired, key=int)
@@ -502,6 +593,14 @@ def run(state_dir):
             migrated = _migrate_old_links(cfg, target, desired)
             setup["guest_links_migrated"] = True
             support._write_state(setup_path, setup)
+        if incremental:
+            if coverage["created_scope"] == coverage["updated_scope"] == "qiyu":
+                state["qiyu_until"] = end
+                if reconcile:
+                    state["reconciled_at"] = now
+                if daily and broad_read:
+                    state["daily_at"] = now
+            support._write_state(state_path, state)
     status = "partial" if (
         "linked" in (coverage["created_scope"], coverage["updated_scope"])
         or feedback.get("status") == "failed" or feedback.get("failed") or feedback.get("awaiting_review")
@@ -513,4 +612,8 @@ def run(state_dir):
             "url": target.destination, "historical_guest_links_updated": migrated,
             "details": details, "feedback": feedback, "submitters": submitters,
             "submitter_column_positioned": not layout_error,
-            **({"submitter_column_error": layout_error} if layout_error else {}), **coverage}
+            **({"submitter_column_error": layout_error} if layout_error else {}),
+            **({"incremental": True, "reconciled": reconcile, "daily": daily,
+                "qiyu_lag_seconds": round((now - end) / 1000, 3),
+                "duration_seconds": round((time() * 1000 - now) / 1000, 3)} if incremental else {}),
+            **coverage}
