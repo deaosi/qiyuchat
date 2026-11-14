@@ -1,17 +1,19 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { ChevronLeft, ChevronRight, Search } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { useApi } from '@/hooks/use-api'
-import { httpsLink, normalizePair } from '@/lib/api'
+import { ApiError, apiPost, normalizePair } from '@/lib/api'
 import { LoadingState, RefreshDataButton } from './loading-state'
 import { QADetail } from './qa-detail'
-import { TicketAttachments, TicketForm, ticketTime, type TicketAttachment, type TicketField } from './ticket-form'
+import { TicketHistory, TicketInfo, TicketTechnicalFeedback, type TechnicalFeedback, type TicketEvent } from './ticket-details-view'
+import { TicketForm, ticketTime, type TicketAttachment, type TicketField } from './ticket-form'
 
 const pageSize = 20
 const numberFormat = new Intl.NumberFormat('zh-CN')
@@ -26,40 +28,25 @@ type Ticket = {
   linked_session_count: number
 }
 type TicketPage = { items: Ticket[]; total: number; offset: number; limit: number; has_more: boolean }
-type TicketEvent = {
-  id: string
-  action: string
-  operator: string
-  time: number | null
-  details: TicketField[]
-  images?: TicketAttachment[]
-  attachments?: TicketAttachment[]
-}
 type LinkedSession = { session_id: string; started_at: number | null; qa_id: number | null }
-type TechnicalFeedback = {
-  status: string
-  reply: string
-  resolved_version: string
-  received_at: number | null
-  writeback_status: 'pending' | 'succeeded' | 'failed' | 'uncertain'
-  written_at: number | null
-  error: string
-  feishu_url: string
+type TicketEdit = {
+  revision: string
+  title: string
+  priority: number
+  fields: { id: string; label: string; value: string; multiline: boolean; required?: boolean }[]
 }
+type TicketUpdate = { revision: string; title?: string; priority?: number; fields?: Record<string, string> }
 type TicketDetail = {
   ticket: Ticket & { description: string; category?: string; template?: string; fields?: TicketField[]; images?: TicketAttachment[]; attachments?: TicketAttachment[] }
   history: TicketEvent[]
   sessions: LinkedSession[]
   history_available: boolean
   technical_feedback?: TechnicalFeedback | null
+  edit?: TicketEdit
 }
 const statuses = { all: '全部状态', '1': '已提交', '5': '待申领', '10': '处理中', '20': '已完结' } as const
-const writebackLabels: Record<TechnicalFeedback['writeback_status'], string> = {
-  pending: '待回传七鱼',
-  succeeded: '已回传七鱼',
-  failed: '回传七鱼失败',
-  uncertain: '待核对七鱼回复',
-}
+const priorities = { 5: '一般', 8: '紧急', 10: '非常紧急' } as const
+const editTextarea = 'min-h-24 w-full rounded-md border bg-background px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50'
 type TicketStatus = keyof typeof statuses
 type Filters = { q: string; start: string; end: string; ticket_status: TicketStatus }
 const emptyFilters: Filters = { q: '', start: '', end: '', ticket_status: 'all' }
@@ -70,86 +57,149 @@ function TicketError({ error, retry }: { error: string; retry: () => void }) {
   </div>
 }
 
-function TicketHistory({ history, available, reload }: { history: TicketEvent[]; available: boolean; reload: () => void }) {
-  if (!available) return <TicketError error="暂时无法读取七鱼工单处理记录。" retry={reload} />
-  if (!history.length) return <p className="text-sm text-muted-foreground">暂无工单处理记录。</p>
-  return <ol className="divide-y rounded-lg border">
-    {history.map((event, index) => <li key={`${event.id}-${index}`} className="space-y-2 p-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <p className="break-words text-sm font-medium">{event.action || '工单操作'}</p>
-        <p className="shrink-0 text-xs tabular-nums text-muted-foreground">{ticketTime(event.time)}</p>
+function TicketEditor({ edit, saving, failure, conflict, onSave, onCancel, onReload }: {
+  edit: TicketEdit
+  saving: boolean
+  failure: string
+  conflict: boolean
+  onSave: (update: TicketUpdate) => void
+  onCancel: () => void
+  onReload: () => void
+}) {
+  const fieldPrefix = useId()
+  const titleInput = useRef<HTMLInputElement>(null)
+  const [title, setTitle] = useState(edit.title)
+  const [priority, setPriority] = useState(String(edit.priority))
+  const [fields, setFields] = useState<Record<string, string>>(() => Object.fromEntries(edit.fields.map(field => [field.id, field.value])))
+  const changedTitle = title.trim() !== edit.title.trim()
+  const changedPriority = priority !== String(edit.priority)
+  const changedFields = edit.fields.filter(field => fields[field.id] !== field.value)
+  const dirty = changedTitle || changedPriority || changedFields.length > 0
+  useEffect(() => { titleInput.current?.focus({ preventScroll: true }) }, [])
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (saving || conflict || !dirty || !title.trim() || changedFields.some(field => field.required && !fields[field.id].trim())) return
+    onSave({
+      revision: edit.revision,
+      ...(changedTitle ? { title: title.trim() } : {}),
+      ...(changedPriority ? { priority: Number(priority) } : {}),
+      ...(changedFields.length ? { fields: Object.fromEntries(changedFields.map(field => [field.id, fields[field.id].trim()])) } : {}),
+    })
+  }
+
+  return <form aria-label="编辑工单" aria-busy={saving} className="space-y-4" onSubmit={submit}>
+    <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_10rem]">
+      <div className="space-y-2">
+        <Label htmlFor={`${fieldPrefix}-title`}>工单标题</Label>
+        <Input ref={titleInput} id={`${fieldPrefix}-title`} value={title} maxLength={100} required
+          disabled={saving} onChange={event => setTitle(event.target.value)} />
       </div>
-      {event.operator && <p className="text-xs text-muted-foreground">{event.operator}</p>}
-      {event.details.length > 0 && <dl className="space-y-2 text-sm leading-6">
-        {event.details.map((field, i) => <div key={`${field.label}-${i}`}>
-          {field.label && <dt className="text-xs text-muted-foreground">{field.label}</dt>}
-          <dd className="space-y-2 [overflow-wrap:anywhere]">
-            {field.value && <p className="whitespace-pre-wrap">{field.value}</p>}
-            {(!!field.images?.length || !!field.attachments?.length) &&
-              <TicketAttachments images={field.images} attachments={field.attachments} />}
-          </dd>
-        </div>)}
-      </dl>}
-      {(!!event.images?.length || !!event.attachments?.length) &&
-        <TicketAttachments images={event.images} attachments={event.attachments} />}
-    </li>)}
-  </ol>
+      <div className="space-y-2">
+        <Label htmlFor={`${fieldPrefix}-priority`}>优先级</Label>
+        <Select value={priority} disabled={saving} onValueChange={setPriority}>
+          <SelectTrigger id={`${fieldPrefix}-priority`} className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {!Object.hasOwn(priorities, edit.priority) && <SelectItem value={String(edit.priority)}>当前优先级</SelectItem>}
+            {Object.entries(priorities).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+    {edit.fields.map((field, index) => {
+      const inputId = `${fieldPrefix}-field-${index}`
+      const props = { id: inputId, disabled: saving, required: field.required && fields[field.id] !== field.value, value: fields[field.id], onChange: (event: { target: { value: string } }) => {
+        const value = event.target.value
+        setFields(current => ({ ...current, [field.id]: value }))
+      } }
+      return <div className="space-y-2" key={field.id}>
+        <Label htmlFor={inputId}>{field.label}</Label>
+        {field.multiline ? <textarea {...props} className={editTextarea} rows={4} maxLength={4000} /> : <Input {...props} maxLength={300} />}
+      </div>
+    })}
+    {failure && <div role="alert" className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-sm text-destructive">
+      <p>{failure}</p>
+      {conflict && <Button type="button" size="sm" variant="outline" onClick={onReload}>读取最新工单</Button>}
+    </div>}
+    <div className="flex flex-wrap justify-end gap-2">
+      <Button type="button" variant="outline" disabled={saving} onClick={onCancel}>取消</Button>
+      <Button type="submit" disabled={saving || conflict || !dirty || !title.trim()}>{saving ? '正在保存…' : '保存修改'}</Button>
+    </div>
+  </form>
 }
 
-function TicketTechnicalFeedback({ feedback }: { feedback: TechnicalFeedback }) {
-  const feishuUrl = httpsLink(feedback.feishu_url)
-  return <section aria-label="飞书技术处理" className="space-y-3">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold">飞书技术处理</h3>
-        <Badge variant={feedback.writeback_status === 'failed' ? 'destructive' : 'outline'} className="font-normal">
-          {writebackLabels[feedback.writeback_status] || '回传状态未知'}
-        </Badge>
-      </div>
-      {feishuUrl && <Button asChild variant="outline" size="sm">
-        <a href={feishuUrl} target="_blank" rel="noreferrer">在飞书查看工单</a>
-      </Button>}
-    </div>
-    <div className="space-y-4 rounded-lg border bg-muted/25 p-4">
-      <dl className="grid grid-cols-2 gap-3 text-sm">
-        {[
-          ['技术处理状态', feedback.status],
-          ['解决版本', feedback.resolved_version],
-          ['飞书变更接收时间', ticketTime(feedback.received_at)],
-          ['回传成功时间', ticketTime(feedback.written_at)],
-        ].map(([label, value]) => <div key={label} className="min-w-0">
-          <dt className="mb-1 text-xs text-muted-foreground">{label}</dt>
-          <dd className="tabular-nums [overflow-wrap:anywhere]">{value || '—'}</dd>
-        </div>)}
-        {feedback.reply && <div className="col-span-full min-w-0">
-          <dt className="mb-1 text-xs text-muted-foreground">技术回复</dt>
-          <dd className="whitespace-pre-wrap rounded-md border bg-background p-3 text-sm leading-relaxed [overflow-wrap:anywhere]">{feedback.reply}</dd>
-        </div>}
-      </dl>
-      {feedback.error && <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{feedback.error}</p>}
-    </div>
-  </section>
-}
-
-function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus }: {
+function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus, onUpdated }: {
   id: string
   refreshKey: number
   onClose: () => void
   onCloseAutoFocus: (event: Event) => void
+  onUpdated: () => void
 }) {
   const details = useApi<TicketDetail>('tickets/detail', { source: 'local', id }, refreshKey)
   const [session, setSession] = useState<LinkedSession | null>(null)
+  const [edit, setEdit] = useState<TicketEdit | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [conflict, setConflict] = useState(false)
+  const [saved, setSaved] = useState<{ previous: TicketDetail | null; detail: TicketDetail } | null>(null)
+  const saveRequest = useRef<AbortController | null>(null)
+  const latestDetail = useRef(details.data)
+  latestDetail.current = details.data
   const dialogTitle = useRef<HTMLHeadingElement>(null)
-  const data = details.data
-  return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
+  const data = saved?.previous === details.data ? saved.detail : details.data
+  useEffect(() => () => saveRequest.current?.abort(), [])
+
+  function cancelEdit() {
+    setEdit(null)
+    dialogTitle.current?.focus({ preventScroll: true })
+  }
+
+  function closeDetails() {
+    if (saveRequest.current) return
+    if (edit) cancelEdit()
+    else onClose()
+  }
+
+  async function save(update: TicketUpdate) {
+    if (saveRequest.current) return
+    const controller = new AbortController()
+    saveRequest.current = controller
+    setSaving(true)
+    setSaveError('')
+    try {
+      const detail = await apiPost<TicketDetail>('tickets/update', { source: 'local' }, JSON.stringify({ id, ...update }),
+        { 'Content-Type': 'application/json' }, controller.signal)
+      if (controller.signal.aborted) return
+      setSaved({ previous: latestDetail.current, detail })
+      cancelEdit()
+      onUpdated()
+    } catch (error) {
+      if (controller.signal.aborted || error instanceof ApiError && error.status === 401) return
+      setSaveError(error instanceof Error ? error.message : '暂时无法保存工单。')
+      setConflict(error instanceof ApiError && error.status === 409)
+    } finally {
+      if (saveRequest.current === controller) saveRequest.current = null
+      if (!controller.signal.aborted) setSaving(false)
+    }
+  }
+
+  return <Dialog open onOpenChange={open => { if (!open) closeDetails() }}>
     <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl"
+      showCloseButton={!saving} onPointerDownOutside={event => { if (edit) event.preventDefault() }}
       onOpenAutoFocus={event => {
         event.preventDefault()
         dialogTitle.current?.focus({ preventScroll: true })
       }}
       onCloseAutoFocus={onCloseAutoFocus}>
       <DialogHeader className="shrink-0 border-b px-5 py-5 pr-12 text-left sm:px-6 sm:pr-12">
-        <DialogTitle ref={dialogTitle} tabIndex={-1} className="text-lg leading-6 outline-none [overflow-wrap:anywhere]">{data?.ticket.title || '工单详情'}</DialogTitle>
+        <div className="flex items-start justify-between gap-3">
+          <DialogTitle ref={dialogTitle} tabIndex={-1} className="min-w-0 text-lg leading-6 outline-none [overflow-wrap:anywhere]">{data?.ticket.title || '工单详情'}</DialogTitle>
+          {data?.edit && !edit && <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={details.refreshing} onClick={() => {
+            setConflict(false)
+            setSaveError('')
+            setEdit(data.edit ?? null)
+          }}>编辑工单</Button>}
+        </div>
         <DialogDescription>七鱼工单 #{id}{data?.ticket.status ? ` · ${data.ticket.status}` : ''}</DialogDescription>
       </DialogHeader>
       <div className="min-h-0 flex-1 overflow-auto px-5 py-5 sm:px-6">
@@ -157,20 +207,11 @@ function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus }: {
           {details.error && <TicketError error={details.error} retry={details.retry} />}
           {data && <>
             <section className="space-y-4">
-              <h3 className="text-sm font-semibold">工单提报</h3>
-              <TicketForm ticket={data.ticket} />
+              <h3 className="text-sm font-semibold">{edit ? '编辑提报内容' : '工单提报'}</h3>
+              {edit ? <TicketEditor edit={edit} saving={saving} failure={saveError} conflict={conflict}
+                onSave={save} onCancel={cancelEdit} onReload={() => { cancelEdit(); details.retry() }} /> : <TicketForm ticket={data.ticket} />}
             </section>
-            <dl aria-label="工单信息" className="grid grid-cols-2 gap-x-3 gap-y-4 rounded-lg border bg-muted/25 p-4 text-sm sm:grid-cols-3">
-              {[
-                ['提报人', data.ticket.submitter],
-                ['创建时间', ticketTime(data.ticket.created_at)], ['更新时间', ticketTime(data.ticket.updated_at)],
-                ...(data.ticket.category ? [['工单分类', data.ticket.category]] : []),
-                ...(data.ticket.template ? [['工单模板', data.ticket.template]] : []),
-              ].map(([name, value]) => <div key={name} className="min-w-0">
-                <dt className="mb-1 text-xs text-muted-foreground">{name}</dt>
-                <dd className="tabular-nums [overflow-wrap:anywhere]">{value || '—'}</dd>
-              </div>)}
-            </dl>
+            <TicketInfo ticket={data.ticket} />
             {data.technical_feedback && <TicketTechnicalFeedback feedback={data.technical_feedback} />}
             <section aria-label="处理记录" className="space-y-2">
               <h3 className="text-sm font-semibold">处理记录</h3>
@@ -298,7 +339,7 @@ export function TicketWorkspace({ selected, onSelect, refreshKey = 0 }: {
           <Button size="sm" variant="outline" disabled={!data.has_more || query.refreshing} onClick={() => setOffset(current => current + pageSize)}>下一页<ChevronRight /></Button>
         </div>
       </nav>}
-      {selected && <TicketDetails key={selected} id={selected} refreshKey={refreshKey} onClose={() => onSelect(null)} onCloseAutoFocus={event => {
+      {selected && <TicketDetails key={selected} id={selected} refreshKey={refreshKey} onClose={() => onSelect(null)} onUpdated={query.retry} onCloseAutoFocus={event => {
         const focusTarget = opener.current?.isConnected ? opener.current : title.current
         if (focusTarget) { event.preventDefault(); focusTarget.focus({ preventScroll: true }) }
         opener.current = null

@@ -1,37 +1,65 @@
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
+import { ConversationMessageBody } from './conversation-image'
+import { ConversationBubble, ConversationTranscript, guestChatRoles } from './conversation-transcript'
 import { TicketForm, ticketTime, type TicketAttachment, type TicketField } from './ticket-form'
+import { TicketHistory, TicketInfo, TicketTechnicalFeedback, type TechnicalFeedback, type TicketEvent } from './ticket-details-view'
 
 type GuestTicket = {
+  id?: string
   title: string
   status: string
   priority: string
+  submitter?: string
+  category?: string
+  template?: string
   created_at: number | null
   updated_at: number | null
   description: string
-  fields?: Pick<TicketField, 'label' | 'value' | 'images'>[]
+  fields?: TicketField[]
   images?: TicketAttachment[]
+  attachments?: TicketAttachment[]
 }
 
-export type GuestTicketPayload = { kind: 'ticket'; ticket: GuestTicket }
+type GuestSession = {
+  started_at: number | null
+  customer_name: string
+  messages: { text: string; time: string; role: string; sender_name?: string; images?: string[] }[]
+}
+
+export type GuestTicketPayload = {
+  kind: 'ticket'
+  ticket: GuestTicket
+  history?: TicketEvent[]
+  history_available?: boolean
+  sessions?: GuestSession[]
+  technical_feedback?: Omit<TechnicalFeedback, 'error' | 'feishu_url'> | null
+}
 
 const ticketPath = /^\/guest\/ticket\/[A-Za-z0-9_-]{43}$/
 const imageId = /^[a-f0-9]{64}$/
 
-export function VocGuestTicket({ ticket }: GuestTicketPayload) {
+export function VocGuestTicket({ ticket, history, history_available, sessions, technical_feedback }: GuestTicketPayload) {
   const path = window.location.pathname
-  const imagePrefix = ticketPath.test(path) ? `${path}/images/` : ''
-  function scopedImages(images: TicketAttachment[] | undefined) {
-    if (!imagePrefix || !Array.isArray(images)) return []
-    return images.filter(image => typeof image?.url === 'string' && image.url.startsWith(imagePrefix)
-      && imageId.test(image.url.slice(imagePrefix.length)))
+  function isScoped(url: unknown, type: 'images' | 'attachments') {
+    const prefix = `${path}/${type}/`
+    return ticketPath.test(path) && typeof url === 'string' && url.startsWith(prefix)
+      && imageId.test(url.slice(prefix.length))
   }
-  const fields = ticket.fields?.map(({ label, value, images }) => ({ label, value, images: scopedImages(images) }))
-  const form = { priority: ticket.priority, description: ticket.description, fields, images: scopedImages(ticket.images) }
-  const dates = [
-    { label: '创建时间', value: ticket.created_at },
-    { label: '更新时间', value: ticket.updated_at },
-  ].filter(({ value }) => typeof value === 'number' && value > 0)
+  function scopedMedia(items: TicketAttachment[] | undefined, type: 'images' | 'attachments') {
+    return items?.filter(item => isScoped(item?.url, type)) ?? []
+  }
+  function scopedFields(fields: TicketField[] | undefined) {
+    return fields?.map(({ label, value, images, attachments }) => ({
+      label, value, images: scopedMedia(images, 'images'), attachments: scopedMedia(attachments, 'attachments'),
+    }))
+  }
+  const form = { ...ticket, fields: scopedFields(ticket.fields),
+    images: scopedMedia(ticket.images, 'images'), attachments: scopedMedia(ticket.attachments, 'attachments') }
+  const events = history?.map(event => ({
+    ...event, details: scopedFields(event.details) ?? [],
+    images: scopedMedia(event.images, 'images'), attachments: scopedMedia(event.attachments, 'attachments'),
+  })) ?? []
 
   return <div className="min-h-screen bg-linear-to-b from-muted/50 via-background to-background">
     <header className="border-b bg-background">
@@ -51,16 +79,43 @@ export function VocGuestTicket({ ticket }: GuestTicketPayload) {
             <h1 id="ticket-heading" className="min-w-0 text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">{ticket.title}</h1>
             {ticket.status && <Badge variant="secondary" className="font-normal">{ticket.status}</Badge>}
           </div>
-          {dates.length > 0 && <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs leading-5 text-muted-foreground">
-            {dates.map(({ label, value }) => <div key={label} className="flex flex-wrap gap-x-2">
-              <dt>{label}</dt><dd className="tabular-nums">{ticketTime(value)}</dd>
-            </div>)}
-          </dl>}
+          {ticket.id && <p className="text-xs text-muted-foreground">七鱼工单 #{ticket.id}</p>}
         </div>
         <section aria-labelledby="ticket-form-heading" className="space-y-4 p-5 sm:px-8 sm:py-6">
           <h2 id="ticket-form-heading" className="text-sm font-semibold">工单提报</h2>
           <TicketForm ticket={form} />
         </section>
+        <div className="space-y-6 px-5 pb-6 sm:px-8">
+          <TicketInfo ticket={ticket} />
+          {technical_feedback && <TicketTechnicalFeedback feedback={{
+            status: technical_feedback.status, reply: technical_feedback.reply,
+            resolved_version: technical_feedback.resolved_version, received_at: technical_feedback.received_at,
+            writeback_status: technical_feedback.writeback_status, written_at: technical_feedback.written_at,
+          }} />}
+          <section aria-label="处理记录" className="space-y-2">
+            <h2 className="text-sm font-semibold">处理记录</h2>
+            <TicketHistory history={events} available={history_available === true} />
+          </section>
+          {!!sessions?.length && <section className="space-y-2" aria-labelledby="ticket-session-heading">
+            <h2 id="ticket-session-heading" className="text-sm font-semibold">关联会话</h2>
+            {sessions.map((session, index) => <details key={index} className="rounded-lg border">
+              <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+                {session.customer_name || '会话'} <time className="ml-2 text-xs font-normal tabular-nums text-muted-foreground">{ticketTime(session.started_at)}</time>
+              </summary>
+              <div className="px-3 pb-3">
+                <ConversationTranscript>
+                  {session.messages.map((message, messageIndex) => {
+                    const role = Object.hasOwn(guestChatRoles, message.role)
+                      ? guestChatRoles[message.role as keyof typeof guestChatRoles] : { side: 'center', label: '消息' } as const
+                    return <ConversationBubble key={messageIndex} side={role.side} sender={message.sender_name || role.label} time={message.time}>
+                      <ConversationMessageBody text={message.text} imageUrls={message.images?.filter(url => isScoped(url, 'images')) ?? []} />
+                    </ConversationBubble>
+                  })}
+                </ConversationTranscript>
+              </div>
+            </details>)}
+          </section>}
+        </div>
       </article>
     </main>
   </div>

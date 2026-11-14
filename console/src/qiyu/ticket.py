@@ -16,6 +16,8 @@ SEARCH = "/openapi/v2/ticket/search"
 DETAIL = "/openapi/v2/ticket/new/detail"
 HISTORY = "/openapi/v2/ticket/log"
 REPLY = "/openapi/v2/ticket/reply"
+MODIFY = "/openapi/v2/ticket/modify"
+TEMPLATE_FIELDS = "/openapi/v2/ticket/template/fields"
 PAGE_SIZE = 50
 _request_lock = threading.Lock()
 _next_request = 0.0
@@ -36,6 +38,10 @@ class TicketReplyUnconfirmed(TicketError):
 
 class TicketReplyVisible(TicketReplyUnconfirmed):
     """Qiyu recorded the reply as customer-visible."""
+
+
+class TicketModifyUnconfirmed(TicketError):
+    """Qiyu may have applied the change. Fetch the current ticket before retrying."""
 
 
 class TicketClient:
@@ -107,6 +113,48 @@ class TicketClient:
         if not isinstance(value, list) or any(not isinstance(entry, dict) for entry in value):
             raise TicketError("七鱼工单处理记录格式无效")
         return value
+
+    def template_fields(self, template_id: int) -> list[dict]:
+        identifier = _id(template_id)
+        if identifier is None:
+            raise ValueError("七鱼工单模板编号无效")
+        value = self._post(TEMPLATE_FIELDS, {"templateId": identifier}, "message")
+        if not isinstance(value, list):
+            raise TicketError("七鱼工单模板字段格式无效")
+        for field in value:
+            if (not isinstance(field, dict) or _id(field.get("fieldId")) is None
+                    or not isinstance(field.get("name"), str) or type(field.get("type")) is not int
+                    or type(field.get("status")) is not int or field.get("required") not in (0, 1, None)):
+                raise TicketError("七鱼工单模板字段格式无效")
+        return value
+
+    def modify(self, ticket_id: int, staff_id: int, *, change_type: int, value: str,
+               field_id: int = 0, custom_id: int = 0) -> None:
+        """Update one field using the current holder's ID. The caller verifies the saved value."""
+        identifier, holder = _id(ticket_id), _id(staff_id)
+        if (identifier is None or holder is None or type(change_type) is not int
+                or change_type not in (0, 1, 2, 3) or not isinstance(value, str)):
+            raise ValueError("七鱼工单修改参数无效")
+        if any(type(field) is not int or (field != 0 and _id(field) is None) for field in (field_id, custom_id)):
+            raise ValueError("七鱼工单自定义字段编号无效")
+        if (change_type == 0) != bool(field_id or custom_id):
+            raise ValueError("七鱼工单自定义字段编号与修改类型不符")
+        if (change_type == 1 and not value.strip()) or (change_type in (2, 3) and _id(value) is None):
+            raise ValueError("七鱼工单修改值无效")
+        try:
+            accepted = self._post(MODIFY, {"ticketId": identifier, "staffId": holder, "type": change_type,
+                                           "customId": custom_id, "fieldId": field_id, "value": value}, "message")
+        except TicketError as error:
+            code = error.upstream_code
+            if code in (None, 408, 14500, 16001) or (500 <= code < 600):
+                raise TicketModifyUnconfirmed("七鱼工单修改结果暂未确认，请刷新工单核对。", http_status=503) from None
+            if code in (14004, 14100, 14101, 14110, 14200):
+                raise TicketError("七鱼未接受本次工单修改", http_status=409, upstream_code=code) from None
+            raise
+        if accepted is False:
+            raise TicketError("七鱼未接受本次工单修改", http_status=409)
+        if accepted is not True:
+            raise TicketModifyUnconfirmed("七鱼工单修改结果暂未确认，请刷新工单核对。", http_status=503)
 
     def has_feedback(self, ticket_id: int, text: str) -> bool:
         """Look for the exact tagged reply in the native ticket history."""

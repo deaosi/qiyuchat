@@ -37,3 +37,33 @@ it('renders the shared ticket with only images scoped to the open guest link', (
     window.history.replaceState(null, '', previousPath)
   }
 })
+
+it('shows the ticket-scoped download, technical result, and conversation without administrative navigation', () => {
+  const previousPath = window.location.pathname
+  const path = `/guest/ticket/${'a'.repeat(43)}`
+  const fileUrl = `${path}/attachments/${'0'.repeat(64)}`
+  window.history.replaceState(null, '', path)
+  try {
+    render(<VocGuestTicket kind="ticket" ticket={{
+      id: '58', title: '打印故障', status: '处理中', priority: '一般', description: '',
+      created_at: null, updated_at: null, attachments: [{ name: '诊断日志.zip', url: fileUrl }],
+    }} history_available history={[]}
+    technical_feedback={{
+      status: '已修复', reply: '重新安装后恢复', resolved_version: '2.0',
+      received_at: null, writeback_status: 'succeeded', written_at: null,
+    }} sessions={[{
+      started_at: null, customer_name: '店铺小许', messages: [
+        { text: '打印为空白', time: '10:00', role: 'user', sender_name: '店铺小许' },
+        { text: '请确认驱动版本', time: '10:01', role: 'staff', sender_name: '在线客服' },
+      ],
+    }]} />)
+    expect(screen.getByText('重新安装后恢复')).toBeTruthy()
+    expect(screen.getByText('打印为空白').closest('li')?.dataset.side).toBe('left')
+    expect(screen.getByText('请确认驱动版本').closest('li')?.dataset.side).toBe('right')
+    expect(screen.getAllByRole('link').map(link => link.getAttribute('href'))).toEqual([fileUrl])
+    expect(screen.queryByRole('button', { name: '编辑工单' })).toBeNull()
+  } finally {
+    cleanup()
+    window.history.replaceState(null, '', previousPath)
+  }
+})

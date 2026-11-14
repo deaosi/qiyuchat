@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from hashlib import sha256
 from html import escape
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from secrets import token_urlsafe
 import sqlite3
@@ -13,6 +13,7 @@ from threading import Lock
 from time import monotonic
 from urllib.parse import urlsplit
 
+from .. import ticket_feedback
 from ..config import Settings
 from ..qiyu.ticket import TicketClient, TicketError, _id
 from ..voc_assets import connection, transaction
@@ -24,10 +25,16 @@ TOKEN_PATTERN = guest_evidence.TOKEN_PATTERN
 IMAGE_PATTERN = r"[a-f0-9]{64}"
 _TOKEN = re.compile(TOKEN_PATTERN)
 _IMAGE = re.compile(IMAGE_PATTERN)
-_FIELDS = {"平台&版本", "平台", "软件版本", "是否已点击报告问题", "问题需求", "附件/截图", "附件／截图"}
 _TEST_PLACEHOLDER = re.compile(r"(?:测试|test|demo|sample)(?:[-_ ]?[0-9]{1,3})?", re.I)
 _SOFTWARE_VERSION = re.compile(r"[vV]?\d{1,4}(?:\.\d{1,4}){1,3}")
 _REPORT_VALUES = {"是", "否", "已点击", "未点击", "yes", "no", "true", "false"}
+_PRIVATE_LABEL = re.compile(
+    r"密码|口令|密钥|验证码|签名|联系(?:电话|方式|人)|手机号|地址|身份证|账号|(?:access[_ -]?)?token\b|"
+    r"api[_ -]?key\b|(?:技术回复|内部备注|技术处理状态|回传状态|回传失败原因)$",
+    re.I,
+)
+_STAFF_FIELDS = {"后台负责人", "负责人", "处理人", "提报人", "提交人"}
+_SYNC_MARKER = re.compile(r"〔语海同步\s+[0-9a-f]+〕", re.I)
 _BEARER_TOKEN = re.compile(r"\b(Bearer)[ \t]+[A-Za-z0-9_./+~=-]{8,}", re.I)
 _DISPLAY_LABELS = {"客户群": "客户群名称", "客户群名称": "客户群名称", "店铺名": "店铺名",
                    "店铺名称": "店铺名", "商家名称": "商家名称"}
@@ -40,11 +47,13 @@ _LABELED_SECRET = re.compile(
     re.I,
 )
 _REDACTION = re.compile(r"\[(?:名称|链接|标识)已隐藏\]|\[(?:详细地址)?已脱敏\]")
-_MAX_IMAGES = 16
+_MAX_MEDIA = 40
+_MAX_LINKED_SESSIONS = 20
 _CACHE_SECONDS = 30
 _CACHE_LIMIT = 128
 _CACHE_LOCK = Lock()
 _cache = OrderedDict()
+_cache_generation = 0
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticket_guest_link (
     ticket_id TEXT PRIMARY KEY,
@@ -98,6 +107,16 @@ def matches(cfg: Settings, ticket_id: str, url: str) -> bool:
         return False
     number = _ticket_id(cfg, url[len(prefix):])
     return number is not None and str(number) == ticket_id
+
+
+def invalidate(cfg: Settings, identifier: int | str) -> None:
+    global _cache_generation
+    path, ticket_id = _registry(cfg), _id(identifier)
+    with _CACHE_LOCK:
+        _cache_generation += 1
+        for key in tuple(_cache):
+            if key[0] == path and key[2] == ticket_id:
+                _cache.pop(key)
 
 
 def _name_pattern(values: set[str]) -> re.Pattern[str] | None:
@@ -162,73 +181,195 @@ def _identities(raw: dict, custom: list[dict]) -> tuple[re.Pattern[str] | None, 
     return names, display_fields
 
 
-def _project(raw: dict, token: str) -> tuple[dict, dict[str, str]]:
+def _visible_history(logs: list[dict]) -> list[dict]:
+    visible = []
+    for entry in logs:
+        shared = entry.get("customerSee")
+        explicit = shared in (True, 1, "1", "true", "True")
+        reply = _id(entry.get("actionType")) in (20, 101) or "回复" in str(entry.get("action") or entry.get("actionLang") or "")
+        if shared in (False, 0, "0", "false", "False") or (reply and not explicit):
+            continue
+        if any(_SYNC_MARKER.search(str(item.get("content") or "")) for item in tickets._attachments(entry.get("info"))):
+            continue
+        visible.append(entry)
+    return visible
+
+
+def _public_raw_fields(value, *, history=False):
+    fields = []
+    for field in tickets._attachments(value):
+        label = tickets._text(field.get("title") or field.get("titleLang") if history else field.get("name"), 100)
+        if not _PRIVATE_LABEL.search(label):
+            fields.append(field)
+    return fields
+
+
+def _shared_feedback(cfg: Settings, identifier: int, names) -> dict | None:
+    try:
+        feedback = ticket_feedback.get(cfg, str(identifier))
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+    if not feedback:
+        return None
+    state = feedback.get("writeback_status")
+    return {
+        "status": _guest_text(feedback.get("status"), names),
+        "reply": _guest_text(feedback.get("reply"), names),
+        "resolved_version": _guest_text(feedback.get("resolved_version"), names),
+        "received_at": tickets._millis(feedback.get("received_at")),
+        "writeback_status": state if state in ticket_feedback._STATES else "",
+        "written_at": tickets._millis(feedback.get("written_at")),
+    }
+
+
+def _shared_sessions(cfg: Settings, identifier: int, names, scoped_links) -> list[dict]:
+    try:
+        linked = tickets._linked_sessions(cfg, {identifier}).get(identifier, [])
+    except (OSError, sqlite3.Error):
+        return []
+    sessions = []
+    for item in linked[:_MAX_LINKED_SESSIONS]:
+        display = {}
+        case = guest_evidence._case(cfg, item["qa_id"], "", full=True, include_sender_names=True, display=display)
+        if not case:
+            continue
+        _, context, _, _, sources = case
+        images = {}
+        for position, url in sources.values():
+            if case_media._safe_image_url(url):
+                assets, _ = scoped_links([{"url": url, "name": "会话截图", "inline_image": True}])
+                images.setdefault(position, []).extend(image["url"] for image in assets)
+        messages = []
+        for position, item_message in enumerate(context):
+            text = _guest_text(item_message.get("text"), names)
+            media = images.get(position)
+            if not text and not media:
+                continue
+            message = {"text": text, "time": item_message["time"], "role": item_message["role"]}
+            display_name = item_message.get("sender_name") or item_message.get("sender_label")
+            if sender := _guest_text(display_name, None):
+                message["sender_name"] = sender
+            if media:
+                message["images"] = media
+            messages.append(message)
+        if messages:
+            sessions.append({"started_at": item["started_at"], "customer_name": _guest_text(display.get("customer_name"), None),
+                             "messages": messages})
+    return sessions
+
+
+def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[dict] | None = None) -> tuple[dict, dict[str, tuple[str, str, bool]]]:
     custom = tickets._attachments(raw.get("custom"))
     names, display_fields = _identities(raw, custom)
-    media = {}
+    records = []
+    media: dict[str, tuple[str, str, bool]] = {}
 
-    def snapshots(items: list[dict]) -> list[dict]:
-        images = []
-        for upstream, _, is_image in ticket_media.source_items(items):
-            if not is_image or len(media) >= _MAX_IMAGES:
-                continue
+    def scoped_links(items: list[dict]) -> tuple[list[dict], list[dict]]:
+        images, attachments = [], []
+        for upstream, original_name, is_image in ticket_media.source_items(items):
             parts = urlsplit(upstream)
             # The provider can rotate a signed query without changing the underlying attachment.
-            identity = f"{token}/{parts.netloc.lower()}{parts.path}"
-            image_id = sha256(identity.encode()).hexdigest()
-            if image_id in media:
+            if is_image:
+                identity = f"{token}/{parts.netloc.lower()}{parts.path}"
+            else:
+                identity = f"{token}/attachment/{parts.netloc.lower()}{parts.path}"
+            file_id = sha256(identity.encode()).hexdigest()
+            if file_id not in media:
+                if len(media) >= _MAX_MEDIA:
+                    continue
+                suffix = PurePosixPath(original_name).suffix.lower()
+                suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
+                safe_stem = _guest_text(PurePosixPath(original_name).stem, names)
+                name = (safe_stem or ("工单截图" if is_image else "工单附件")) + suffix
+                media[file_id] = upstream, name, is_image
+            kind = "images" if is_image else "attachments"
+            (images if is_image else attachments).append({"name": media[file_id][1], "url": f"{PUBLIC_PATH}{token}/{kind}/{file_id}"})
+        return images, attachments
+
+    def public_fields(fields: list[dict]) -> list[dict]:
+        result = []
+        seen_labels = set()
+        for field in fields:
+            label = field["label"]
+            if _PRIVATE_LABEL.search(label):
                 continue
-            media[image_id] = upstream
-            images.append({"name": f"工单截图 {len(media)}", "url": f"{PUBLIC_PATH}{token}/images/{image_id}"})
-        return images
+            value = field["value"]
+            business = _DISPLAY_LABELS.get(label)
+            if business:
+                if business in seen_labels:
+                    continue
+                seen_labels.add(business)
+                value = display_fields.get(business, "")
+                label = business
+            else:
+                typed = ((label == "是否已点击报告问题" and value.casefold() in _REPORT_VALUES)
+                         or (label == "软件版本" and _SOFTWARE_VERSION.fullmatch(value) is not None)
+                         or label in _STAFF_FIELDS)
+                value = _guest_text(value, None if typed else names)
+            if value or field.get("images") or field.get("attachments"):
+                result.append({**field, "label": _guest_text(label, None), "value": value})
+        return result
 
-    fields = [{"label": label, "value": name} for label, name in display_fields.items()]
-    for field in custom:
-        label = field.get("name")
-        if not isinstance(label, str) or label not in _FIELDS:
-            continue
-        value, candidates = tickets._field_value(field.get("value"), 4000)
-        typed_value = ((label == "是否已点击报告问题" and value.casefold() in _REPORT_VALUES)
-                       or (label == "软件版本" and _SOFTWARE_VERSION.fullmatch(value) is not None))
-        value = _guest_text(value, None if typed_value else names)
-        images = snapshots(candidates)
-        if value or images:
-            fields.append({"label": label, "value": value, **({"images": images} if images else {})})
+    source_logs = logs or []
+    history = [{**entry, "info": _public_raw_fields(entry.get("info"), history=True)}
+               for entry in _visible_history(source_logs)]
+    submitter = tickets.ticket_submitter(raw, source_logs)
+    shared = {**raw, "custom": _public_raw_fields(custom)}
+    data = tickets.project_ticket(cfg, shared, scoped_links, submitter=submitter)
+    data.pop("owner", None)
+    data.pop("linked_session_count", None)
+    data["title"] = _guest_text(data["title"], names) or "工单详情"
+    data["description"] = _guest_text(data["description"], names)
+    data["category"] = _guest_text(data["category"], names)
+    data["template"] = _guest_text(data["template"], names)
+    data["submitter"] = _guest_text(submitter, None)
+    data["updated_at"] = tickets.ticket_updated_at(raw, history)
+    data["fields"] = public_fields(data["fields"])
+    visible_labels = {_DISPLAY_LABELS.get(field["label"], field["label"]) for field in data["fields"]}
+    data["fields"].extend({"label": label, "value": name} for label, name in display_fields.items()
+                          if label not in visible_labels)
+    for index, event in enumerate(tickets.project_history(history, scoped_links), start=1):
+        event["id"] = f"event-{index}"
+        event["action"] = _guest_text(event["action"], names) or "工单操作"
+        event["operator"] = _guest_text(event["operator"], None)
+        event["details"] = public_fields(event["details"])
+        records.append(event)
+    payload = {"kind": "ticket", "ticket": data, "history": records, "history_available": logs is not None,
+               "sessions": [], "technical_feedback": None}
+    if cfg is not None and (identifier := _id(raw.get("id"))) is not None:
+        payload["sessions"] = _shared_sessions(cfg, identifier, names, scoped_links)
+        payload["technical_feedback"] = _shared_feedback(cfg, identifier, names)
+    return payload, media
 
-    text, embedded = tickets._field_value(raw.get("content"), 8000, rich=raw.get("isRichText") in (True, 1, "1"))
-    title, status, priority, created, updated = (
-        _guest_text(raw.get("title"), names)[:300],
-        tickets.TICKET_STATUSES.get(_id(raw.get("status")), ""),
-        tickets.TICKET_PRIORITIES.get(_id(raw.get("priority")), ""),
-        tickets._millis(raw.get("createTime")),
-        tickets._millis(raw.get("modifyTime")),
-    )
-    data = {"title": title or "工单详情", "status": status, "priority": priority, "created_at": created,
-            "updated_at": updated, "description": _guest_text(text, names),
-            "fields": fields, "images": snapshots(embedded)}
-    return {"kind": "ticket", "ticket": data}, media
 
-
-def _snapshot(cfg: Settings, token: str) -> tuple[dict, dict[str, str]] | None:
+def _snapshot(cfg: Settings, token: str) -> tuple[dict, dict[str, tuple[str, str, bool]]] | None:
     identifier = _ticket_id(cfg, token)
     if identifier is None:
         return None
     key = (_registry(cfg), token, identifier)
     now = monotonic()
     with _CACHE_LOCK:
+        generation = _cache_generation
         hit = _cache.get(key)
         if hit and hit[0] > now:
             _cache.move_to_end(key)
             return hit[1]
     try:
-        result = _project(TicketClient(cfg.qiyu).detail(identifier), token)
+        client = TicketClient(cfg.qiyu)
+        detail = client.detail(identifier)
     except TicketError:
         return None
+    try:
+        logs = client.history(identifier)
+    except TicketError:
+        logs = None
+    result = _project(detail, token, cfg=cfg, logs=logs)
     with _CACHE_LOCK:
-        _cache[key] = (now + _CACHE_SECONDS, result)
-        _cache.move_to_end(key)
-        while len(_cache) > _CACHE_LIMIT:
-            _cache.popitem(last=False)
+        if generation == _cache_generation:
+            _cache[key] = (now + _CACHE_SECONDS, result)
+            _cache.move_to_end(key)
+            while len(_cache) > _CACHE_LIMIT:
+                _cache.popitem(last=False)
     return result
 
 
@@ -238,15 +379,29 @@ def resolve_payload(cfg: Settings, token: str) -> dict | None:
 
 
 def fetch_image(cfg: Settings, token: str, image_id: str) -> tuple[bytes, str, str]:
-    snapshot = _snapshot(cfg, token) if _IMAGE.fullmatch(image_id) else None
-    upstream = snapshot[1].get(image_id) if snapshot else None
-    if not upstream:
+    media = _guest_media(cfg, token, image_id)
+    if not media or not media[2]:
         raise case_media.ImageFetchError("工单截图不存在。", 404)
+    upstream, _, _ = media
     data, mime = case_media.fetch_bytes(upstream, image_only=True, ticket_attachment=True)
     mime = case_media.actual_image_type(data, mime)
     if not mime:
         raise case_media.ImageFetchError("图片格式无法读取。", 502)
     return data, mime, "ticket-image." + case_media._IMAGE_FORMATS[mime]
+
+
+def _guest_media(cfg: Settings, token: str, media_id: str) -> tuple[str, str, bool] | None:
+    snapshot = _snapshot(cfg, token) if _IMAGE.fullmatch(media_id) else None
+    return snapshot[1].get(media_id) if snapshot else None
+
+
+def fetch_attachment(cfg: Settings, token: str, attachment_id: str) -> tuple[bytes, str, str]:
+    media = _guest_media(cfg, token, attachment_id)
+    if not media or media[2]:
+        raise case_media.ImageFetchError("工单附件不存在。", 404)
+    upstream, name, _ = media
+    data, _ = case_media.fetch_bytes(upstream, image_only=False, ticket_attachment=True)
+    return data, "application/octet-stream", name
 
 
 def render_payload(payload: dict) -> bytes:

@@ -6,7 +6,7 @@ import { Separator } from '@/components/ui/separator'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ConversationMessageBody } from './conversation-image'
-import { ConversationBubble, ConversationSection, ConversationSheet, ConversationTranscript } from './conversation-transcript'
+import { ConversationBubble, ConversationSection, ConversationSheet, ConversationTranscript, guestChatRoles } from './conversation-transcript'
 import { DecisionCaseCard, DecisionCaseSection, EvidenceCaseCard, SopDetailHeader, SopDetailSection, SopTimeline, SopTimelineStep } from './voc-detail-display'
 import type { TopicDetail } from './voc-next-workspace'
 import { TopicDetailPanel, TopicWorkbench } from './voc-topic-detail'
@@ -173,16 +173,6 @@ function GuestSop({ entry, cases, total_cases: total, period, onOpen }: GuestDet
   </>
 }
 
-const chatRoles = {
-  user: { side: 'left', label: '客户' },
-  customer: { side: 'left', label: '客户' },
-  staff: { side: 'right', label: '客服' },
-  group_participant: { side: 'center', label: '群成员' },
-  combined_transcript: { side: 'center', label: '合并记录' },
-  unidentified: { side: 'center', label: '身份未确认' },
-  bot: { side: 'center', label: '机器人' },
-  system: { side: 'center', label: '系统' },
-} as const
 const guestEvidencePath = /^\/guest\/evidence\/[A-Za-z0-9_-]{43}$/
 const guestImageId = /^(?:[0-9]|1[0-9])-[a-f0-9]{64}$/
 const anonymousGroupLabel = /^群成员 [1-9][0-9]*$/
@@ -209,8 +199,8 @@ function GuestTranscript({ item, locate, title }: { item: GuestCase; locate: boo
       <p className="mb-4 text-sm leading-6 text-muted-foreground">{note}</p>
       <ConversationTranscript ref={transcript}>
         {item.messages.map((message, index) => {
-          const role = Object.hasOwn(chatRoles, message.role)
-            ? chatRoles[message.role as keyof typeof chatRoles] : { side: 'center', label: '消息' } as const
+          const role = Object.hasOwn(guestChatRoles, message.role)
+            ? guestChatRoles[message.role as keyof typeof guestChatRoles] : { side: 'center', label: '消息' } as const
           const anonymousSender = typeof message.sender_label === 'string' && anonymousGroupLabel.test(message.sender_label) ? message.sender_label : ''
           const senderName = typeof message.sender_name === 'string' ? message.sender_name.trim() : ''
           const sender = message.role === 'combined_transcript' ? role.label : senderName || anonymousSender || role.label

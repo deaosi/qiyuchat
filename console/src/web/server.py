@@ -15,7 +15,7 @@ import time
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from ..config import Settings, settings
 from .. import voc, knowledge, gateway, voc_service, voc_assistant
@@ -44,6 +44,9 @@ GUEST_IMAGE_ROUTE = re.compile(
 )
 GUEST_TICKET_IMAGE_ROUTE = re.compile(
     rf"{ticket_guest.PUBLIC_PATH}({ticket_guest.TOKEN_PATTERN})/images/({ticket_guest.IMAGE_PATTERN})"
+)
+GUEST_TICKET_ATTACHMENT_ROUTE = re.compile(
+    rf"{ticket_guest.PUBLIC_PATH}({ticket_guest.TOKEN_PATTERN})/attachments/({ticket_guest.IMAGE_PATTERN})"
 )
 GUEST_ASSET_PREFIX = "/guest/ui/assets/"
 GUEST_ASSET_NAME = re.compile(r"[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(?:js|css|woff2?)")
@@ -367,6 +370,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._guest_image(image[1], image[2], suffix)
                 elif image := GUEST_TICKET_IMAGE_ROUTE.fullmatch(u.path):
                     self._guest_image(image[1], image[2], suffix, ticket=True)
+                elif attachment := GUEST_TICKET_ATTACHMENT_ROUTE.fullmatch(u.path):
+                    self._guest_image(attachment[1], attachment[2], suffix, ticket=True, download=True)
                 else:
                     self._guest_page(u.path, suffix)
                 return
@@ -486,7 +491,8 @@ class Handler(BaseHTTPRequestHandler):
             extra["Content-Encoding"] = "gzip"
         self._send(body, "text/html; charset=utf-8", status, policy=policy, extra=extra)
 
-    def _guest_image(self, token: str, image_id: str, suffix: str, *, ticket: bool = False) -> None:
+    def _guest_image(self, token: str, image_id: str, suffix: str, *, ticket: bool = False,
+                     download: bool = False) -> None:
         if suffix:
             self._send(b"", "text/plain; charset=utf-8", 404, policy=GUEST_POLICY, extra=GUEST_HEADERS)
             return
@@ -496,7 +502,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             try:
                 if ticket:
-                    data, mime, filename = ticket_guest.fetch_image(self.server.cfg, token, image_id)
+                    fetch = ticket_guest.fetch_attachment if download else ticket_guest.fetch_image
+                    data, mime, filename = fetch(self.server.cfg, token, image_id)
                 else:
                     url = guest_evidence.resolve_image(self.server.cfg, token, image_id)
                     if url is None:
@@ -507,9 +514,8 @@ class Handler(BaseHTTPRequestHandler):
             except case_media.ImageFetchError as exc:
                 self._send(b"", "text/plain; charset=utf-8", exc.status, policy=GUEST_POLICY, extra=GUEST_HEADERS)
                 return
-            self._send(data, mime, policy=GUEST_POLICY, extra={
-                **GUEST_HEADERS, "Content-Disposition": f'inline; filename="{filename}"',
-            })
+            disposition = f"attachment; filename*=UTF-8''{quote(filename, safe='')}" if download else f'inline; filename="{filename}"'
+            self._send(data, mime, policy=GUEST_POLICY, extra={**GUEST_HEADERS, "Content-Disposition": disposition})
         finally:
             GUEST_IMAGE_SLOTS.release()
 
@@ -795,6 +801,21 @@ class Handler(BaseHTTPRequestHandler):
             cfg = self._cfg(qs)
             if path == "/api/panel/keys":
                 self._panel_write(data)
+            elif path == "/api/tickets/update":
+                content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                if len(data) > 64 * 1024 or content_type != "application/json":
+                    raise ValueError("工单修改请求须为最多 64 KB 的 JSON。")
+                try:
+                    body = json.loads(data.decode("utf-8"))
+                except (ValueError, UnicodeError, RecursionError):
+                    raise ValueError("工单修改请求不是有效 JSON。") from None
+                try:
+                    result = tickets.update_ticket(cfg, body)
+                    result["technical_feedback"] = ticket_feedback.get(cfg, result["ticket"]["id"])
+                except tickets.TicketError as error:
+                    self._json({"error": str(error)}, error.http_status)
+                else:
+                    self._json(result)
             elif path == "/api/detail/replies":
                 if data:
                     raise ValueError("客服回复查询不接受请求正文")

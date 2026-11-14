@@ -47,6 +47,70 @@ class TicketModuleTests(LocalFixture):
         status, _, data = self.fetch_raw(path, admin=admin)
         return status, json.loads(data)
 
+    def test_admin_edits_qiyu_and_refreshes_existing_guest_link(self):
+        raw = {"id": 58, "title": "原工单标题", "status": 10, "priority": 5, "holderId": 1234,
+               "templateId": 77, "custom": [{"name": "问题需求", "fieldId": 201, "value": "原需求"},
+                                            {"name": "附件/截图", "fieldId": 202, "value": ""}]}
+        changes = []
+
+        def upstream(method, url, *, body, **kwargs):
+            path = urlsplit(url).path
+            request = json.loads(body)
+            if path == ticket.DETAIL:
+                return {"code": 200, "data": raw}
+            if path == ticket.HISTORY:
+                return {"code": 200, "data": []}
+            if path == ticket.TEMPLATE_FIELDS:
+                self.assertEqual(request, {"templateId": 77})
+                return {"code": 200, "message": [{"name": "问题需求", "fieldId": 201,
+                                                 "type": 0, "status": 0, "required": 1}]}
+            self.assertEqual(path, ticket.MODIFY)
+            self.assertEqual((request["ticketId"], request["staffId"]), (58, 1234))
+            changes.append((request["type"], request["fieldId"], request["value"]))
+            if request["type"] == 1:
+                raw["title"] = request["value"]
+            elif request["type"] == 0:
+                raw["custom"][0]["value"] = request["value"]
+            return {"code": 200, "message": True}
+
+        def submit(body, *, admin=True, same_origin=True, path="/api/tickets/update"):
+            host = f"127.0.0.1:{self.server.server_port}"
+            headers = {"Origin": f"http://{host}" if same_origin else "https://elsewhere.example",
+                       "X-Local-Request": "1", "Content-Type": "application/json"}
+            if admin:
+                headers["X-Admin-Key"] = "fixture"
+            with_client = http.client.HTTPConnection(host, timeout=5)
+            try:
+                with_client.request("POST", path, body=json.dumps(body), headers=headers)
+                response = with_client.getresponse()
+                return response.status, response.read()
+            finally:
+                with_client.close()
+
+        guest_path = urlsplit(ticket_guest.url_for(self.cfg, "58")).path
+        token = guest_path.rsplit("/", 1)[-1]
+        with patch("src.qiyu.ticket.request", side_effect=upstream):
+            self.assertEqual(ticket_guest.resolve_payload(self.cfg, token)["ticket"]["title"], "原工单标题")
+            status, detail = self.fetch("/api/tickets/detail?id=58")
+            self.assertEqual(status, 200)
+            self.assertEqual([field["id"] for field in detail["edit"]["fields"]], ["201"])
+            base = {"id": "58", "revision": detail["edit"]["revision"]}
+            update = {**base, "title": "新工单标题", "fields": {"201": "新需求"}}
+            self.assertEqual(submit(update, admin=False)[0], 401)
+            self.assertEqual(submit(update, same_origin=False)[0], 403)
+            self.assertEqual(submit({**base, "fields": {"202": "不可覆盖附件"}})[0], 400)
+            self.assertEqual(submit({**base, "fields": {"201": " "}})[0], 400)
+            self.assertEqual(changes, [])
+            status, saved = submit(update)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(saved)["edit"]["title"], "新工单标题")
+            public = ticket_guest.resolve_payload(self.cfg, token)
+            self.assertEqual(public["ticket"]["title"], "新工单标题")
+            self.assertIn({"label": "问题需求", "value": "新需求"}, public["ticket"]["fields"])
+            self.assertNotIn("edit", public)
+            self.assertEqual(submit(update)[0], 409)
+            self.assertEqual(changes, [(1, 0, "新工单标题"), (0, 201, "新需求")])
+
     def test_authenticated_projection_keeps_ticket_links_and_drops_private_fields(self):
         self.seed()
         db = get_db(self.cfg)
@@ -226,30 +290,48 @@ class TicketModuleTests(LocalFixture):
         self.assertNotIn("581000", first)
         path, other = urlsplit(first).path, urlsplit(second).path
         shot = "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef?signature=secret"
+        document = "https://shop.qiyukf.net/1123456789abcdef0123456789abcdef"
+        internal_file = "https://shop.qiyukf.net/2123456789abcdef0123456789abcdef"
         detail = {"id": 581000, "title": "示例商家下单失败", "status": 10, "priority": 8,
+                  "staffId": 32, "templateName": "购物售后", "questionType": {"path": "售后/下单"},
                   "holderName": "技术内部人员", "content": "示例商家 设备报错 技术内部人员接单 13812345678 http://example.org/key 工单号 581000",
                   "custom": [
                       {"name": "店铺名", "value": "示例商家"},
                       {"name": "平台&版本", "value": "抖音"},
-                      {"name": "附件/截图", "value": json.dumps([{"name": "隐私图片名.png", "url": shot},
-                          {"name": "私有原文件.pdf", "url": "https://shop.qiyukf.net/1123456789abcdef0123456789abcdef"}])},
-                      {"name": "技术回复", "value": "内网答复"},
+                      {"name": "附件/截图", "value": json.dumps([{"name": "提交截图.png", "url": shot},
+                          {"name": "问题附件.pdf", "url": document}])},
+                      {"name": "技术回复", "value": json.dumps([{"name": "内网答复.pdf", "url": internal_file}])},
                       {"name": ["malformed"], "value": "ignored"},
-                  ],
-                  "attachments": [{"name": "internal-log.png", "url": "https://shop.qiyukf.net/2123456789abcdef0123456789abcdef"}]}
+                  ]}
+        logs = [
+            {"id": 1234567, "actionType": 1, "action": "创建工单", "operatorId": 32, "operator": "提交客服",
+             "time": 1794537000000, "info": [{"title": "受理方式", "content": "客服提交"}]},
+            {"id": 1234568, "actionType": 20, "action": "回复", "customerSee": True, "operator": "公开回复员",
+             "time": 1794537100000, "info": [{"title": "备注", "content": "已提交排查"}]},
+            {"id": 1234569, "actionType": 20, "action": "回复", "customerSee": False,
+             "time": 1794537200000, "info": [{"title": "备注", "content": "内网答复"}]},
+            {"id": 1234570, "actionType": 20, "action": "回复", "customerSee": True,
+             "time": 1794537250000, "info": [{"title": "备注", "content": "语海 Voc · 飞书技术反馈\n〔语海同步 0123abcd〕"}]},
+        ]
         static = Path(self.temp.name) / "static"
         (static / "guest").mkdir(parents=True)
         (static / "guest" / "index.html").write_bytes(b"<html><!--VOC_GUEST_DATA--></html>")
 
         def respond(method, target, *, body, **kwargs):
-            self.assertEqual(urlsplit(target).path, ticket.DETAIL)
+            endpoint = urlsplit(target).path
+            self.assertIn(endpoint, (ticket.DETAIL, ticket.HISTORY))
             number = json.loads(body)["ticketId"]
+            if endpoint == ticket.HISTORY:
+                return {"code": 200, "data": logs if number == 581000 else []}
             row = detail if number == 581000 else {"id": number, "title": "其他工单"}
             return {"code": 200, "data": row}
 
+        def media_body(url, *, image_only, ticket_attachment):
+            return ((b"\x89PNG\r\n\x1a\ncontent", "image/png") if image_only else (b"%PDF-1.7 document", "application/pdf"))
+
         with (patch("src.web.server.STATIC", static),
               patch("src.qiyu.ticket.request", side_effect=respond) as upstream,
-              patch.object(case_media, "fetch_bytes", return_value=(b"\x89PNG\r\n\x1a\ncontent", "image/png")) as media):
+              patch.object(case_media, "fetch_bytes", side_effect=media_body) as media):
             self.assertEqual(self.fetch_raw("/guest/ticket/" + "0" * 43, admin=False)[0], 404)
             self.assertEqual(self.fetch_raw(path + "?id=581001", admin=False)[0], 404)
             self.assertEqual(self.fetch("/api/tickets/detail?id=581000", admin=False)[0], 401)
@@ -262,25 +344,42 @@ class TicketModuleTests(LocalFixture):
             self.assertIn("noindex", headers["X-Robots-Tag"])
             payload = json.loads(re.search(rb'<script[^>]+>(.+?)</script>', body).group(1))
             self.assertEqual(payload["kind"], "ticket")
+            self.assertEqual(payload["ticket"]["id"], "581000")
             self.assertEqual(payload["ticket"]["priority"], "紧急")
             self.assertEqual(payload["ticket"]["title"], "示例商家下单失败")
+            self.assertEqual(payload["ticket"]["submitter"], "提交客服")
+            self.assertEqual(payload["ticket"]["template"], "购物售后")
+            self.assertEqual(payload["ticket"]["category"], "售后/下单")
+            self.assertTrue(payload["history_available"])
+            self.assertEqual([entry["action"] for entry in payload["history"]], ["回复", "创建工单"])
             self.assertEqual(payload["ticket"]["fields"][:2], [
                 {"label": "店铺名", "value": "示例商家"},
                 {"label": "平台&版本", "value": "抖音"},
             ])
             raw_data = body.decode("utf-8")
-            for private in ("581000", "技术内部人员", "内网答复", "13812345678", "example.org",
-                            "私有原文件", "隐私图片名", "signature=secret", "internal-log"):
+            for private in ("技术内部人员", "内网答复", "13812345678", "example.org", "signature=secret",
+                            "语海同步", "1234567", "1234568", "1234569", "1234570", "/api/tickets/media"):
                 self.assertNotIn(private, raw_data)
+            self.assertNotIn("581000", payload["ticket"]["description"])
             asset = payload["ticket"]["fields"][2]["images"][0]["url"]
             self.assertTrue(asset.startswith(path + "/images/"))
             status, headers, body = self.fetch_raw(asset, admin=False)
             self.assertEqual((status, headers.get_content_type()), (200, "image/png"))
             self.assertTrue(body.startswith(b"\x89PNG"))
-            self.assertEqual(upstream.call_count, 1)
+            self.assertEqual(upstream.call_count, 2)
             self.assertEqual(self.fetch_raw(asset + "?url=https://example.org/evil.png", admin=False)[0], 404)
             self.assertEqual(self.fetch_raw(asset.replace(path, other), admin=False)[0], 404)
             media.assert_called_once_with(shot, image_only=True, ticket_attachment=True)
+            download = payload["ticket"]["fields"][2]["attachments"][0]["url"]
+            self.assertTrue(download.startswith(path + "/attachments/"))
+            self.assertEqual(self.fetch_raw(download.replace("/attachments/", "/images/"), admin=False)[0], 404)
+            self.assertEqual(self.fetch_raw(asset.replace("/images/", "/attachments/"), admin=False)[0], 404)
+            code, headers, data = self.fetch_raw(download, admin=False)
+            self.assertEqual((code, headers.get_content_type(), data), (200, "application/octet-stream", b"%PDF-1.7 document"))
+            self.assertTrue(headers["Content-Disposition"].startswith("attachment;"))
+            self.assertEqual(media.call_args.args, (document,))
+            _, scoped = ticket_guest._project(detail, "A" * 43, logs=logs)
+            self.assertNotIn(internal_file, {source[0] for source in scoped.values()})
 
     def test_guest_ticket_keeps_readable_overlapping_public_values(self):
         detail = {
@@ -307,11 +406,12 @@ class TicketModuleTests(LocalFixture):
         self.assertIn("采购小许反馈测试1失败", guest["description"])
         self.assertEqual({field["label"]: field["value"] for field in guest["fields"]}, {
             "店铺名": "测试1", "客户群名称": "测试1", "商家名称": "v1.2.3", "客户名称": "采购小许",
+            "后台负责人": "测试1",
             "平台&版本": "测试1", "软件版本": "v1.2.3",
             "是否已点击报告问题": "否", "问题需求": "测试1失败",
         })
         for private in ("user-private@example.org", "13812345678",
-                        "private-token", "private.bearer.value", "短密钥", "581010"):
+                        "private-token", "private.bearer.value", "短密钥"):
             self.assertNotIn(private, json.dumps(payload, ensure_ascii=False))
 
     def test_guest_ticket_hides_account_aliases_and_internal_name_collisions(self):
@@ -332,7 +432,7 @@ class TicketModuleTests(LocalFixture):
         self.assertEqual(guest["description"], "")
         self.assertEqual(guest["fields"], [{"label": "店铺名", "value": "客户门店"},
                                           {"label": "问题需求", "value": "[名称已隐藏]处理 [名称已隐藏]"}])
-        for private in ("581011", "12345678", "内部负责人"):
+        for private in ("12345678", "内部负责人"):
             self.assertNotIn(private, json.dumps(payload, ensure_ascii=False))
 
     def test_guest_ticket_without_identity_does_not_redact_empty_matches(self):
@@ -344,3 +444,43 @@ class TicketModuleTests(LocalFixture):
                                             "custom": [{"name": "店铺名", "value": "客户门店"}]}, "A" * 43)
         self.assertEqual(payload["ticket"]["title"], "客户反馈打印故障")
         self.assertEqual(payload["ticket"]["fields"], [{"label": "店铺名", "value": "客户门店"}])
+
+    def test_guest_ticket_shares_only_its_linked_context_and_feedback_result(self):
+        self.seed()
+        db = get_db(self.cfg)
+        with db.tx() as conn:
+            conn.execute("UPDATE raw_session SET worksheet_ids = '134, 581020' WHERE session_id = 's1'")
+            conn.execute("UPDATE raw_session SET worksheet_ids = '581021' WHERE session_id = 's2'")
+            qa_id = conn.execute("SELECT MIN(qa_id) FROM qa_pair WHERE session_id = 's1'").fetchone()[0]
+        image = "https://ysf.nosdn.127.net/linked.png"
+        context = [{"text": "需要查询发货", "time": "2026-11-01 10:00:00", "role": "user", "sender_name": "客户昵称"},
+                   {"text": "技术回复 原始客服 13812345678", "time": "2026-11-01 10:00:05", "role": "staff"}]
+
+        def case_for(cfg, requested, anchor, **options):
+            self.assertEqual(requested, qa_id)
+            options["display"]["customer_name"] = "客户昵称"
+            return "private_fingerprint", context, "context", None, {"private_digest": (0, image)}
+
+        feedback = {"status": "已验收", "reply": "已修复 /api/tickets/detail?id=581020", "resolved_version": "v2.3",
+                    "received_at": 1794537000000, "writeback_status": "succeeded", "written_at": 1794537100000,
+                    "feishu_url": "https://test.feishu.cn/base/private", "error": "私有字段"}
+        with (patch.object(ticket_guest.guest_evidence, "_case", side_effect=case_for) as case,
+              patch.object(ticket_guest.ticket_feedback, "get", return_value=feedback) as captured):
+            payload, scoped = ticket_guest._project(
+                {"id": 581020, "title": "购买后无订单", "staffName": "原始客服"}, "A" * 43, cfg=self.cfg)
+        case.assert_called_once()
+        captured.assert_called_once_with(self.cfg, "581020")
+        session, = payload["sessions"]
+        self.assertEqual(session["customer_name"], "客户昵称")
+        self.assertEqual(session["messages"][0]["sender_name"], "客户昵称")
+        self.assertEqual(session["messages"][0]["time"], "2026-11-01 10:00:00")
+        image_route, = session["messages"][0]["images"]
+        self.assertTrue(image_route.startswith(f"/guest/ticket/{'A' * 43}/images/"))
+        self.assertEqual(scoped[image_route.rsplit("/", 1)[-1]][0], image)
+        self.assertEqual(session["messages"][1]["role"], "staff")
+        self.assertEqual(payload["technical_feedback"]["resolved_version"], "v2.3")
+        self.assertIn("已修复", payload["technical_feedback"]["reply"])
+        public = json.dumps(payload, ensure_ascii=False)
+        for private in ("s1", "s2", "qa_id", "session_id", "原始客服", "13812345678",
+                        "test.feishu.cn", "私有字段", "private_fingerprint", "private_digest", image, "/api/tickets"):
+            self.assertNotIn(private, public)

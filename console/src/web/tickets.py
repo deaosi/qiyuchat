@@ -5,12 +5,15 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime, time, timedelta, timezone
+from hashlib import sha256
 from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
+from threading import Lock
+from time import sleep
 from typing import Any
 
 from ..clean.rules import mask_pii
@@ -25,11 +28,16 @@ _LINKED_IDS = re.compile(r"[0-9]+(?:\s*[,，]\s*[0-9]+)*")
 _PRIVATE_LABELS = frozenset(("用户姓名", "访客姓名", "用户手机", "手机号码", "手机号", "邮箱",
                             "用户邮箱", "访客邮箱", "访客手机", "联系电话", "用户uid", "访客uid"))
 _FILTER_SCAN_LIMIT = 2000
+_EDIT_LOCKS = tuple(Lock() for _ in range(64))
 _CREATE_ACTIONS = frozenset((1, 2, 127, 128, 129, 130))
 _SUBMITTER_CACHE = "/var/lib/qiyu-feishu-sync/ticket-submitters.json"
 _SUBMITTER_CACHE_LIMIT = 8_000_000
 TICKET_STATUSES = {1: "已提交", 5: "待申领", 10: "处理中", 20: "已完结"}
 TICKET_PRIORITIES = {5: "一般", 8: "紧急", 10: "非常紧急"}
+_EDIT_FIELDS = {
+    "客户群名称": 300, "后台负责人": 300, "平台&版本": 300, "平台": 300, "店铺名": 300,
+    "软件版本": 300, "是否已点击报告问题": 300, "问题需求": 4000,
+}
 
 
 def _bounds(start: str, end: str) -> tuple[int, int]:
@@ -117,7 +125,7 @@ def _field_value(value: Any, maximum: int, *, rich: bool = False) -> tuple[str, 
     return _text(value, maximum), []
 
 
-def _project_fields(value: Any, secret: str, *, history: bool = False) -> list[dict]:
+def _project_fields(value: Any, secret: str = "", *, history: bool = False, media_links=None) -> list[dict]:
     if not isinstance(value, list):
         return []
     fields = []
@@ -128,7 +136,7 @@ def _project_fields(value: Any, secret: str, *, history: bool = False) -> list[d
         if label.casefold() in _PRIVATE_LABELS or (not history and not label):
             continue
         content, candidates = _field_value(entry.get("content" if history else "value"), 4000)
-        images, attachments = ticket_media.links(candidates, secret)
+        images, attachments = (media_links(candidates) if media_links is not None else ticket_media.links(candidates, secret))
         if history and not (content or images or attachments):
             continue
         field = {"label": label, "value": content}
@@ -286,12 +294,53 @@ def list_tickets(cfg: Settings, *, start: str = "", end: str = "", q: str = "",
             "source": "qiyu"}
 
 
-def ticket_detail(cfg: Settings, ticket_id: str) -> dict:
-    identifier = _id(ticket_id)
-    if identifier is None:
-        raise ValueError("工单编号无效")
-    client = TicketClient(cfg.qiyu)
-    row = client.detail(identifier)
+def ticket_submitter(row: dict, logs: list[dict]) -> str:
+    staff_id = _id(row.get("staffId"))
+    names = submitter_names(logs, staff_id)
+    if names:
+        return next(iter(names)) if len(names) == 1 else ""
+    return _cached_submitter(_submitter_cache(), _id(row.get("id")), staff_id)
+
+
+def project_ticket(cfg: Settings | None, row: dict, media_links, *, submitter="", linked_session_count=0) -> dict:
+    category = row.get("questionType")
+    description, embedded = _field_value(row.get("content"), 12000, rich=row.get("isRichText") in (True, 1, "1"))
+    images, attachments = media_links([*embedded, *_attachments(row.get("attachments"))])
+    result = _public(row, linked_session_count, submitter)
+    result.update(
+        description=description,
+        category=_text(category.get("path") or category.get("name"), 300) if isinstance(category, dict) else "",
+        template=_text(row.get("templateName"), 200),
+        fields=_project_fields(row.get("custom"), media_links=media_links),
+        images=images, attachments=attachments,
+    )
+    return result
+
+
+def project_history(logs: list[dict], media_links) -> list[dict]:
+    history = []
+    for index, entry in enumerate(logs):
+        event_images, event_attachments = media_links(_attachments(entry.get("attachments")))
+        history.append({
+            "id": str(_id(entry.get("id")) or f"log-{index + 1}"),
+            "action": _text(entry.get("action") or entry.get("actionLang"), 200) or "工单变更",
+            "operator": _text(entry.get("operator"), 120),
+            "time": _millis(entry.get("time")),
+            "details": _project_fields(entry.get("info"), history=True, media_links=media_links),
+            "images": event_images,
+            "attachments": event_attachments,
+        })
+    history.sort(key=lambda entry: entry["time"] or 0, reverse=True)
+    return history
+
+
+def ticket_updated_at(row: dict, logs: list[dict]) -> int | None:
+    timestamps = [_millis(row.get("modifyTime")), _millis(row.get("lastFinishTime")), *(_millis(log.get("time")) for log in logs)]
+    return max((stamp for stamp in timestamps if stamp is not None), default=None)
+
+
+def _detail_response(cfg, row, client):
+    identifier = _id(row["id"])
     try:
         logs = client.history(identifier)
         history_available = True
@@ -299,36 +348,151 @@ def ticket_detail(cfg: Settings, ticket_id: str) -> dict:
         logs = []
         history_available = False
     sessions = _linked_sessions(cfg, {identifier})[identifier]
-    category = row.get("questionType")
-    secret = cfg.qiyu.app_secret
-    description, embedded = _field_value(row.get("content"), 12000, rich=row.get("isRichText") in (True, 1, "1"))
-    images, attachments = ticket_media.links([*embedded, *_attachments(row.get("attachments"))], secret)
-    staff_id = _id(row.get("staffId"))
-    names = submitter_names(logs, staff_id)
-    submitter = next(iter(names)) if len(names) == 1 else ""
-    if not names:
-        submitter = _cached_submitter(_submitter_cache(), identifier, staff_id)
-    result = _public(row, len(sessions), submitter)
-    result.update(
-        description=description,
-        category=_text(category.get("path") or category.get("name"), 300) if isinstance(category, dict) else "",
-        template=_text(row.get("templateName"), 200),
-        fields=_project_fields(row.get("custom"), secret),
-        images=images, attachments=attachments,
-    )
-    history = []
-    for index, entry in enumerate(logs):
-        event_images, event_attachments = ticket_media.links(_attachments(entry.get("attachments")), secret)
-        history.append({
-            "id": str(_id(entry.get("id")) or f"log-{index + 1}"),
-            "action": _text(entry.get("action") or entry.get("actionLang"), 200) or "工单变更",
-            "operator": _text(entry.get("operator"), 120),
-            "time": _millis(entry.get("time")),
-            "details": _project_fields(entry.get("info"), secret, history=True),
-            "images": event_images,
-            "attachments": event_attachments,
-        })
-    history.sort(key=lambda entry: entry["time"] or 0, reverse=True)
-    timestamps = [result["updated_at"], _millis(row.get("lastFinishTime")), *(entry["time"] for entry in history)]
-    result["updated_at"] = max((stamp for stamp in timestamps if stamp is not None), default=None)
-    return {"ticket": result, "history": history, "history_available": history_available, "sessions": sessions}
+
+    def media_links(items):
+        return ticket_media.links(items, cfg.qiyu.app_secret)
+
+    result = project_ticket(cfg, row, media_links, submitter=ticket_submitter(row, logs), linked_session_count=len(sessions))
+    result["updated_at"] = ticket_updated_at(row, logs)
+    response = {"ticket": result, "history": project_history(logs, media_links),
+                "history_available": history_available, "sessions": sessions}
+    edit = _edit_form(row, client)
+    if edit:
+        response["edit"] = edit
+    return response
+
+
+def ticket_detail(cfg: Settings, ticket_id: str) -> dict:
+    identifier = _id(ticket_id)
+    if identifier is None:
+        raise ValueError("工单编号无效")
+    client = TicketClient(cfg.qiyu)
+    return _detail_response(cfg, client.detail(identifier), client)
+
+
+def _editable_text(value, limit: int) -> bool:
+    if not isinstance(value, str) or len(value) > limit or "\0" in value:
+        return False
+    if re.search(r"<(?:img|a|p|div|br)\b", value, re.I):
+        return False
+    if value.lstrip().startswith(("[", "{")):
+        try:
+            return not isinstance(json.loads(value), (dict, list))
+        except (ValueError, RecursionError):
+            pass
+    return True
+
+
+def _edit_form(row: dict, client: TicketClient) -> dict | None:
+    holder, priority = _id(row.get("holderId")), _id(row.get("priority"))
+    title = row.get("title")
+    if not holder or priority not in TICKET_PRIORITIES or not isinstance(title, str) or row.get("isCrossCorp") not in (None, False, 0, "0"):
+        return None
+    custom = _attachments(row.get("custom"))
+    template_id = _id(row.get("templateId"))
+    definitions = {}
+    if template_id and any(isinstance(item.get("name"), str) and item["name"] in _EDIT_FIELDS for item in custom):
+        try:
+            definitions = {_id(field.get("fieldId")): field for field in client.template_fields(template_id)}
+        except TicketError:
+            pass
+    fields = {}
+    duplicates = set()
+    for item in custom:
+        key, label, value = _id(item.get("fieldId")), item.get("name"), item.get("value")
+        if key is None or not isinstance(label, str) or label not in _EDIT_FIELDS or not isinstance(value, str):
+            continue
+        definition = definitions.get(key)
+        if (not definition or definition.get("name") != label or definition.get("type") != 0
+                or definition.get("status") != 0):
+            continue
+        if not _editable_text(value, _EDIT_FIELDS[label]):
+            continue
+        if key in fields:
+            duplicates.add(key)
+        fields[key] = {"id": str(key), "label": label, "value": value, "multiline": label == "问题需求",
+                       "required": definition.get("required") in (1, True)}
+    eligible = [field for key, field in sorted(fields.items()) if key not in duplicates]
+    result = {"title": title, "priority": priority, "fields": eligible}
+    data = json.dumps([holder, row.get("status"), result], ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return {**result, "revision": sha256(data.encode()).hexdigest()}
+
+
+def update_ticket(cfg: Settings, body: dict) -> dict:
+    if not isinstance(body, dict) or set(body) - {"id", "revision", "title", "priority", "fields"}:
+        raise ValueError("工单修改字段无效。")
+    identifier = _id(body.get("id"))
+    revision = body.get("revision")
+    if identifier is None or not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{64}", revision):
+        raise ValueError("工单编号或编辑版本无效。")
+    if not isinstance(body.get("fields", {}), dict):
+        raise ValueError("工单自定义字段格式无效。")
+
+    with _EDIT_LOCKS[identifier % len(_EDIT_LOCKS)]:
+        client = TicketClient(cfg.qiyu)
+        row = client.detail(identifier)
+        edit = _edit_form(row, client)
+        if edit is None:
+            raise TicketError("七鱼工单当前没有可用于修改的受理人。", http_status=409)
+        if edit["revision"] != revision:
+            raise TicketError("工单已有更新，请刷新详情后重新编辑。", http_status=409)
+        changes = []
+        if "title" in body:
+            title = body["title"]
+            if not isinstance(title, str) or not title.strip() or len(title.strip()) > 100 or "\0" in title:
+                raise ValueError("工单标题须为 1 至 100 字。")
+            if title.strip() != edit["title"]:
+                changes.append((1, 0, title.strip()))
+        if "priority" in body:
+            priority = body["priority"]
+            if type(priority) is not int or priority not in TICKET_PRIORITIES:
+                raise ValueError("工单优先级无效。")
+            if priority != edit["priority"]:
+                changes.append((2, 0, str(priority)))
+        fields = {field["id"]: field for field in edit["fields"]}
+        for key, value in body.get("fields", {}).items():
+            field = fields.get(key)
+            if field is None or not _editable_text(value, _EDIT_FIELDS[field["label"]]):
+                raise ValueError("工单自定义字段不可编辑，或内容不符合文本格式和字数限制。")
+            value = value.strip()
+            if not value and field["required"]:
+                raise ValueError(f'{field["label"]}为必填项。')
+            if value != field["value"]:
+                changes.append((0, int(key), value))
+
+        if not changes:
+            return _detail_response(cfg, row, client)
+
+        def confirmed(current, change):
+            kind, field_id, value = change
+            if kind == 1:
+                return current.get("title") == value
+            if kind == 2:
+                return str(_id(current.get("priority"))) == value
+            return any(_id(item.get("fieldId")) == field_id and (item.get("value") or "") == value
+                       for item in _attachments(current.get("custom")))
+
+        from . import ticket_guest
+
+        try:
+            for change in changes:
+                kind, field_id, value = change
+                try:
+                    client.modify(identifier, _id(row["holderId"]), change_type=kind, value=value, field_id=field_id)
+                except TicketError as error:
+                    latest = client.detail(identifier)
+                    if not confirmed(latest, change):
+                        if change != changes[0]:
+                            raise TicketError("部分字段已保存，请刷新详情核对后再修改。", http_status=409) from None
+                        raise error
+            for delay in (0, 0.3, 0.8):
+                if delay:
+                    sleep(delay)
+                updated = client.detail(identifier)
+                if all(confirmed(updated, change) for change in changes):
+                    break
+            else:
+                raise TicketError("七鱼暂未回读到全部修改，请刷新详情核对后再试。", http_status=409)
+        finally:
+            ticket_guest.invalidate(cfg, identifier)
+        return _detail_response(cfg, updated, client)

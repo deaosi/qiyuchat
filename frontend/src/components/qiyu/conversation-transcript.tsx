@@ -3,6 +3,17 @@ import { MessagesSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
+export const guestChatRoles = {
+  user: { side: 'left', label: '客户' },
+  customer: { side: 'left', label: '客户' },
+  staff: { side: 'right', label: '客服' },
+  group_participant: { side: 'center', label: '群成员' },
+  combined_transcript: { side: 'center', label: '合并记录' },
+  unidentified: { side: 'center', label: '身份未确认' },
+  bot: { side: 'center', label: '机器人' },
+  system: { side: 'center', label: '系统' },
+} as const
+
 const messageLayout = {
   left: { row: 'justify-start', group: 'items-start', bubble: 'rounded-tl-sm border-border/80 bg-background' },
   right: { row: 'justify-end', group: 'items-end', bubble: 'rounded-tr-sm border-foreground/10 bg-linear-to-b from-foreground/10 to-foreground/[0.06]' },

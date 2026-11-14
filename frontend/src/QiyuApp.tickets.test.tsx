@@ -6,7 +6,10 @@ const id = '9007199254740993'
 const feishuUrl = 'https://freecallai.feishu.cn/base/example?table=tblExample'
 const ticket = { id, title: '订单复核', status: '处理中', priority: '高', owner: '值班受理客服', submitter: '原工单提报客服',
   created_at: Date.UTC(2026, 0, 1, 1), updated_at: Date.UTC(2026, 0, 1, 3), linked_session_count: 1 }
-const fetchApi = vi.fn(async (path: string) => {
+const edit = { revision: 'ticket-revision', title: ticket.title, priority: 8,
+  fields: [{ id: '11', label: '平台&版本', value: '抖音 · Windows', multiline: false },
+    { id: '12', label: '问题需求', value: '核对订单明细。', multiline: true }] }
+const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
   const url = new URL(path, location.origin)
   if (url.pathname === '/api/tickets') {
     const offset = Number(url.searchParams.get('offset'))
@@ -26,6 +29,11 @@ const fetchApi = vi.fn(async (path: string) => {
       received_at: ticket.created_at, writeback_status: 'succeeded', written_at: ticket.updated_at,
       error: '', feishu_url: feishuUrl,
     },
+    edit,
+  })
+  if (url.pathname === '/api/tickets/update' && init?.method === 'POST') return Response.json({
+    ticket: { ...ticket, title: '更新后的标题', description: '', fields: [{ label: '问题需求', value: '新的订单说明。' }] },
+    history: [], history_available: true, sessions: [], edit: { ...edit, revision: 'new-revision', title: '更新后的标题' },
   })
   if (url.pathname === '/api/detail') return Response.json({
     pair: { qa_id: 24, session_id: 'linked-session', question: '怎么核对？', answer: '请查看订单。' },
@@ -47,6 +55,28 @@ afterEach(() => {
 })
 
 describe('七鱼工单', () => {
+  it('edits only native supported fields and renders the confirmed ticket in the same dialog', async () => {
+    history.replaceState(null, '', `#tickets?id=${id}`)
+    render(<QiyuApp />)
+    const popup = await screen.findByRole('dialog', { name: ticket.title })
+    const detail = within(popup)
+    fireEvent.click(detail.getByRole('button', { name: '编辑工单' }))
+    const editor = within(detail.getByRole('form', { name: '编辑工单' }))
+    expect(editor.getByLabelText('工单标题')).toBe(document.activeElement)
+    expect(editor.queryByLabelText('状态')).toBeNull()
+    expect((editor.getByRole('button', { name: '保存修改' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(editor.getByLabelText('工单标题'), { target: { value: '更新后的标题' } })
+    fireEvent.change(editor.getByLabelText('问题需求'), { target: { value: '新的订单说明。' } })
+    fireEvent.click(editor.getByRole('button', { name: '保存修改' }))
+
+    expect(await screen.findByRole('dialog', { name: '更新后的标题' })).toBe(popup)
+    expect(detail.getByText('新的订单说明。')).toBeTruthy()
+    expect(detail.getByText(`七鱼工单 #${id} · 处理中`)).toBeTruthy()
+    const call = fetchApi.mock.calls.find(([path]) => path.startsWith('/api/tickets/update?'))!
+    expect(JSON.parse(String(call[1]?.body))).toEqual({ id, revision: edit.revision, title: '更新后的标题',
+      fields: { '12': '新的订单说明。' } })
+  })
+
   it('opens the exact Feishu-linked ticket and opens a linked session without changing the route', async () => {
     history.replaceState(null, '', `#tickets?id=${id}`)
     render(<QiyuApp />)
