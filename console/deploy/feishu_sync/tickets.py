@@ -30,7 +30,7 @@ _MINUTE = 60_000
 _RECONCILE = 10 * _MINUTE
 _DAY = 24 * 60 * _MINUTE
 _FEEDBACK_QUIET_MS = 15_000
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _WORK_SECONDS = 9
 _ARCHIVE_START_BUDGET = 12
 _ZONE = timezone(timedelta(hours=8))
@@ -38,7 +38,9 @@ _ID = re.compile(r"[1-9][0-9]{0,18}")
 _FIELDS = {"key": "工单ID", "title": "工单标题", "status": "状态", "priority": "优先级", "submitter": "提报人",
            "created": "创建时间", "updated": "更新时间", "sessions": "关联会话数", "source": "语海详情"}
 _TYPES = {"key": 1, "title": 1, "status": 1, "priority": 1, "created": 5, "updated": 5, "sessions": 2, "source": 15}
-_DETAIL = {"summary": "工单描述", "platform": "平台", "software": "软件版本"}
+_FORM = {"group": "客户群名称", "owner": "后台负责人", "platform_version": "平台&版本", "shop": "店铺名",
+         "software": "软件版本", "reported": "是否已点击报告问题", "request": "问题需求", "attachment": "附件/截图"}
+_DETAIL = {"summary": "工单描述", "platform": "平台", **_FORM}
 _INPUT = {"status": "技术处理状态", "reply": "技术回复", "version": "解决版本"}
 _OUTPUT = {"status": "回传状态", "returned_at": "回传时间", "error": "回传失败原因"}
 _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
@@ -47,6 +49,7 @@ _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
 def _column_specs() -> dict:
     names = (_FIELDS["submitter"], *_DETAIL.values(), *_INPUT.values(), *_OUTPUT.values())
     specs = {name: {"name": name, "type": "text"} for name in names}
+    specs[_FORM["attachment"]]["style"] = {"type": "url"}
     specs[_OUTPUT["returned_at"]].update(type="datetime", style={"format": "yyyy-MM-dd HH:mm"})
     return specs
 
@@ -82,7 +85,7 @@ def _table(report: sync.Target, *, incremental=False) -> tuple[sync.Target, str]
     if not set(definitions) <= fields.keys():
         fields = {row.get("field_name"): row for row in sync._paginated(target, "GET", "/fields") if isinstance(row, dict)}
     for name in definitions:
-        expected = {_OUTPUT["returned_at"]: 5, ticket_archive.CLOSED_AT: 5,
+        expected = {_FORM["attachment"]: 15, _OUTPUT["returned_at"]: 5, ticket_archive.CLOSED_AT: 5,
                     ticket_reply_delta.TIME_FIELD: ticket_reply_delta.TIME_FIELD_TYPE}.get(name, 1)
         allowed = (1, 3) if name == _INPUT["status"] else (expected,)
         if fields.get(name, {}).get("type") not in allowed:
@@ -97,16 +100,20 @@ def _position_submitter(target):
     args = ("--table-id", target.table_id, "--view-id", top._view_id(target))
     current = top._cli(target, "+view-get-visible-fields", *args).get("visible_fields")
     priority, submitter = _FIELDS["priority"], _FIELDS["submitter"]
+    source = _FIELDS["source"]
     if (not isinstance(current, list) or not all(isinstance(name, str) for name in current)
-            or len(set(current)) != len(current) or priority not in current):
-        raise sync.SyncError("无法核对飞书工单视图的优先级列。", 409)
-    order = [name for name in current if name != submitter]
+            or len(set(current)) != len(current) or priority not in current or source not in current):
+        raise sync.SyncError("无法核对飞书工单视图的详情列。", 409)
+    form_columns = list(_FORM.values())
+    order = [name for name in current if name != submitter and name not in form_columns]
     order.insert(order.index(priority) + 1, submitter)
+    index = order.index(source) + 1
+    order[index:index] = form_columns
     if current != order:
         top._cli(target, "+view-set-visible-fields", *args,
                  "--json", json.dumps({"visible_fields": order}, ensure_ascii=False))
         if top._cli(target, "+view-get-visible-fields", *args).get("visible_fields") != order:
-            raise sync.SyncError("飞书工单视图的提报人列位置未能回读确认。", 409)
+            raise sync.SyncError("飞书工单视图的提报字段位置未能回读确认。", 409)
 
 
 def _pages(cfg, **filters):
@@ -260,7 +267,26 @@ def _migrate_old_links(cfg, target, exporting):
     return migrated
 
 
-def _summary(row, names):
+def _attachment_link(row, source_link):
+    prefix = PUBLIC_ORIGIN + ticket_guest.PUBLIC_PATH
+    if not isinstance(source_link, str) or not source_link.startswith(prefix):
+        return None
+    token = source_link[len(prefix):]
+    if not re.fullmatch(ticket_guest.TOKEN_PATTERN, token):
+        return None
+    snapshot, _ = ticket_guest._project(row, token)
+    ticket = snapshot["ticket"]
+    files = {item["url"]: item["name"] for section in (ticket, *ticket["fields"])
+             for column in ("images", "attachments") for item in section.get(column, [])}
+    if len(files) == 1:
+        path, name = next(iter(files.items()))
+        return {"text": name, "link": PUBLIC_ORIGIN + path}
+    if files:
+        return {"text": f"查看 {len(files)} 个附件", "link": source_link + "#ticket-form-heading"}
+    return None
+
+
+def _summary(row, names, *, source_link=None):
     fields = {}
     custom = row.get("custom")
     if isinstance(custom, list):
@@ -273,11 +299,17 @@ def _summary(row, names):
         patterns.append(names.pattern)
     redaction = re.compile("|".join(sorted(patterns, key=len, reverse=True)), re.I) if patterns else None
     original, _ = _field_value(row.get("content"), 4000, rich=row.get("isRichText") in (True, 1, "1"))
-    description = _public_text(fields.get("问题需求") or original, redaction)
+    request = fields.get("问题需求", original)
+    platform = fields.get("平台&版本", fields.get("平台"))
+    form = {label: ticket_guest._guest_text(fields.get(label), None) for role, label in _FORM.items()
+            if role not in {"platform_version", "request", "attachment"}}
     return {
-        _DETAIL["summary"]: description[:1500],
-        _DETAIL["platform"]: _public_text(fields.get("平台&版本") or fields.get("平台"), redaction)[:120],
-        _DETAIL["software"]: _public_text(fields.get("软件版本"), redaction)[:120],
+        _DETAIL["summary"]: _public_text(request, redaction)[:1500],
+        _DETAIL["platform"]: _public_text(platform, redaction)[:120],
+        **form,
+        _FORM["platform_version"]: ticket_guest._guest_text(platform, None),
+        _FORM["request"]: ticket_guest._guest_text(request, None),
+        _FORM["attachment"]: _attachment_link(row, source_link),
     }
 
 
@@ -349,9 +381,9 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
     for key, row in desired.items():
         stamp = [row[_FIELDS["created"]], row[_FIELDS["updated"]], row[_FIELDS["title"]]]
         previous = cache.get(key)
-        if isinstance(previous, dict) and previous.get("stamp") == stamp and isinstance(previous.get("fields"), dict):
-            row.update({name: value for name, value in previous["fields"].items()
-                        if name in _DETAIL.values() and isinstance(value, str)})
+        cached = previous.get("fields") if isinstance(previous, dict) else None
+        if isinstance(cached, dict) and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values()):
+            row.update(cached)
             next_cache[key] = previous
             continue
         if fetched >= DETAIL_LIMIT or monotonic() - started >= DETAIL_BUDGET_SECONDS:
@@ -366,7 +398,8 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         if not names_loaded:
             names = _private_names(cfg, {})
             names_loaded = True
-        columns = _summary(source, names)
+        source_cell = sync._value(row.get(_FIELDS["source"]))
+        columns = _summary(source, names, source_link=source_cell.get("link") if isinstance(source_cell, dict) else None)
         row.update(columns)
         next_cache[key] = {"stamp": stamp, "fields": columns}
     if next_cache != cache:
@@ -750,10 +783,11 @@ def run(state_dir, *, incremental=False):
                 inserted += added
                 changed += adjusted
         layout_error = ""
-        if setup.get("positioned_field_id") != submitter_field_id:
+        if setup.get("positioned_field_id") != submitter_field_id or setup.get("form_layout") != _SCHEMA_VERSION:
             try:
                 _position_submitter(target)
                 setup["positioned_field_id"] = submitter_field_id
+                setup["form_layout"] = _SCHEMA_VERSION
                 support._write_state(setup_path, setup)
             except _SYNC_ERRORS as exc:
                 layout_error = str(exc) if isinstance(exc, sync.SyncError) else "工单视图设置暂不可核对。"

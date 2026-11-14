@@ -114,6 +114,45 @@ class TestTicketFeishuSync(unittest.TestCase):
             self.assertEqual(tickets._submitters(self.cfg, projected, staff_ids, state_dir)["fetched"], 0)
             fetch.assert_not_called()
 
+    def test_detail_export_replaces_old_cache_with_actual_form_values_and_scoped_screenshot(self):
+        state_dir = Path(self.cfg.runtime.state_dir)
+        projected = tickets._projection(self.cfg, [{"id": "42"}])
+        row = projected["42"]
+        link = row["语海详情"]["link"]
+        tickets.support._write_state(state_dir / "ticket-summaries.json", {
+            "42": {"stamp": [row["创建时间"], row["更新时间"], row["工单标题"]],
+                   "fields": {"工单描述": "旧摘要", "平台": "旧平台", "软件版本": "旧版本"}},
+        })
+        values = {"客户群名称": "门店答疑群", "后台负责人": "值班小陈", "平台&版本": "淘宝企业版",
+                  "店铺名": "测试工具店", "软件版本": "3.1", "是否已点击报告问题": "是",
+                  "问题需求": "机器人未回复。\n密码：privateSecret"}
+        image = "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef?signature=hidden"
+        media = {"name": "现场截图.png", "url": image}
+        raw = {"id": 42, "content": "原始描述", "custom": [
+            *({"name": key, "value": value} for key, value in values.items()),
+            {"name": "附件/截图", "value": '[{"name":"现场截图.png","url":"' + image + '"}]'},
+        ], "attachments": [media]}
+        with patch.object(tickets.TicketClient, "detail", return_value=raw) as fetch:
+            result = tickets._enrich(self.cfg, projected, state_dir, incremental=True)
+            self.assertEqual(result["fetched"], 1)
+            fetch.assert_called_once_with(42)
+            refreshed = tickets._projection(self.cfg, [{"id": "42"}])
+            self.assertEqual(tickets._enrich(self.cfg, refreshed, state_dir, incremental=True)["fetched"], 0)
+            self.assertEqual(refreshed, projected)
+        self.assertEqual(row["客户群名称"], values["客户群名称"])
+        self.assertEqual(row["店铺名"], values["店铺名"])
+        self.assertEqual(row["平台&版本"], values["平台&版本"])
+        self.assertEqual(row["软件版本"], values["软件版本"])
+        self.assertIn("机器人未回复。\n", row["问题需求"])
+        self.assertNotIn("privateSecret", row["问题需求"])
+        self.assertEqual(row["附件/截图"]["text"], "现场截图.png")
+        self.assertTrue(row["附件/截图"]["link"].startswith(link + "/images/"))
+        self.assertNotIn("signature", row["附件/截图"]["link"])
+        legacy = tickets._summary({"id": 42, "content": "原生工单描述"}, None, source_link=link)
+        self.assertEqual(legacy["问题需求"], "原生工单描述")
+        self.assertEqual(legacy["客户群名称"], "")
+        self.assertIsNone(legacy["附件/截图"])
+
     def test_repeated_or_incomplete_source_pages_refuse_publication(self):
         first = {"items": [{"id": "42"}], "total": 2, "has_more": True, "source": "qiyu"}
         repeated = {**first, "has_more": False}
