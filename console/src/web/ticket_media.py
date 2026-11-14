@@ -41,13 +41,13 @@ def _signature(secret: str, encoded: str) -> str:
     return digest(secret.encode(), b"qiyu-ticket-media\0" + encoded.encode("ascii"), sha256).hex()
 
 
-def links(items: list[dict], secret: str) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    images, attachments = [], []
+def source_items(items: list[dict]):
+    """Return checked upstream attachments without exposing their URLs to clients."""
     seen = set()
     for item in items[:40]:
         uploaded = item.get("response")
         upstream = _safe_source(item.get("url")) or _safe_source(uploaded.get("url") if isinstance(uploaded, dict) else None)
-        if not upstream or upstream in seen or not secret:
+        if not upstream or upstream in seen:
             continue
         seen.add(upstream)
         name = item.get("name")
@@ -57,7 +57,14 @@ def links(items: list[dict], secret: str) -> tuple[list[dict[str, str]], list[di
         extension = PurePosixPath(name).suffix.lower().lstrip(".")
         if not extension:
             extension = PurePosixPath(unquote(urlsplit(upstream).path)).suffix.lower().lstrip(".")
-        image = extension in _IMAGE_EXTENSIONS or item.get("inline_image") is True
+        yield upstream, name, extension in _IMAGE_EXTENSIONS or item.get("inline_image") is True
+
+
+def links(items: list[dict], secret: str) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    images, attachments = [], []
+    if not secret:
+        return images, attachments
+    for upstream, name, image in source_items(items):
         encoded = urlsafe_b64encode(json.dumps([upstream, name, image], ensure_ascii=False).encode()).decode().rstrip("=")
         if len(encoded) > 4500:
             continue

@@ -15,6 +15,7 @@ from src.config import settings
 from src.qiyu.ticket import PAGE_SIZE, TicketClient, TicketError
 from src.voc_feishu_content import _private_names, _public_text
 from src.voc_service import maintenance
+from src.web import ticket_guest
 from src.web.guest_evidence import PUBLIC_ORIGIN
 from src.web.tickets import TICKET_PRIORITIES, TICKET_STATUSES, _field_value, list_tickets
 
@@ -110,11 +111,19 @@ def _time(value):
     return value if type(value) is int and 0 < value < 253_402_300_800_000 else None
 
 
-def _source_link(key):
+def _legacy_source_link(key):
     return f"{PUBLIC_ORIGIN}/#tickets?id={key}"
 
 
-def _projection(items, names=None):
+def _source_matches(cfg, key, cell):
+    source = sync._value(cell)
+    if not isinstance(source, dict) or not isinstance(source.get("link"), str):
+        return False
+    link = source["link"]
+    return link == _legacy_source_link(key) or ticket_guest.matches(cfg, key, link)
+
+
+def _projection(cfg, items, names=None):
     desired = {}
     for item in items:
         key = item["id"]
@@ -128,7 +137,7 @@ def _projection(items, names=None):
             _FIELDS["created"]: _time(item.get("created_at")),
             _FIELDS["updated"]: _time(item.get("updated_at")),
             _FIELDS["sessions"]: linked if type(linked) is int and linked >= 0 else None,
-            _FIELDS["source"]: {"text": "查看工单", "link": _source_link(key)},
+            _FIELDS["source"]: {"text": "查看工单", "link": ticket_guest.url_for(cfg, key)},
         }
     return desired
 
@@ -144,7 +153,7 @@ def _recent(cfg, today):
         previous = combined.get(item["id"])
         if previous is None or (_time(item.get("updated_at")) or 0) >= (_time(previous.get("updated_at")) or 0):
             combined[item["id"]] = item
-    return _projection(combined.values(), _private_names(cfg, {})), {
+    return _projection(cfg, combined.values(), _private_names(cfg, {})), {
         "created_period": [created_start, end], "updated_period": [updated_start, end],
         "created_scope": created_source, "updated_scope": updated_source,
     }
@@ -172,6 +181,49 @@ def _upsert(target, desired):
         ):
             raise sync.SyncError("飞书未回读到完整七鱼工单记录，稍后重试。")
     return len(inserts), len(updates)
+
+
+def _migrate_old_links(cfg, target, exporting):
+    lookup = replace(target, fields={"key": _FIELDS["key"], "source": _FIELDS["source"]})
+    expected = {}
+    for page in _record_pages(lookup, {"field_names": list(lookup.fields.values())}):
+        for row in page:
+            fields = row.get("fields") if isinstance(row, dict) else None
+            if not isinstance(fields, dict):
+                continue
+            key = sync._value(fields.get(_FIELDS["key"]))
+            source = sync._value(fields.get(_FIELDS["source"]))
+            if (not isinstance(key, str) or not _ID.fullmatch(key) or key in exporting
+                    or not isinstance(source, dict) or source.get("link") != _legacy_source_link(key)):
+                continue
+            if key in expected:
+                raise sync.SyncError("历史飞书工单编号重复，无法更新来源链接。", 409)
+            expected[key] = row.get("record_id")
+    migrated = 0
+    candidates = list(expected)
+    for offset in range(0, len(candidates), MATCH_SIZE):
+        keys = candidates[offset:offset + MATCH_SIZE]
+        incoming = dict.fromkeys(keys)
+        verified = sync._existing(lookup, incoming)
+        if any(key not in verified or verified[key]["record_id"] != expected[key] for key in keys):
+            raise sync.SyncError("历史飞书工单在迁移期间有变动，请重试。", 409)
+        updates, links = [], {}
+        for key in keys:
+            fields = verified[key]["fields"]
+            source = sync._value(fields.get(_FIELDS["source"]))
+            if not isinstance(source, dict) or source.get("link") != _legacy_source_link(key):
+                continue
+            link = {"text": "查看工单", "link": ticket_guest.url_for(cfg, key)}
+            links[key] = link
+            updates.append({"record_id": expected[key], "fields": {_FIELDS["source"]: link}})
+        sync._batch(lookup, "update", updates)
+        if updates:
+            confirmed = sync._existing(lookup, links)
+            if any(sync._value(confirmed.get(key, {}).get("fields", {}).get(_FIELDS["source"])) != link
+                   for key, link in links.items()):
+                raise sync.SyncError("历史工单访客链接未能回读确认。", 409)
+        migrated += len(updates)
+    return migrated
 
 
 def _summary(row, names):
@@ -234,11 +286,7 @@ def _enrich(cfg, desired, state_dir):
     return {"fetched": fetched, "failed": failures, "deferred": deferred}
 
 
-def _technical_pages(target):
-    columns = [_FIELDS["key"], _FIELDS["source"], *_INPUT.values(), *_OUTPUT.values()]
-    data = {"field_names": columns, "filter": {"conjunction": "or", "conditions": [
-        {"field_name": name, "operator": "isNotEmpty", "value": []} for name in _INPUT.values()
-    ]}}
+def _record_pages(target, data):
     seen = set()
     params = {"page_size": 100}
     while True:
@@ -248,13 +296,13 @@ def _technical_pages(target):
         if rows is None and more is False and response.get("total", 0) == 0 and not seen:
             rows = []
         if not isinstance(rows, list) or type(more) is not bool:
-            raise sync.SyncError("飞书技术回复分页返回不完整。")
+            raise sync.SyncError("飞书工单分页返回不完整。")
         yield rows
         if not more:
             return
         cursor = response.get("page_token")
         if not isinstance(cursor, str) or not cursor or cursor in seen:
-            raise sync.SyncError("飞书技术回复分页无法继续。")
+            raise sync.SyncError("飞书工单分页无法继续。")
         seen.add(cursor)
         params = {"page_size": 100, "page_token": cursor}
 
@@ -266,10 +314,14 @@ def _feedback(fields):
     return {role: value.strip() for role, value in cells.items()}
 
 
-def _technical_rows(target):
+def _technical_rows(cfg, target):
     records = {}
     ids = set()
-    for page in _technical_pages(target):
+    columns = [_FIELDS["key"], _FIELDS["source"], *_INPUT.values(), *_OUTPUT.values()]
+    query = {"field_names": columns, "filter": {"conjunction": "or", "conditions": [
+        {"field_name": name, "operator": "isNotEmpty", "value": []} for name in _INPUT.values()
+    ]}}
+    for page in _record_pages(target, query):
         for row in page:
             record_id = row.get("record_id") if isinstance(row, dict) else None
             fields = row.get("fields") if isinstance(row, dict) else None
@@ -279,9 +331,8 @@ def _technical_rows(target):
             if not any(feedback.values()):
                 continue
             key = sync._value(fields.get(_FIELDS["key"]))
-            source = sync._value(fields.get(_FIELDS["source"]))
             if (not isinstance(key, str) or not _ID.fullmatch(key) or key in records or record_id in ids
-                    or not isinstance(source, dict) or source.get("link") != _source_link(key)):
+                    or not _source_matches(cfg, key, fields.get(_FIELDS["source"]))):
                 raise sync.SyncError("飞书技术回复无法唯一匹配七鱼工单，请核对工单ID及语海详情。", 409)
             ids.add(record_id)
             records[key] = record_id
@@ -289,7 +340,7 @@ def _technical_rows(target):
 
 
 def _import_feedback(cfg, target):
-    rows = _technical_rows(target)
+    rows = _technical_rows(cfg, target)
     keys = list(rows)
     lookup = replace(target, fields={"key": _FIELDS["key"], "source": _FIELDS["source"],
                                     **{"input_" + key: name for key, name in _INPUT.items()},
@@ -303,8 +354,7 @@ def _import_feedback(cfg, target):
         updates = []
         for key in group:
             fields = verified[key]["fields"]
-            source = sync._value(fields.get(_FIELDS["source"]))
-            if not isinstance(source, dict) or source.get("link") != _source_link(key):
+            if not _source_matches(cfg, key, fields.get(_FIELDS["source"])):
                 raise sync.SyncError("飞书技术回复的语海详情已变动，请核对来源。", 409)
             feedback = _feedback(fields)
             if not any(feedback.values()):
@@ -359,10 +409,12 @@ def run(state_dir):
             added, adjusted = _upsert(target, group)
             inserted += added
             changed += adjusted
+        migrated = _migrate_old_links(cfg, target, desired)
     status = "partial" if (
         "linked" in (coverage["created_scope"], coverage["updated_scope"])
         or feedback.get("status") == "failed" or feedback.get("failed") or feedback.get("awaiting_review")
         or details.get("status") == "failed"
     ) else "published"
     return {"status": status, "tickets": len(desired), "created": inserted, "updated": changed,
-            "url": target.destination, "details": details, "feedback": feedback, **coverage}
+            "url": target.destination, "historical_guest_links_updated": migrated,
+            "details": details, "feedback": feedback, **coverage}

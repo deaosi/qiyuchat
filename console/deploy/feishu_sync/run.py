@@ -18,6 +18,7 @@ from src import voc_feishu_sync as sync
 BATCH_SIZE = 100
 REGISTER_LIMIT = 1500
 UPDATED_FIELD = "最近更新时间"
+DISPLAY_LINK_FIELD = "语海详情"
 _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
 
 
@@ -81,7 +82,11 @@ def _read_rows(target, *, creation_times=None):
         params["page_token"] = token
 
 
-def _project(target, snapshot, *, top=False):
+def _display_link(key, url):
+    return {"text": "查看 SOP" if key.startswith("sop_") else "查看问题", "link": url}
+
+
+def _project(target, snapshot, *, top=False, display_links=True):
     doc = snapshot["documents"]["topics"]
     records = doc["records"][:100] if top else doc["records"]
     fields = target.fields
@@ -99,11 +104,15 @@ def _project(target, snapshot, *, top=False):
         key = item.get("register_key", item["key"])
         if not sync._SOURCE_ID["topics"].fullmatch(key) or key in desired:
             raise ValueError("高频问题登记编号重复或无效。")
+        if display_links:
+            row[DISPLAY_LINK_FIELD] = _display_link(key, item["url"])
         desired[key] = row
     if not top:
         for item in snapshot["documents"]["sops"]["records"]:
             desired[item["key"]] = {fields["title"]: item["title"], fields["detail"]: item["detail"],
                                     fields["summary"]: item["summary"], fields["source"]: item["url"]}
+            if display_links:
+                desired[item["key"]][DISPLAY_LINK_FIELD] = _display_link(item["key"], item["url"])
     return desired
 
 
@@ -335,7 +344,7 @@ def _load_create_intent(path, target, marker, desired):
     return keys_seen, batches, False
 
 
-def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=True):
+def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=True, display_links=True):
     times = {} if not top else None
     current, links = _read_rows(target, creation_times=times) if not top else _read_rows(target)
     if path.exists():
@@ -348,7 +357,7 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
         known = _adopt_legacy(target, current, links, previous)
         previous_state = {"table": target.table_id, "records": known}
         support._write_state(path, previous_state)
-    desired = _project(target, snapshot, top=top)
+    desired = _project(target, snapshot, top=top, display_links=display_links)
     if not previous_state.get("stable_keys") and (top or not previous_state.get("fifo")):
         identities = {item["key"]: item.get("register_key", item["key"])
                       for data in (snapshot, previous) for item in data["documents"]["topics"]["records"]}
@@ -397,7 +406,7 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
         create_batches.extend({"keys": keys, "digest": _create_digest(keys, desired)}
                               for keys in _batches(new_creates))
         support._write_state(intent_path, {"table": target.table_id, "marker": snapshot["marker"],
-                                         "batches": create_batches})
+                                         "batches": create_batches, "display_links": display_links})
     for batch in _batches(updates):
         sync._batch(target, "update", batch)
     if merge_remove:
@@ -430,7 +439,8 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
         state = _confirm(target, desired, reserved, protected, original=current)
     lineage = {key: sorted(current_members.get(key) or old_members[key]) for key in state
                if key in current_members or key in old_members}
-    committed = {"table": target.table_id, "records": state, "stable_keys": True, "lineage": lineage}
+    committed = {"table": target.table_id, "records": state, "stable_keys": True, "lineage": lineage,
+                 "display_links": display_links}
     if not top:
         committed.update(fifo=True, retired=sorted(retired), marker=snapshot["marker"])
     support._write_state(path, committed)
@@ -462,6 +472,78 @@ def _ensure_updated_field(target):
         field = get_field()
     if field is None or field.get("type") != 1002:
         raise ValueError("登记表最近更新时间未能确认为飞书系统字段。")
+
+
+def _ensure_display_field(target):
+    def get_field():
+        return next((row for row in sync._paginated(target, "GET", "/fields")
+                     if row.get("field_name") == DISPLAY_LINK_FIELD), None)
+
+    field = get_field()
+    if field is None:
+        definition = {"name": DISPLAY_LINK_FIELD, "type": "text", "style": {"type": "url"}}
+        top_table._cli(target, "+field-create", "--table-id", target.table_id,
+                       "--json", json.dumps(definition, ensure_ascii=False))
+        field = get_field()
+    if field is None or field.get("type") != 15:
+        raise ValueError("飞书「语海详情」列须使用超链接类型。")
+
+
+def _backfill_display_links(target, path):
+    """Format known guest URLs in place and keep the record ownership journal current."""
+    known = _load_table_state(path, target)
+    state = support._read_state(path)
+    current, _ = _read_rows(target)
+    desired, updates = {}, []
+    for key, entry in known.items():
+        record_id, fields = entry["id"], entry["fields"]
+        actual = current.get(record_id)
+        url = support._source_link(target, fields)
+        if actual is None or not url or not sync._GUEST_URL.fullmatch(url) or url != support._source_link(target, actual):
+            raise ValueError("飞书历史记录的访客链接已变化，无法安全迁移。")
+        value = _display_link(key, url)
+        desired[record_id] = value
+        if sync._value(actual.get(DISPLAY_LINK_FIELD)) != value:
+            updates.append({"record_id": record_id, "fields": {DISPLAY_LINK_FIELD: value}})
+
+    for batch in _batches(updates):
+        sync._batch(target, "update", batch)
+    latest, _ = _read_rows(target) if updates else (current, None)
+    if set(latest) != set(current) or any(
+        {name: value for name, value in row.items() if name != DISPLAY_LINK_FIELD}
+        != {name: value for name, value in current[record_id].items() if name != DISPLAY_LINK_FIELD}
+        or (record_id in desired and sync._value(row.get(DISPLAY_LINK_FIELD)) != desired[record_id])
+        or (record_id not in desired and row.get(DISPLAY_LINK_FIELD) != current[record_id].get(DISPLAY_LINK_FIELD))
+        for record_id, row in latest.items()
+    ):
+        raise ValueError("飞书历史链接未完整回读，请重试核对。")
+    for entry in known.values():
+        entry["fields"][DISPLAY_LINK_FIELD] = desired[entry["id"]]
+    updated_state = {**state, "records": known, "display_links": True}
+    if updated_state != state:
+        support._write_state(path, updated_state)
+    return {"verified": len(desired), "updated": len(updates),
+            "topics": sum(key.startswith("t_") for key in known), "sops": sum(key.startswith("sop_") for key in known)}
+
+
+def _links_only(state_dir):
+    support._safe_state(state_dir)
+    target = support.target_table(state_dir)
+    with sync._write_lock(target.lock_path):
+        if any((state_dir / name).exists() for name in (
+            "full-pending.json", "full-table.pending.json", "full-table.fifo.json", "top-table.pending.json",
+        )):
+            raise ValueError("飞书已有待完成的发布批次，请在其完成后再转换链接展示。")
+        top_target = top_table.ensure_top(target, apply=False)
+        if top_target is None:
+            raise ValueError("飞书高频问题 Top 100 表尚未创建。")
+        paths = ((target, state_dir / "full-table.json"), (top_target, state_dir / "top-table.json"))
+        for table, path in paths:
+            _load_table_state(path, table)
+        for table, _ in paths:
+            _ensure_display_field(table)
+        return {"status": "links_updated", "all": _backfill_display_links(*paths[0]),
+                "top": _backfill_display_links(*paths[1])}
 
 
 def run(state_dir, apply, *, refresh=False, dashboard_only=False):
@@ -515,8 +597,18 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
         _ensure_updated_field(top_target)
 
         def publish(stage, *, allow_writes=True):
-            original_result = _sync_table(target, full_state, stage, previous, allow_writes=allow_writes)
-            top_result = _sync_table(top_target, top_state, stage, previous, top=True, allow_writes=allow_writes)
+            active_states = (full_state, top_state)
+            old_intent = any(path.with_suffix(".pending.json").exists()
+                             and not support._read_state(path.with_suffix(".pending.json")).get("display_links")
+                             for path in active_states)
+            display_links = not old_intent
+            if display_links:
+                _ensure_display_field(target)
+                _ensure_display_field(top_target)
+            original_result = _sync_table(target, full_state, stage, previous, allow_writes=allow_writes,
+                                          display_links=display_links)
+            top_result = _sync_table(top_target, top_state, stage, previous, top=True,
+                                     allow_writes=allow_writes, display_links=display_links)
             stage = {**stage, "published_at": int(time.time()), "register_count": original_result["topics"],
                      "published_sops": support._sop_inventory(previous, stage)}
             support._write_state(published, stage)
@@ -558,6 +650,7 @@ def main():
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--dashboard-only", action="store_true", help="Refresh the latest log without publishing the tables.")
     parser.add_argument("--tickets-only", action="store_true", help="Only synchronize the Qiyu ticket table.")
+    parser.add_argument("--links-only", action="store_true", help="Format existing topic and SOP guest links without changing their destinations.")
     parser.add_argument("--state-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.refresh and not args.apply:
@@ -566,12 +659,16 @@ def main():
         parser.error("--dashboard-only requires --apply and cannot be used with --refresh")
     if args.tickets_only and (not args.apply or args.refresh or args.dashboard_only):
         parser.error("--tickets-only requires --apply and is independent of other modes")
+    if args.links_only and (not args.apply or args.refresh or args.dashboard_only or args.tickets_only):
+        parser.error("--links-only requires --apply and is independent of other modes")
     state_dir = args.state_dir.absolute()
     try:
         if args.tickets_only:
             from deploy.feishu_sync import tickets
 
             result = tickets.run(state_dir)
+        elif args.links_only:
+            result = _links_only(state_dir)
         else:
             result = run(state_dir, args.apply, refresh=args.refresh, dashboard_only=args.dashboard_only)
     except _SYNC_ERRORS as exc:

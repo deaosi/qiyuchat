@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from deploy.feishu_sync import tickets
 from src import voc_feishu_sync as sync
+from src.config import RuntimeConfig, Settings
 
 
 class TestTicketFeishuSync(unittest.TestCase):
@@ -21,11 +22,15 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.rows = {}
         self.writes = []
         self.fail_after_insert = False
+        self.cfg = Settings(runtime=RuntimeConfig(db_path=str(Path(folder.name) / "test.db"),
+                                                 state_dir=folder.name))
 
     def fake_api(self, target, method, resource, *, params=None, data=None):
         self.assertEqual(target.table_id, self.target.table_id)
         if resource == "/records/search":
-            conditions = data["filter"]["conditions"]
+            conditions = data.get("filter", {}).get("conditions", [])
+            if not conditions:
+                return {"items": deepcopy(list(self.rows.values())), "has_more": False}
             if conditions[0]["operator"] == "isNotEmpty":
                 matching = [row for row in self.rows.values()
                             if any(row["fields"].get(column["field_name"]) for column in conditions)]
@@ -57,7 +62,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         source = {"id": "42", "title": "张客户的打印机故障 13912345678", "owner": "private contact", "status_code": 10,
                   "created_at": 1_794_500_000_000, "linked_session_count": 0}
         def project(item):
-            return tickets._projection([item], re.compile("张客户"))
+            return tickets._projection(self.cfg, [item], re.compile("张客户"))
 
         with patch.object(sync, "_call", side_effect=self.fake_api):
             self.fail_after_insert = True
@@ -69,7 +74,8 @@ class TestTicketFeishuSync(unittest.TestCase):
         fields = self.rows["42"]["fields"]
         self.assertEqual(fields["状态"], "已完结")
         self.assertEqual(fields["工单标题"], "[名称]的打印机故障 139****5678")
-        self.assertEqual(fields["语海详情"]["link"], "https://qiyu.fanwulink.cn/#tickets?id=42")
+        self.assertTrue(tickets.ticket_guest.matches(self.cfg, "42", fields["语海详情"]["link"]))
+        self.assertFalse(tickets.ticket_guest.matches(self.cfg, "43", fields["语海详情"]["link"]))
         self.assertNotIn("private", str(fields))
         self.assertEqual(self.writes, ["/records/batch_create", "/records/batch_update"])
 
@@ -85,7 +91,7 @@ class TestTicketFeishuSync(unittest.TestCase):
 
         with (patch.object(tickets, "list_tickets", side_effect=fetch),
               patch.object(tickets, "_private_names", return_value=None)):
-            projected, scope = tickets._recent(object(), date(2026, 11, 14))
+            projected, scope = tickets._recent(self.cfg, date(2026, 11, 14))
         self.assertEqual(set(projected), {"42", "43"})
         self.assertEqual(projected["42"]["状态"], "已完结")
         self.assertEqual(scope["updated_scope"], "qiyu")
@@ -103,16 +109,16 @@ class TestTicketFeishuSync(unittest.TestCase):
 
     def test_imports_older_technical_reply_and_preserves_input_columns(self):
         source = {"id": "42", "title": "历史工单", "created_at": 1_734_500_000_000, "status_code": 10}
-        fields = tickets._projection([source])["42"]
+        fields = tickets._projection(self.cfg, [source])["42"]
         fields.update({"技术处理状态": "已处理", "技术回复": [{"text": "已修复，待验证"}], "解决版本": "1.6.3"})
         self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
         result = {"status": "已回传", "returned_at": 1_794_600_000_000, "changed": True, "error": ""}
-        cfg = object()
+        cfg = self.cfg
         with (patch.object(sync, "_call", side_effect=self.fake_api),
               patch.object(tickets.ticket_feedback, "ingest", return_value=result) as ingest):
             self.assertEqual(tickets._import_feedback(cfg, self.target),
                              {"checked": 1, "imported": 1, "awaiting_review": 0, "failed": 0})
-            self.assertEqual(tickets._upsert(self.target, tickets._projection([{**source, "status_code": 20}])), (0, 1))
+            self.assertEqual(tickets._upsert(self.target, tickets._projection(cfg, [{**source, "status_code": 20}])), (0, 1))
             result["changed"] = False
             self.assertEqual(tickets._import_feedback(cfg, self.target)["imported"], 0)
         ingest.assert_called_with(cfg, ticket_id="42", record_id="recFixture42",
@@ -125,16 +131,26 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertEqual(self.writes, ["/records/batch_update", "/records/batch_update"])
 
     def test_blocks_feedback_if_link_points_to_different_ticket(self):
-        fields = tickets._projection([{"id": "42"}])["42"]
-        fields["语海详情"] = {"text": "查看工单", "link": tickets._source_link("43")}
+        fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
+        fields["语海详情"] = {"text": "查看工单", "link": tickets.ticket_guest.url_for(self.cfg, "43")}
         fields["技术回复"] = "测试反馈"
         self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
         with (patch.object(sync, "_call", side_effect=self.fake_api),
               patch.object(tickets.ticket_feedback, "ingest") as ingest):
             with self.assertRaisesRegex(sync.SyncError, "无法唯一匹配"):
-                tickets._import_feedback(object(), self.target)
+                tickets._import_feedback(self.cfg, self.target)
         ingest.assert_not_called()
         self.assertEqual(self.writes, [])
+
+    def test_migrates_historical_link_without_overwriting_technical_feedback(self):
+        fields = {"工单ID": "42", "语海详情": {"text": "查看工单", "link": tickets._legacy_source_link("42")},
+                  "技术回复": "需要复核"}
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        with patch.object(sync, "_call", side_effect=self.fake_api):
+            self.assertEqual(tickets._migrate_old_links(self.cfg, self.target, {}), 1)
+            self.assertEqual(tickets._migrate_old_links(self.cfg, self.target, {}), 0)
+        self.assertTrue(tickets.ticket_guest.matches(self.cfg, "42", fields["语海详情"]["link"]))
+        self.assertEqual(fields["技术回复"], "需要复核")
 
     def test_maintenance_skips_ticket_sync(self):
         with (patch.object(tickets, "settings", return_value=object()),

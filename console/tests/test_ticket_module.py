@@ -5,6 +5,8 @@ import http.client
 from email.message import Message
 from io import BytesIO
 import json
+from pathlib import Path
+import re
 import threading
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -12,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from src.app import get_db
 from src.qiyu import ticket
 from src.qiyu.sign import build_signature
-from src.web import case_media
+from src.web import case_media, ticket_guest
 from src.web.server import DashboardServer
 from tests.test_local import LocalFixture
 
@@ -20,7 +22,8 @@ from tests.test_local import LocalFixture
 class TicketModuleTests(LocalFixture):
     def setUp(self):
         super().setUp()
-        self.cfg = replace(self.cfg, qiyu=replace(self.cfg.qiyu, app_key="test-key", app_secret="test-secret"))
+        self.cfg = replace(self.cfg, qiyu=replace(self.cfg.qiyu, app_key="test-key", app_secret="test-secret"),
+                           runtime=replace(self.cfg.runtime, state_dir=self.temp.name))
         self.server = DashboardServer(("127.0.0.1", 0), self.cfg, admin_key="fixture")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -178,3 +181,65 @@ class TicketModuleTests(LocalFixture):
             self.assertEqual((code, headers.get_content_type()), (200, "application/octet-stream"))
             self.assertTrue(headers["Content-Disposition"].startswith("attachment;"))
             self.assertEqual(upstream.call_args.args[0].full_url, file_url)
+
+    def test_guest_ticket_link_requires_its_opaque_scope_and_excludes_internal_data(self):
+        first = ticket_guest.url_for(self.cfg, "581000")
+        second = ticket_guest.url_for(self.cfg, "581001")
+        self.assertEqual(first, ticket_guest.url_for(self.cfg, "581000"))
+        self.assertTrue(ticket_guest.matches(self.cfg, "581000", first))
+        self.assertFalse(ticket_guest.matches(self.cfg, "581001", first))
+        self.assertFalse(ticket_guest.matches(self.cfg, "581000", first + "?id=581001"))
+        self.assertNotIn("581000", first)
+        path, other = urlsplit(first).path, urlsplit(second).path
+        shot = "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef?signature=secret"
+        detail = {"id": 581000, "title": "隐私商家名下单失败", "status": 10, "priority": 8,
+                  "holderName": "技术内部人员", "content": "隐私商家名 设备报错 13812345678 http://example.org/key 工单号 581000",
+                  "custom": [
+                      {"name": "店铺名", "value": "隐私商家名"},
+                      {"name": "平台&版本", "value": "抖音"},
+                      {"name": "附件/截图", "value": json.dumps([{"name": "隐私图片名.png", "url": shot},
+                          {"name": "私有原文件.pdf", "url": "https://shop.qiyukf.net/1123456789abcdef0123456789abcdef"}])},
+                      {"name": "技术回复", "value": "内网答复"},
+                      {"name": ["malformed"], "value": "ignored"},
+                  ],
+                  "attachments": [{"name": "internal-log.png", "url": "https://shop.qiyukf.net/2123456789abcdef0123456789abcdef"}]}
+        static = Path(self.temp.name) / "static"
+        (static / "guest").mkdir(parents=True)
+        (static / "guest" / "index.html").write_bytes(b"<html><!--VOC_GUEST_DATA--></html>")
+
+        def respond(method, target, *, body, **kwargs):
+            self.assertEqual(urlsplit(target).path, ticket.DETAIL)
+            number = json.loads(body)["ticketId"]
+            row = detail if number == 581000 else {"id": number, "title": "其他工单"}
+            return {"code": 200, "data": row}
+
+        with (patch("src.web.server.STATIC", static),
+              patch("src.qiyu.ticket.request", side_effect=respond) as upstream,
+              patch.object(case_media, "fetch_bytes", return_value=(b"\x89PNG\r\n\x1a\ncontent", "image/png")) as media):
+            self.assertEqual(self.fetch_raw("/guest/ticket/" + "0" * 43, admin=False)[0], 404)
+            self.assertEqual(self.fetch_raw(path + "?id=581001", admin=False)[0], 404)
+            self.assertEqual(self.fetch("/api/tickets/detail?id=581000", admin=False)[0], 401)
+            upstream.assert_not_called()
+
+            status, headers, body = self.fetch_raw(path, admin=False)
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+            self.assertIn("noindex", headers["X-Robots-Tag"])
+            payload = json.loads(re.search(rb'<script[^>]+>(.+?)</script>', body).group(1))
+            self.assertEqual(payload["kind"], "ticket")
+            self.assertEqual(payload["ticket"]["priority"], "紧急")
+            self.assertEqual(payload["ticket"]["fields"][0], {"label": "平台&版本", "value": "抖音"})
+            raw_data = body.decode("utf-8")
+            for private in ("581000", "隐私商家名", "技术内部人员", "内网答复", "13812345678", "example.org",
+                            "私有原文件", "隐私图片名", "signature=secret", "internal-log"):
+                self.assertNotIn(private, raw_data)
+            asset = payload["ticket"]["fields"][1]["images"][0]["url"]
+            self.assertTrue(asset.startswith(path + "/images/"))
+            status, headers, body = self.fetch_raw(asset, admin=False)
+            self.assertEqual((status, headers.get_content_type()), (200, "image/png"))
+            self.assertTrue(body.startswith(b"\x89PNG"))
+            self.assertEqual(upstream.call_count, 1)
+            self.assertEqual(self.fetch_raw(asset + "?url=https://example.org/evil.png", admin=False)[0], 404)
+            self.assertEqual(self.fetch_raw(asset.replace(path, other), admin=False)[0], 404)
+            media.assert_called_once_with(shot, image_only=True, ticket_attachment=True)

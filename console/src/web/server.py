@@ -23,7 +23,7 @@ from .. import ticket_feedback, voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
-from . import admin_keys, api, case_media, guest_evidence, ticket_media, tickets
+from . import admin_keys, api, case_media, guest_evidence, ticket_guest, ticket_media, tickets
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
@@ -41,6 +41,9 @@ IMAGE_SLOTS = threading.BoundedSemaphore(3)
 GUEST_PREFIX = "/guest/evidence/"
 GUEST_IMAGE_ROUTE = re.compile(
     rf"{GUEST_PREFIX}({guest_evidence.TOKEN_PATTERN})/images/({guest_evidence.IMAGE_PATTERN})"
+)
+GUEST_TICKET_IMAGE_ROUTE = re.compile(
+    rf"{ticket_guest.PUBLIC_PATH}({ticket_guest.TOKEN_PATTERN})/images/({ticket_guest.IMAGE_PATTERN})"
 )
 GUEST_ASSET_PREFIX = "/guest/ui/assets/"
 GUEST_ASSET_NAME = re.compile(r"[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(?:js|css|woff2?)")
@@ -362,6 +365,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._guest_asset(u.path, suffix)
                 elif image := GUEST_IMAGE_ROUTE.fullmatch(u.path):
                     self._guest_image(image[1], image[2], suffix)
+                elif image := GUEST_TICKET_IMAGE_ROUTE.fullmatch(u.path):
+                    self._guest_image(image[1], image[2], suffix, ticket=True)
                 else:
                     self._guest_page(u.path, suffix)
                 return
@@ -457,14 +462,16 @@ class Handler(BaseHTTPRequestHandler):
                    extra=GUEST_HEADERS, cache_control="public, max-age=31536000, immutable")
 
     def _guest_page(self, path: str, suffix: str) -> None:
-        token = path[len(GUEST_PREFIX):] if path.startswith(GUEST_PREFIX) else ""
+        prefix = ticket_guest.PUBLIC_PATH if path.startswith(ticket_guest.PUBLIC_PATH) else GUEST_PREFIX
+        token = path[len(prefix):] if path.startswith(prefix) else ""
+        resolver = ticket_guest.resolve_payload if prefix == ticket_guest.PUBLIC_PATH else guest_evidence.resolve_payload
         body = GUEST_UNAVAILABLE
         policy = GUEST_POLICY
         status = 404
         if not suffix and re.fullmatch(guest_evidence.TOKEN_PATTERN, token):
             if GUEST_SLOTS.acquire(blocking=False):
                 try:
-                    payload = guest_evidence.resolve_payload(self.server.cfg, token)
+                    payload = resolver(self.server.cfg, token)
                     if payload is not None:
                         body, policy = self._render_guest(payload)
                         status = 200
@@ -479,7 +486,7 @@ class Handler(BaseHTTPRequestHandler):
             extra["Content-Encoding"] = "gzip"
         self._send(body, "text/html; charset=utf-8", status, policy=policy, extra=extra)
 
-    def _guest_image(self, token: str, image_id: str, suffix: str) -> None:
+    def _guest_image(self, token: str, image_id: str, suffix: str, *, ticket: bool = False) -> None:
         if suffix:
             self._send(b"", "text/plain; charset=utf-8", 404, policy=GUEST_POLICY, extra=GUEST_HEADERS)
             return
@@ -487,30 +494,34 @@ class Handler(BaseHTTPRequestHandler):
             self._send(b"", "text/plain; charset=utf-8", 503, policy=GUEST_POLICY, extra=GUEST_HEADERS)
             return
         try:
-            url = guest_evidence.resolve_image(self.server.cfg, token, image_id)
-            if url is None:
-                self._send(b"", "text/plain; charset=utf-8", 404, policy=GUEST_POLICY, extra=GUEST_HEADERS)
-                return
             try:
-                data, mime, _ = case_media.fetch_image(url)
+                if ticket:
+                    data, mime, filename = ticket_guest.fetch_image(self.server.cfg, token, image_id)
+                else:
+                    url = guest_evidence.resolve_image(self.server.cfg, token, image_id)
+                    if url is None:
+                        self._send(b"", "text/plain; charset=utf-8", 404, policy=GUEST_POLICY, extra=GUEST_HEADERS)
+                        return
+                    data, mime, _ = case_media.fetch_image(url)
+                    filename = "conversation-image." + case_media._IMAGE_FORMATS[mime]
             except case_media.ImageFetchError as exc:
                 self._send(b"", "text/plain; charset=utf-8", exc.status, policy=GUEST_POLICY, extra=GUEST_HEADERS)
                 return
-            extension = case_media._IMAGE_FORMATS[mime]
             self._send(data, mime, policy=GUEST_POLICY, extra={
-                **GUEST_HEADERS, "Content-Disposition": f'inline; filename="conversation-image.{extension}"',
+                **GUEST_HEADERS, "Content-Disposition": f'inline; filename="{filename}"',
             })
         finally:
             GUEST_IMAGE_SLOTS.release()
 
     @staticmethod
     def _render_guest(payload: dict) -> tuple[bytes, str]:
+        fallback = ticket_guest.render_payload if payload.get("kind") == "ticket" else guest_evidence.render_payload
         try:
             template = (STATIC / "guest" / "index.html").read_bytes()
         except FileNotFoundError:
-            return guest_evidence.render_payload(payload), GUEST_POLICY
+            return fallback(payload), GUEST_POLICY
         if template.count(GUEST_DATA_MARKER) != 1:
-            return guest_evidence.render_payload(payload), GUEST_POLICY
+            return fallback(payload), GUEST_POLICY
         # Escape the characters that can change HTML parsing inside a script element.
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         data = data.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
@@ -898,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
         target = getattr(self, "path", "")
         path = unquote(target.partition("?")[0])
         if path.startswith("/guest/"):
-            self.log_message('"%s /guest/evidence/[redacted] %s" %s %s',
+            self.log_message('"%s /guest/[redacted] %s" %s %s',
                              self.command, self.request_version, str(code), str(size))
             return
         if path in ("/api/detail/image", "/api/tickets/media"):
