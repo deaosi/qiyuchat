@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { useApi } from '@/hooks/use-api'
-import { normalizePair } from '@/lib/api'
+import { httpsLink, normalizePair } from '@/lib/api'
 import { LoadingState, RefreshDataButton } from './loading-state'
 import { QADetail } from './qa-detail'
 import { ZoomableImage } from './zoomable-image'
@@ -42,13 +42,30 @@ type TicketEvent = {
   attachments?: TicketAttachment[]
 }
 type LinkedSession = { session_id: string; started_at: number | null; qa_id: number | null }
+type TechnicalFeedback = {
+  status: string
+  reply: string
+  resolved_version: string
+  received_at: number | null
+  writeback_status: 'pending' | 'succeeded' | 'failed' | 'uncertain'
+  written_at: number | null
+  error: string
+  feishu_url: string
+}
 type TicketDetail = {
   ticket: Ticket & { description: string; category?: string; template?: string; fields?: TicketField[]; images?: TicketAttachment[]; attachments?: TicketAttachment[] }
   history: TicketEvent[]
   sessions: LinkedSession[]
   history_available: boolean
+  technical_feedback?: TechnicalFeedback | null
 }
 const statuses = { all: '全部状态', '1': '已提交', '5': '待申领', '10': '处理中', '20': '已完结' } as const
+const writebackLabels: Record<TechnicalFeedback['writeback_status'], string> = {
+  pending: '待回传七鱼',
+  succeeded: '已回传七鱼',
+  failed: '回传七鱼失败',
+  uncertain: '待核对七鱼回复',
+}
 type TicketStatus = keyof typeof statuses
 type Filters = { q: string; start: string; end: string; ticket_status: TicketStatus }
 const emptyFilters: Filters = { q: '', start: '', end: '', ticket_status: 'all' }
@@ -142,6 +159,41 @@ function TicketHistory({ history, available, reload }: { history: TicketEvent[];
   </ol>
 }
 
+function TicketTechnicalFeedback({ feedback }: { feedback: TechnicalFeedback }) {
+  const feishuUrl = httpsLink(feedback.feishu_url)
+  return <section aria-label="飞书技术处理" className="space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-sm font-semibold">飞书技术处理</h3>
+        <Badge variant={feedback.writeback_status === 'failed' ? 'destructive' : 'outline'} className="font-normal">
+          {writebackLabels[feedback.writeback_status] || '回传状态未知'}
+        </Badge>
+      </div>
+      {feishuUrl && <Button asChild variant="outline" size="sm">
+        <a href={feishuUrl} target="_blank" rel="noreferrer">在飞书查看工单</a>
+      </Button>}
+    </div>
+    <div className="space-y-4 rounded-lg border bg-muted/25 p-4">
+      <dl className="grid grid-cols-2 gap-3 text-sm">
+        {[
+          ['技术处理状态', feedback.status],
+          ['解决版本', feedback.resolved_version],
+          ['飞书变更接收时间', ticketTime(feedback.received_at)],
+          ['回传成功时间', ticketTime(feedback.written_at)],
+        ].map(([label, value]) => <div key={label} className="min-w-0">
+          <dt className="mb-1 text-xs text-muted-foreground">{label}</dt>
+          <dd className="tabular-nums [overflow-wrap:anywhere]">{value || '—'}</dd>
+        </div>)}
+        {feedback.reply && <div className="col-span-full min-w-0">
+          <dt className="mb-1 text-xs text-muted-foreground">技术回复</dt>
+          <dd className="whitespace-pre-wrap rounded-md border bg-background p-3 text-sm leading-relaxed [overflow-wrap:anywhere]">{feedback.reply}</dd>
+        </div>}
+      </dl>
+      {feedback.error && <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{feedback.error}</p>}
+    </div>
+  </section>
+}
+
 function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus }: {
   id: string
   refreshKey: number
@@ -182,6 +234,7 @@ function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus }: {
                 <dd className="tabular-nums [overflow-wrap:anywhere]">{value || '—'}</dd>
               </div>)}
             </dl>
+            {data.technical_feedback && <TicketTechnicalFeedback feedback={data.technical_feedback} />}
             <section aria-label="处理记录" className="space-y-2">
               <h3 className="text-sm font-semibold">处理记录</h3>
               <TicketHistory history={data.history} available={data.history_available} reload={details.retry} />

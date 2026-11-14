@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from deploy.feishu_sync import run, tickets
+from deploy.feishu_sync import tickets
 from src import voc_feishu_sync as sync
 
 
@@ -23,9 +23,14 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.fail_after_insert = False
 
     def fake_api(self, target, method, resource, *, params=None, data=None):
-        self.assertEqual(target, self.target)
+        self.assertEqual(target.table_id, self.target.table_id)
         if resource == "/records/search":
-            keys = {condition["value"][0] for condition in data["filter"]["conditions"]}
+            conditions = data["filter"]["conditions"]
+            if conditions[0]["operator"] == "isNotEmpty":
+                matching = [row for row in self.rows.values()
+                            if any(row["fields"].get(column["field_name"]) for column in conditions)]
+                return {"items": deepcopy(matching), "has_more": False}
+            keys = {condition["value"][0] for condition in conditions}
             return {"items": [deepcopy(row) for key, row in self.rows.items() if key in keys], "has_more": False}
         if resource == "/records/batch_create":
             self.writes.append(resource)
@@ -96,13 +101,42 @@ class TestTicketFeishuSync(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "数量不一致"):
                 tickets._pages(object())
 
-    def test_main_report_failure_does_not_prevent_ticket_sync_and_maintenance_skips(self):
-        with (patch.object(run, "run", side_effect=sync.SyncError("report unavailable")),
-              patch.object(tickets, "run", return_value={"status": "published"}) as sync_tickets):
-            result = run._run_schedule(Path("."), refresh=False)
-        sync_tickets.assert_called_once()
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["tickets"]["status"], "published")
+    def test_imports_older_technical_reply_and_preserves_input_columns(self):
+        source = {"id": "42", "title": "历史工单", "created_at": 1_734_500_000_000, "status_code": 10}
+        fields = tickets._projection([source])["42"]
+        fields.update({"技术处理状态": "已处理", "技术回复": [{"text": "已修复，待验证"}], "解决版本": "1.6.3"})
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        result = {"status": "已回传", "returned_at": 1_794_600_000_000, "changed": True, "error": ""}
+        cfg = object()
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(tickets.ticket_feedback, "ingest", return_value=result) as ingest):
+            self.assertEqual(tickets._import_feedback(cfg, self.target),
+                             {"checked": 1, "imported": 1, "awaiting_review": 0, "failed": 0})
+            self.assertEqual(tickets._upsert(self.target, tickets._projection([{**source, "status_code": 20}])), (0, 1))
+            result["changed"] = False
+            self.assertEqual(tickets._import_feedback(cfg, self.target)["imported"], 0)
+        ingest.assert_called_with(cfg, ticket_id="42", record_id="recFixture42",
+                                  feedback={"status": "已处理", "reply": "已修复，待验证", "version": "1.6.3"},
+                                  feishu_url=self.target.destination)
+        self.assertEqual(fields["回传状态"], "已回传")
+        self.assertEqual(fields["回传时间"], result["returned_at"])
+        self.assertEqual(fields["技术回复"], [{"text": "已修复，待验证"}])
+        self.assertEqual(fields["状态"], "已完结")
+        self.assertEqual(self.writes, ["/records/batch_update", "/records/batch_update"])
+
+    def test_blocks_feedback_if_link_points_to_different_ticket(self):
+        fields = tickets._projection([{"id": "42"}])["42"]
+        fields["语海详情"] = {"text": "查看工单", "link": tickets._source_link("43")}
+        fields["技术回复"] = "测试反馈"
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(tickets.ticket_feedback, "ingest") as ingest):
+            with self.assertRaisesRegex(sync.SyncError, "无法唯一匹配"):
+                tickets._import_feedback(object(), self.target)
+        ingest.assert_not_called()
+        self.assertEqual(self.writes, [])
+
+    def test_maintenance_skips_ticket_sync(self):
         with (patch.object(tickets, "settings", return_value=object()),
               patch.object(tickets, "maintenance", return_value=True),
               patch.object(tickets.support, "target_table") as target_table):

@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from ..config import Settings, settings
 from .. import voc, knowledge, gateway, voc_service, voc_assistant
-from .. import voc_feishu_content, voc_feishu_sync
+from .. import ticket_feedback, voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
@@ -411,6 +411,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/tickets/detail":
                 response = tickets.ticket_detail(cfg, _str(qs, "id"))
+                response["technical_feedback"] = ticket_feedback.get(cfg, response["ticket"]["id"])
             else:
                 response = tickets.list_tickets(
                     cfg, start=_str(qs, "start"), end=_str(qs, "end"), q=_str(qs, "q"),

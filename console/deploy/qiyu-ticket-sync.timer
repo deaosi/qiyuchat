@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync Qiyu tickets every 10 minutes in Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* *:05,15,25,35,45,55:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1s
+Unit=qiyu-ticket-sync.service
+
+[Install]
+WantedBy=timers.target

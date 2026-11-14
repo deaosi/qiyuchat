@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import QiyuApp from './QiyuApp'
 
 const id = '9007199254740993'
+const feishuUrl = 'https://freecallai.feishu.cn/base/example?table=tblExample'
 const ticket = { id, title: '订单复核', status: '处理中', priority: '高', owner: '测试客服',
   created_at: Date.UTC(2026, 0, 1, 1), updated_at: Date.UTC(2026, 0, 1, 3), linked_session_count: 1 }
 const fetchApi = vi.fn(async (path: string) => {
@@ -20,6 +21,11 @@ const fetchApi = vi.fn(async (path: string) => {
     history: [{ id: '783', action: '回复工单', operator: '测试客服', time: ticket.updated_at, details: [{ label: '回复', value: '处理已记录。' }] }],
     history_available: true,
     sessions: [{ session_id: 'linked-session', started_at: ticket.created_at, qa_id: 24 }],
+    technical_feedback: {
+      status: '已解决', reply: '已经修复订单核对异常。', resolved_version: '3.9.1',
+      received_at: ticket.created_at, writeback_status: 'succeeded', written_at: ticket.updated_at,
+      error: '', feishu_url: feishuUrl,
+    },
   })
   if (url.pathname === '/api/detail') return Response.json({
     pair: { qa_id: 24, session_id: 'linked-session', question: '怎么核对？', answer: '请查看订单。' },
@@ -51,6 +57,11 @@ describe('七鱼工单', () => {
     expect(detail.getByText('核对订单明细。')).toBeTruthy()
     expect(detail.getByText('抖音 · Windows')).toBeTruthy()
     expect(detail.getByText('处理已记录。')).toBeTruthy()
+    const feedback = within(detail.getByRole('region', { name: '飞书技术处理' }))
+    expect(feedback.getByText('已经修复订单核对异常。')).toBeTruthy()
+    expect(feedback.getByText('3.9.1')).toBeTruthy()
+    expect(feedback.getByText('已回传七鱼')).toBeTruthy()
+    expect(feedback.getByRole('link', { name: '在飞书查看工单' }).getAttribute('href')).toBe(feishuUrl)
     expect(detail.getByText(`七鱼工单 #${id} · 处理中`)).toBeTruthy()
     expect(fetchApi.mock.calls.some(([path]) => path.startsWith('/api/tickets/detail?') && new URL(path, location.origin).searchParams.get('id') === id)).toBe(true)
 

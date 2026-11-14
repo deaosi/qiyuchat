@@ -552,22 +552,6 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
         return publish(stage)
 
 
-def _run_schedule(state_dir, *, refresh):
-    from deploy.feishu_sync import tickets
-
-    try:
-        result = run(state_dir, True, refresh=refresh)
-    except _SYNC_ERRORS as exc:
-        message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "全量同步的数据暂不可核验。"
-        result = {"status": "failed", "message": message}
-    try:
-        result["tickets"] = tickets.run(state_dir)
-    except _SYNC_ERRORS as exc:
-        message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "工单同步的数据暂不可核验。"
-        result["tickets"] = {"status": "failed", "message": message}
-    return result
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
@@ -588,16 +572,13 @@ def main():
             from deploy.feishu_sync import tickets
 
             result = tickets.run(state_dir)
-        elif args.apply and not args.dashboard_only:
-            result = _run_schedule(state_dir, refresh=args.refresh)
         else:
             result = run(state_dir, args.apply, refresh=args.refresh, dashboard_only=args.dashboard_only)
     except _SYNC_ERRORS as exc:
         message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "全量同步的数据暂不可核验。"
         raise SystemExit(message) from None
     print(json.dumps(result, ensure_ascii=True))
-    ticket_result = result.get("tickets")
-    if result["status"] == "failed" or isinstance(ticket_result, dict) and ticket_result.get("status") == "failed":
+    if result["status"] == "failed":
         raise SystemExit(1)
 
 

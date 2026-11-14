@@ -1,0 +1,19 @@
+[Unit]
+Description=Sync YuHai Voc Qiyu tickets and Feishu technical feedback
+After=network-online.target qiyu-console.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=qiyu
+Group=qiyu
+WorkingDirectory=/opt/qiyu-console
+EnvironmentFile=-/opt/qiyu-console/.env
+EnvironmentFile=-/var/cache/qiyu-voc/runtime.env
+Environment=YUHAI_FEISHU_SYNC_CONFIG=/var/lib/qiyu-feishu-sync/target-config.json
+Environment=LARKSUITE_CLI_CONFIG_DIR=/var/lib/qiyu-feishu-sync/lark-config
+Environment=LARKSUITE_CLI_DATA_DIR=/var/lib/qiyu-feishu-sync/lark-data
+ExecStart=/opt/qiyu-voc-venv/bin/python -B -u /opt/qiyu-console/deploy/feishu_sync/run.py --state-dir /var/lib/qiyu-feishu-sync --apply --tickets-only
+TimeoutStartSec=4min
+UMask=0077
+NoNewPrivileges=true
