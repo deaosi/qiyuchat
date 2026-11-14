@@ -339,3 +339,8 @@ class TicketModuleTests(LocalFixture):
         payload, _ = ticket_guest._project({"title": "打印故障", "content": "请检查打印设置"}, "A" * 43)
         self.assertEqual(payload["ticket"]["title"], "打印故障")
         self.assertEqual(payload["ticket"]["description"], "请检查打印设置")
+
+        payload, _ = ticket_guest._project({"id": 581012, "userName": "客户", "title": "客户反馈打印故障",
+                                            "custom": [{"name": "店铺名", "value": "客户门店"}]}, "A" * 43)
+        self.assertEqual(payload["ticket"]["title"], "客户反馈打印故障")
+        self.assertEqual(payload["ticket"]["fields"], [{"label": "店铺名", "value": "客户门店"}])

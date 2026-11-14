@@ -144,15 +144,22 @@ def _identities(raw: dict, custom: list[dict]) -> tuple[re.Pattern[str] | None, 
                 values.add(value)
     candidates.extend((("客户名称", raw.get("userName")), ("客户群名称", raw.get("groupName"))))
 
-    display_fields = {}
+    display_candidates = []
     internal = _name_pattern(values)
     for label, raw_name in candidates:
         name = case_senders._guest_nickname(raw_name, identifiers)
         if name and "***" not in name and not _REDACTION.search(name) and _guest_text(name, internal) == name:
-            display_fields.setdefault(label, name)
-        elif isinstance(raw_name, str) and raw_name.strip():
+            display_candidates.append((label, name))
+        elif (isinstance(raw_name, str) and raw_name.strip()
+              and not case_senders._SOURCE_PLACEHOLDER.fullmatch(raw_name.strip())):
             values.add(raw_name.strip())
-    return _name_pattern(values), display_fields
+
+    names = _name_pattern(values)
+    display_fields = {}
+    for label, name in display_candidates:
+        if _guest_text(name, names) == name:
+            display_fields.setdefault(label, name)
+    return names, display_fields
 
 
 def _project(raw: dict, token: str) -> tuple[dict, dict[str, str]]:
