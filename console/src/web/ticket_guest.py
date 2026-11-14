@@ -49,6 +49,7 @@ _LABELED_SECRET = re.compile(
 _REDACTION = re.compile(r"\[(?:名称|链接|标识)已隐藏\]|\[(?:详细地址)?已脱敏\]")
 _MAX_MEDIA = 40
 _MAX_LINKED_SESSIONS = 20
+_TICKET_TIMELINE_ACTIONS = frozenset({1, 2, 5, 6, 10, 15, 25, 40, 45, 50, 55, 60, 61, 65, 100})
 _CACHE_SECONDS = 30
 _CACHE_LIMIT = 128
 _CACHE_LOCK = Lock()
@@ -186,10 +187,15 @@ def _visible_history(logs: list[dict]) -> list[dict]:
     for entry in logs:
         shared = entry.get("customerSee")
         explicit = shared in (True, 1, "1", "true", "True")
-        reply = _id(entry.get("actionType")) in (20, 101) or "回复" in str(entry.get("action") or entry.get("actionLang") or "")
-        if shared in (False, 0, "0", "false", "False") or (reply and not explicit):
-            continue
+        action_type = _id(entry.get("actionType"))
+        reply = action_type in (20, 101) or "回复" in str(entry.get("action") or entry.get("actionLang") or "")
         if any(_SYNC_MARKER.search(str(item.get("content") or "")) for item in tickets._attachments(entry.get("info"))):
+            continue
+        if reply and not explicit:
+            continue
+        if shared in (False, 0, "0", "false", "False"):
+            if action_type in _TICKET_TIMELINE_ACTIONS:
+                visible.append({key: entry.get(key) for key in ("id", "action", "actionLang", "time")})
             continue
         visible.append(entry)
     return visible
@@ -323,7 +329,7 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
     data["category"] = _guest_text(data["category"], names)
     data["template"] = _guest_text(data["template"], names)
     data["submitter"] = _guest_text(submitter, None)
-    data["updated_at"] = tickets.ticket_updated_at(raw, history)
+    data["updated_at"] = tickets.ticket_updated_at(raw, source_logs)
     data["fields"] = public_fields(data["fields"])
     visible_labels = {_DISPLAY_LABELS.get(field["label"], field["label"]) for field in data["fields"]}
     data["fields"].extend({"label": label, "value": name} for label, name in display_fields.items()

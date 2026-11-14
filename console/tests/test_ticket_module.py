@@ -312,6 +312,9 @@ class TicketModuleTests(LocalFixture):
              "time": 1794537200000, "info": [{"title": "备注", "content": "内网答复"}]},
             {"id": 1234570, "actionType": 20, "action": "回复", "customerSee": True,
              "time": 1794537250000, "info": [{"title": "备注", "content": "语海 Voc · 飞书技术反馈\n〔语海同步 0123abcd〕"}]},
+            {"id": 1234571, "actionType": 25, "action": "完结", "customerSee": False, "operator": "未公开操作员",
+             "time": 1794537300000, "info": [{"title": "备注", "content": "未公开操作详情"}],
+             "attachments": [{"url": internal_file, "name": "完结详情.pdf"}]},
         ]
         static = Path(self.temp.name) / "static"
         (static / "guest").mkdir(parents=True)
@@ -351,14 +354,17 @@ class TicketModuleTests(LocalFixture):
             self.assertEqual(payload["ticket"]["template"], "购物售后")
             self.assertEqual(payload["ticket"]["category"], "售后/下单")
             self.assertTrue(payload["history_available"])
-            self.assertEqual([entry["action"] for entry in payload["history"]], ["回复", "创建工单"])
+            self.assertEqual([entry["action"] for entry in payload["history"]], ["完结", "回复", "创建工单"])
+            self.assertEqual(payload["history"][0]["details"], [])
+            self.assertEqual(payload["ticket"]["updated_at"], 1794537300000)
             self.assertEqual(payload["ticket"]["fields"][:2], [
                 {"label": "店铺名", "value": "示例商家"},
                 {"label": "平台&版本", "value": "抖音"},
             ])
             raw_data = body.decode("utf-8")
             for private in ("技术内部人员", "内网答复", "13812345678", "example.org", "signature=secret",
-                            "语海同步", "1234567", "1234568", "1234569", "1234570", "/api/tickets/media"):
+                            "语海同步", "1234567", "1234568", "1234569", "1234570", "/api/tickets/media",
+                            "未公开操作员", "未公开操作详情", "完结详情.pdf"):
                 self.assertNotIn(private, raw_data)
             self.assertNotIn("581000", payload["ticket"]["description"])
             asset = payload["ticket"]["fields"][2]["images"][0]["url"]
