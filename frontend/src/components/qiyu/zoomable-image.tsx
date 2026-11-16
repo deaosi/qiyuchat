@@ -8,8 +8,9 @@ const defaultMaximumZoom = 1000
 const padding = 12
 
 type ImageSize = { width: number; height: number }
-type ZoomPoint = { clientX: number; clientY: number; imageX: number; imageY: number }
-type DragStart = { id: number; clientX: number; clientY: number; left: number; top: number }
+type PointerPosition = { clientX: number; clientY: number }
+type ZoomPoint = PointerPosition & { imageX: number; imageY: number }
+type DragStart = PointerPosition & { id: number; left: number; top: number }
 type PreviewProps = {
   url: string
   title: string
@@ -19,11 +20,22 @@ type PreviewProps = {
   actions?: (loaded: boolean) => ReactNode
 }
 
+function pinchPosition(touches: Map<number, PointerPosition>) {
+  const [first, second] = touches.values()
+  if (!first || !second) return null
+  return {
+    center: { clientX: (first.clientX + second.clientX) / 2, clientY: (first.clientY + second.clientY) / 2 },
+    distance: Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY),
+  }
+}
+
 function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions }: PreviewProps) {
   const viewport = useRef<HTMLDivElement>(null)
   const image = useRef<HTMLImageElement>(null)
   const zoomPoint = useRef<ZoomPoint | null>(null)
   const drag = useRef<DragStart | null>(null)
+  const touches = useRef(new Map<number, PointerPosition>())
+  const pinchStart = useRef<{ distance: number; zoom: number } | null>(null)
   const currentZoom = useRef(100)
   const [zoom, setZoom] = useState(100)
   const [availableSize, setAvailableSize] = useState<ImageSize>({ width: 0, height: 0 })
@@ -52,23 +64,24 @@ function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions
     return () => observer.disconnect()
   }, [])
 
-  const zoomAt = useCallback((value: number, x?: number, y?: number) => {
+  const zoomAt = useCallback((value: number, position?: PointerPosition, destination?: PointerPosition) => {
     const element = viewport.current
     const bounds = image.current?.getBoundingClientRect()
     const next = Math.min(maximumZoom, Math.max(minimumZoom, Math.round(value)))
-    if (next === currentZoom.current) return
+    if (next === currentZoom.current) return false
     if (element && bounds?.width && bounds.height) {
       const area = element.getBoundingClientRect()
-      const clientX = x ?? area.left + area.width / 2
-      const clientY = y ?? area.top + area.height / 2
+      const origin = position ?? { clientX: area.left + area.width / 2, clientY: area.top + area.height / 2 }
+      const { clientX, clientY } = destination ?? origin
       zoomPoint.current = {
         clientX, clientY,
-        imageX: (clientX - bounds.left) / bounds.width,
-        imageY: (clientY - bounds.top) / bounds.height,
+        imageX: (origin.clientX - bounds.left) / bounds.width,
+        imageY: (origin.clientY - bounds.top) / bounds.height,
       }
     }
     currentZoom.current = next
     setZoom(next)
+    return true
   }, [maximumZoom])
 
   useLayoutEffect(() => {
@@ -90,7 +103,7 @@ function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions
       const units = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 240 : 1
       const delta = Math.max(-500, Math.min(500, event.deltaY * units))
       const next = Math.max(1, Math.abs(currentZoom.current * Math.expm1(-delta * 0.002)))
-      zoomAt(currentZoom.current + (delta < 0 ? next : -next), event.clientX, event.clientY)
+      zoomAt(currentZoom.current + (delta < 0 ? next : -next), event)
     }
     element.addEventListener('wheel', wheel, { passive: false })
     return () => element.removeEventListener('wheel', wheel)
@@ -98,6 +111,14 @@ function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions
 
   function startDrag(event: PointerEvent<HTMLDivElement>) {
     const element = event.currentTarget
+    if (event.pointerType === 'touch') {
+      if (!fit || failed || touches.current.size >= 2) return
+      touches.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY })
+      const pinch = pinchPosition(touches.current)
+      if (pinch) pinchStart.current = { distance: Math.max(1, pinch.distance), zoom: currentZoom.current }
+      element.setPointerCapture(event.pointerId)
+      return
+    }
     if (event.pointerType !== 'mouse' || event.button !== 0 ||
         (element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight)) return
     const bounds = element.getBoundingClientRect()
@@ -107,10 +128,32 @@ function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions
   }
 
   function moveDrag(event: PointerEvent<HTMLDivElement>) {
+    const element = event.currentTarget
+    if (event.pointerType === 'touch') {
+      const previous = touches.current.get(event.pointerId)
+      if (!previous) return
+      const position = { clientX: event.clientX, clientY: event.clientY }
+      const previousPinch = pinchPosition(touches.current)
+      touches.current.set(event.pointerId, position)
+      const pinch = pinchPosition(touches.current)
+      const start = pinchStart.current
+      if (pinch && previousPinch && start &&
+          zoomAt(start.zoom * pinch.distance / start.distance, previousPinch.center, pinch.center)) return
+      const from = previousPinch?.center ?? previous
+      const to = pinch?.center ?? position
+      element.scrollLeft += from.clientX - to.clientX
+      element.scrollTop += from.clientY - to.clientY
+      return
+    }
     const start = drag.current
     if (start?.id !== event.pointerId) return
-    event.currentTarget.scrollLeft = start.left + start.clientX - event.clientX
-    event.currentTarget.scrollTop = start.top + start.clientY - event.clientY
+    element.scrollLeft = start.left + start.clientX - event.clientX
+    element.scrollTop = start.top + start.clientY - event.clientY
+  }
+
+  function finishDrag(event: PointerEvent<HTMLDivElement>) {
+    if (touches.current.delete(event.pointerId)) pinchStart.current = null
+    if (drag.current?.id === event.pointerId) drag.current = null
   }
 
   function fitImage() {
@@ -127,7 +170,7 @@ function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions
         <DialogTitle className="text-sm">{title}</DialogTitle>
         {showDimensions && imageSize && <span className="text-xs tabular-nums text-muted-foreground">{imageSize.width} × {imageSize.height}</span>}
       </div>
-      <DialogDescription className="sr-only">滚轮或滑块缩放，放大后可以拖动查看。右键可复制或另存。</DialogDescription>
+      <DialogDescription className="sr-only">滚轮、滑块或双指缩放，放大后可以拖动查看。右键可复制或另存。</DialogDescription>
       <label className="flex items-center gap-2 text-xs">
         <span className="sr-only">缩放比例</span>
         <input type="range" min={minimumZoom} max={Math.max(maximumZoom, zoom)} value={zoom} disabled={!fit || failed}
@@ -141,8 +184,10 @@ function ImageViewport({ url, title, alt, viewportLabel, showDimensions, actions
     </div>
     <div ref={viewport} role="region" aria-label={viewportLabel} tabIndex={0}
       className={cn('min-h-0 min-w-0 overflow-auto bg-muted/50 outline-none [overflow-anchor:none] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+        fit && !failed && 'touch-none',
         zoom > 100 && 'cursor-grab active:cursor-grabbing')}
-      onPointerDown={startDrag} onPointerMove={moveDrag} onLostPointerCapture={() => { drag.current = null }}>
+      onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={finishDrag}
+      onPointerCancel={finishDrag} onLostPointerCapture={finishDrag}>
       <div className="grid h-max min-h-full w-max min-w-full place-items-center" style={{ padding }}>
         {failed ? <div className="space-y-2 text-center">
           <p role="status" className="text-sm text-muted-foreground">图片暂不可查看</p>

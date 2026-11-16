@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { VocGuestTicket } from './voc-guest-ticket'
 
 it('renders the shared ticket with only images scoped to the open guest link', () => {
@@ -95,22 +95,55 @@ it('focuses the follow-up attachment heading and displays only attachments for t
   }
 })
 
-it('opens the dated reply text on its own guest link', () => {
+it('opens the dated reply and allows touch zoom and pan on the guest screenshot', () => {
   const previousUrl = window.location.pathname + window.location.hash
   const path = `/guest/ticket/${'a'.repeat(43)}`
+  const imageUrl = `${path}/images/${'2'.repeat(64)}`
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(400)
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600)
   window.history.replaceState(null, '', `${path}#ticket-followup-replies`)
   try {
     render(<VocGuestTicket kind="ticket" ticket={{
       title: '打印故障', status: '处理中', priority: '一般', description: '',
       created_at: null, updated_at: null,
     }} followup_replies={[{
-      time: 1794537200000, text: '已重新检查打印机', images: [], attachments: [],
+      time: 1794537200000, text: '已重新检查打印机',
+      images: [{ name: '复测截图', url: imageUrl }], attachments: [],
     }]} />)
     const heading = screen.getByRole('heading', { name: '工单跟进' })
     expect(document.activeElement).toBe(heading)
     const section = screen.getByRole('region', { name: '工单跟进' })
     expect(within(section).getByText('已重新检查打印机')).toBeTruthy()
     expect(within(section).queryByRole('link')).toBeNull()
+
+    fireEvent.click(within(section).getByRole('button', { name: '查看图片：复测截图' }))
+    const preview = within(screen.getByRole('dialog', { name: '工单图片预览' }))
+    const image = preview.getByRole('img', { name: '复测截图' })
+    const viewport = preview.getByRole('region', { name: '工单图片查看区' })
+    const zoom = preview.getByRole<HTMLInputElement>('slider', { name: '缩放比例' })
+    Object.defineProperties(image, { naturalWidth: { value: 2000 }, naturalHeight: { value: 2400 } })
+    Object.defineProperty(viewport, 'setPointerCapture', { value: vi.fn() })
+    fireEvent.load(image)
+    expect(image.getAttribute('src')).toBe(imageUrl)
+    expect(zoom.valueAsNumber).toBe(100)
+
+    const first = { pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 300 }
+    const second = { pointerId: 2, pointerType: 'touch', clientX: 200, clientY: 300 }
+    fireEvent.pointerDown(viewport, first)
+    fireEvent.pointerDown(viewport, second)
+    fireEvent.pointerMove(viewport, { ...second, clientX: 300 })
+    expect(zoom.valueAsNumber).toBe(200)
+    fireEvent.pointerUp(viewport, { ...second, clientX: 300 })
+    fireEvent.pointerMove(viewport, { ...first, clientX: 70, clientY: 275 })
+    expect(zoom.valueAsNumber).toBe(200)
+    expect(viewport.scrollLeft).toBe(30)
+    expect(viewport.scrollTop).toBe(25)
+
+    fireEvent.pointerCancel(viewport, first)
+    fireEvent.pointerMove(viewport, { ...first, clientX: 50 })
+    expect(viewport.scrollLeft).toBe(30)
+    fireEvent.click(preview.getByRole('button', { name: '适应窗口' }))
+    expect(zoom.valueAsNumber).toBe(100)
   } finally {
     cleanup()
     window.history.replaceState(null, '', previousUrl)
