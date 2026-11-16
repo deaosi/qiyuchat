@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import re
+from sys import maxsize
 from urllib.parse import urlsplit
 
 from src.extract.text import clean_visible_text
@@ -9,7 +10,8 @@ from src.qiyu.ticket import _id
 from src.web import ticket_guest, ticket_media, tickets
 
 
-COLUMNS = {"latest": "最新七鱼跟进", "history": "工单往来记录", "attachments": "点击查看跟进回复"}
+COLUMNS = {"latest": "最新七鱼跟进", "history": "工单往来记录", "attachments": "点击查看跟进回复",
+           "context": "跟进回复上下文"}
 _ZONE = timezone(timedelta(hours=8))
 _REPLY_ACTION = re.compile(r"(?:(?:工单|追加|补充)?回复(?:了?工单)?|repl(?:y|ied)(?: to (?:the )?ticket)?)", re.I)
 _REPLY_FIELD = re.compile(r"(?:(?:工单)?回复(?:内容|工单)?|comment|reply)", re.I)
@@ -19,6 +21,8 @@ _MAX_REPLIES = 12
 _MAX_HISTORY = 8_000
 _MAX_REPLY = 4_000
 _MAX_LATEST = 1_200
+_MAX_CONTEXT = 100_000
+_CONTEXT_NOTICE = "回复超出飞书单元格容量，完整内容请查看七鱼工单日志。"
 
 
 def _is_reply(entry, fields):
@@ -48,7 +52,7 @@ def _reply_content(fields, attachments):
         if echo:
             from_feishu = True
             content = echo[1]
-        value, media = tickets._field_value(content, _MAX_REPLY * 2, rich=bool(_RICH.search(content)))
+        value, media = tickets._field_value(content, maxsize, rich=bool(_RICH.search(content)))
         attachments.extend(media)
         if not echo and (echo := _FEISHU_ECHO.fullmatch(value)):
             from_feishu = True
@@ -72,6 +76,20 @@ def _attached_count(attachments):
     return len(paths)
 
 
+def _context_text(entries, length, truncated):
+    if not truncated:
+        return "\n\n".join(text for text, _ in reversed(entries))
+    available = _MAX_CONTEXT - len(_CONTEXT_NOTICE) - 2
+    while length > available and len(entries) > 1:
+        _, dropped = entries.pop()
+        length -= dropped + 2
+    if length > available:
+        text, _ = entries[0]
+        prefix = text.encode("utf-16-le")[:2 * (available - 1)].decode("utf-16-le", errors="ignore")
+        return _CONTEXT_NOTICE + "\n\n" + prefix.rstrip() + "…"
+    return "\n\n".join([_CONTEXT_NOTICE, *(text for text, _ in reversed(entries))])
+
+
 def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict:
     """Read chronological replies and preserve their direction without sending feedback."""
     identifier = _id(ticket_id)
@@ -87,6 +105,9 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
                      reverse=True)
     seen = set()
     entries = []
+    context = []
+    context_length = 0
+    context_omitted = False
     latest = ""
     has_attachments = False
     has_native_reply = False
@@ -122,10 +143,18 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
                 has_native_reply = bool(ticket_guest.native_followup_text(entry))
             if not latest:
                 latest = "\n".join(part for part in (header, _shorten(message, _MAX_LATEST), marker) if part)
+        if not context_omitted:
+            full_entry = "\n".join(part for part in (header, message, marker) if part)
+            units = len(full_entry.encode("utf-16-le")) // 2
+            combined_length = context_length + units + (2 if context else 0)
+            if not context or combined_length <= _MAX_CONTEXT:
+                context.append((full_entry, units))
+                context_length = combined_length
+            context_omitted = combined_length > _MAX_CONTEXT
         summary = "\n".join(part for part in (header, _shorten(message, _MAX_REPLY), marker) if part)
         if omitted or len(entries) >= _MAX_REPLIES or history_length + len(summary) + 2 > _MAX_HISTORY:
             omitted = True
-            if latest and has_attachments and has_native_reply:
+            if context_omitted and latest and has_attachments and has_native_reply:
                 break
             continue
         entries.append(summary)
@@ -136,12 +165,12 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
         history.insert(0, f"以下为最近 {len(entries)} 条回复")
     reply_link = None
     if has_native_reply:
-        label = "查看回复和附件" if has_attachments else "查看跟进回复"
-        reply_link = {"text": label, "link": ticket_guest.reply_url_for(cfg, ticket_id)}
+        reply_link = {"text": "查看跟进回复", "link": ticket_guest.reply_url_for(cfg, ticket_id)}
     elif has_attachments:
-        reply_link = {"text": "查看跟进附件", "link": ticket_guest.followup_url_for(cfg, ticket_id)}
+        reply_link = {"text": "查看跟进回复", "link": ticket_guest.followup_url_for(cfg, ticket_id)}
     return {
         COLUMNS["latest"]: latest,
         COLUMNS["history"]: "\n\n".join(history),
         COLUMNS["attachments"]: reply_link,
+        COLUMNS["context"]: _context_text(context, context_length, context_omitted),
     }

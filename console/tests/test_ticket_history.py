@@ -42,8 +42,20 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertNotIn("普通工单更新", timeline)
         self.assertNotIn("1234567890abcdef", timeline)
         self.assertNotIn(_FILE, repr(value))
-        self.assertEqual(value[_C["attachments"]]["text"], "查看回复和附件")
+        self.assertIn("2026-11-14 17:32:01 · 飞书 → 七鱼 · 技术反馈\n处理状态：已复现", value[_C["context"]])
+        self.assertIn("2026-11-14 17:32:02 · 七鱼 → 飞书 · 提报人补充 · 工单经办人\n补充信息\n具体操作如下。\n附件 1 个",
+                      value[_C["context"]])
+        self.assertEqual(value[_C["context"]].count("具体操作如下。"), 1)
+        self.assertNotIn("1234567890abcdef", value[_C["context"]])
+        self.assertEqual(value[_C["attachments"]]["text"], "查看跟进回复")
         self.assertTrue(ticket_guest.matches_reply(self.cfg, "56", value[_C["attachments"]]["link"]))
+
+    def test_attachment_only_link_keeps_its_scope_and_standard_label(self):
+        event = _event(901, 0, "", attachments=[{"name": "现场.png", "url": _FILE}])
+        value = ticket_history.project(self.cfg, "56", [event])
+        self.assertEqual(value[_C["attachments"]]["text"], "查看跟进回复")
+        self.assertTrue(ticket_guest.matches_followup(self.cfg, "56", value[_C["attachments"]]["link"]))
+        self.assertIn("附件 1 个", value[_C["context"]])
 
     def test_sanitizes_reply_but_preserves_marker_like_text_and_html_break(self):
         event = _event(901, 0, "<p>第一行<br>第二行</p><img src='" + _FILE + "'>\n密码：secretCode"
@@ -63,12 +75,16 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertTrue(timeline.startswith("以下为最近 12 条回复"))
         self.assertNotIn("旧回复7", timeline)
         self.assertEqual(timeline.count("重复回复"), 9)
+        context = value[_C["context"]]
+        self.assertIn("旧回复0", context)
+        self.assertEqual(context.count("重复回复"), 9)
+        self.assertLess(context.index("旧回复0"), context.index("重复回复"))
         reply_link = value[_C["attachments"]]
         self.assertEqual(reply_link["text"], "查看跟进回复")
         self.assertTrue(ticket_guest.matches_reply(self.cfg, "56", reply_link["link"]))
         self.assertFalse(ticket_guest.matches_followup(self.cfg, "56", reply_link["link"]))
         self.assertEqual(ticket_history.project(self.cfg, "56", []),
-                         {_C["latest"]: "", _C["history"]: "", _C["attachments"]: None})
+                         {_C["latest"]: "", _C["history"]: "", _C["attachments"]: None, _C["context"]: ""})
 
     def test_long_feishu_feedback_keeps_its_direction(self):
         body = "语海 Voc · 飞书技术反馈\n" + "很长" * 5000 + "\n〔语海同步 1234567890abcdef〕"
@@ -76,4 +92,28 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertEqual(value[_C["latest"]], "")
         self.assertIn("飞书 → 七鱼 · 技术反馈", value[_C["history"]])
         self.assertNotIn("1234567890abcdef", value[_C["history"]])
+        self.assertEqual(value[_C["context"]].count("很长"), 5000)
         self.assertIsNone(value[_C["attachments"]])
+
+    def test_same_second_context_uses_event_id_and_does_not_deduplicate_text(self):
+        second = _event(902, 0, "现场已复现")
+        first = _event(901, 0, "收到反馈")
+        third = _event(903, 0, "现场已复现")
+        context = ticket_history.project(self.cfg, "56", [third, first, second])[_C["context"]]
+        self.assertLess(context.index("收到反馈"), context.index("现场已复现"))
+        self.assertEqual(context.count("现场已复现"), 2)
+        self.assertEqual(context.count("2026-11-14 17:32:00"), 3)
+
+    def test_cell_limit_preserves_recent_whole_entries_and_can_clip_single_oversized_reply(self):
+        old = _event(900, 0, "旧回复" + "🙂" * 30_000)
+        new = _event(901, 1_000, "新回复" + "🙂" * 30_000)
+        context = ticket_history.project(self.cfg, "56", [old, new])[_C["context"]]
+        self.assertIn("完整内容请查看七鱼工单日志", context)
+        self.assertNotIn("旧回复", context)
+        self.assertEqual(context.count("🙂"), 30_000)
+        oversized = _event(901, 1_000, "新回复" + "🙂" * 51_000)
+        clipped = ticket_history.project(self.cfg, "56", [oversized])[_C["context"]]
+        self.assertIn("2026-11-14 17:32:01", clipped)
+        self.assertIn("新回复", clipped)
+        self.assertTrue(clipped.endswith("…"))
+        self.assertLessEqual(len(clipped.encode("utf-16-le")) // 2, 100_000)

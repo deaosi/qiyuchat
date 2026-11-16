@@ -28,14 +28,15 @@ MATCH_SIZE = 20
 DETAIL_LIMIT = 12
 DETAIL_BUDGET_SECONDS = 25
 _DETAIL_CACHE_LIMIT = 128
-_DETAIL_CACHE_VERSION = 3
+_DETAIL_CACHE_VERSION = 4
+_DETAIL_CACHE_ENTRY_BYTES = support.MAX_JOURNAL // (_DETAIL_CACHE_LIMIT + 1)
 _DETAIL_BATCH = 4
 _RETRY_MS = 30_000
 _MINUTE = 60_000
 _RECONCILE = 10 * _MINUTE
 _DAY = 24 * 60 * _MINUTE
 _FEEDBACK_QUIET_MS = 15_000
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _ARCHIVE_START_BUDGET = 12
 _ZONE = timezone(timedelta(hours=8))
 _ID = re.compile(r"[1-9][0-9]{0,18}")
@@ -156,8 +157,13 @@ def _recent(cfg, today):
 
 
 def _upsert(target, desired, *, existing=None):
+    if not desired:
+        return 0, 0
+    key_column = target.fields["key"]
+    columns = dict.fromkeys(name for fields in desired.values() for name in fields if name != key_column)
+    lookup = replace(target, fields={"key": key_column, **{name: name for name in columns}})
     if existing is None:
-        existing = sync._existing(target, desired)
+        existing = sync._existing(lookup, desired)
     inserts, updates = [], []
     for key, fields in desired.items():
         row = existing.get(key)
@@ -171,7 +177,7 @@ def _upsert(target, desired, *, existing=None):
     sync._batch(target, "update", updates)
     sync._batch(target, "create", inserts)
     if inserts or updates:
-        confirmed = sync._existing(target, desired)
+        confirmed = sync._existing(lookup, desired)
         if set(confirmed) != set(desired) or any(
             sync._value(confirmed[key]["fields"].get(name)) != sync._value(value)
             for key, fields in desired.items() for name, value in fields.items()
@@ -329,7 +335,9 @@ def _enrich(cfg, desired, state_dir, *, incremental=False, refresh=False, minimu
     if not isinstance(cache, dict):
         raise ValueError("工单摘要缓存无法读取。")
     client = TicketClient(cfg.qiyu)
-    next_cache = dict(cache) if incremental else {}
+    next_cache = ({key: entry for key, entry in cache.items()
+                   if isinstance(entry, dict) and entry.get("version") == _DETAIL_CACHE_VERSION}
+                  if incremental else {})
     names = None
     names_loaded = False
     fetched = failures = deferred = 0
@@ -375,7 +383,10 @@ def _enrich(cfg, desired, state_dir, *, incremental=False, refresh=False, minimu
         columns.update(ticket_history.project(cfg, key, logs, submitter_id=source.get("staffId")))
         row.update(columns)
         next_cache.pop(key, None)
-        next_cache[key] = {"version": _DETAIL_CACHE_VERSION, "stamp": stamp, "fields": columns}
+        entry = {"version": _DETAIL_CACHE_VERSION, "stamp": stamp, "fields": columns}
+        cached_bytes = json.dumps({key: entry}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(cached_bytes) <= _DETAIL_CACHE_ENTRY_BYTES:
+            next_cache[key] = entry
     if len(next_cache) > _DETAIL_CACHE_LIMIT:
         next_cache = dict(list(next_cache.items())[-_DETAIL_CACHE_LIMIT:])
     if next_cache != cache:
@@ -534,7 +545,7 @@ def _incremental_projection(cfg, start, end):
 
 
 def _current_export(target, desired):
-    lookup = replace(target, fields={**target.fields, "closed": ticket_archive.CLOSED_AT})
+    lookup = replace(target, fields={**_FIELDS, "closed": ticket_archive.CLOSED_AT})
     existing = sync._existing(lookup, desired)
     selected = {}
     for key, fields in desired.items():
