@@ -176,6 +176,27 @@ class TestTicketFeishuSync(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "数量不一致"):
                 tickets._pages(object())
 
+    def test_plain_replies_keep_the_original_screenshot_accessible_from_a_cached_record(self):
+        state_dir = Path(self.cfg.runtime.state_dir)
+        rows = tickets._projection(self.cfg, [{"id": "42"}])
+        row = rows["42"]
+        link = row[tickets._FIELDS["source"]]["link"]
+        attachment = {"name": "提报截图.png", "url": "https://shop.qiyukf.net/" + "a" * 32 + ".png"}
+        raw = {"id": 42, "custom": [{"name": "附件/截图", "value": tickets.json.dumps([attachment])}]}
+        logs = [{"id": 1, "actionType": 20, "action": "回复", "info": [{"content": "已确认"}]}]
+        old_columns = {**tickets._summary(raw, None, source_link=link),
+                       **tickets.ticket_history.project(self.cfg, "42", logs)}
+        self.assertIsNone(old_columns["跟进附件"])
+        tickets.support._write_state(state_dir / "ticket-summaries.json", {
+            "42": {"stamp": [row["创建时间"], row["更新时间"], row["工单标题"]], "fields": old_columns},
+        })
+        with patch.object(tickets.TicketClient, "detail") as fetch:
+            self.assertEqual(tickets._enrich(self.cfg, rows, state_dir, incremental=True)["fetched"], 0)
+        fetch.assert_not_called()
+        self.assertEqual(row["跟进附件"], {"text": "查看提报附件", "link": link + "#ticket-form-heading"})
+        self.assertEqual(row["附件/截图"], old_columns["附件/截图"])
+        self.assertEqual(row["最新七鱼跟进"], old_columns["最新七鱼跟进"])
+
     def test_imports_older_technical_reply_and_preserves_input_columns(self):
         source = {"id": "42", "title": "历史工单", "created_at": 1_734_500_000_000, "status_code": 10}
         fields = tickets._projection(self.cfg, [source])["42"]

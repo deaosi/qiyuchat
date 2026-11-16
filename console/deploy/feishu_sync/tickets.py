@@ -267,6 +267,15 @@ def _summary(row, names, *, source_link=None):
     }
 
 
+def _with_submission_attachment(columns, source_link):
+    followup_column = ticket_history.COLUMNS["attachments"]
+    if source_link and columns.get(_FORM["attachment"]) and not columns.get(followup_column):
+        return {**columns, followup_column: {
+            "text": "查看提报附件", "link": source_link + "#ticket-form-heading",
+        }}
+    return columns
+
+
 def _submitters(cfg, desired, staff_ids, state_dir):
     cache_path = state_dir / "ticket-submitters.json"
     cache = support._read_state(cache_path) if cache_path.exists() else {}
@@ -334,13 +343,15 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
     started = monotonic()
     for key, row in desired.items():
         stamp = [row[_FIELDS["created"]], row[_FIELDS["updated"]], row[_FIELDS["title"]]]
+        source_cell = sync._value(row.get(_FIELDS["source"]))
+        source_link = source_cell.get("link") if isinstance(source_cell, dict) else None
         previous = cache.get(key)
         cached = previous.get("fields") if isinstance(previous, dict) else None
         followup = cached.get(ticket_history.COLUMNS["attachments"]) if isinstance(cached, dict) else None
         if (isinstance(cached, dict) and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values())
                 and (followup is None or (isinstance(followup, dict)
                      and ticket_guest.matches_followup(cfg, key, followup.get("link"))))):
-            row.update(cached)
+            row.update(_with_submission_attachment(cached, source_link))
             if not incremental:
                 next_cache[key] = previous
             continue
@@ -357,10 +368,9 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         if not names_loaded:
             names = _private_names(cfg, {})
             names_loaded = True
-        source_cell = sync._value(row.get(_FIELDS["source"]))
-        columns = _summary(source, names, source_link=source_cell.get("link") if isinstance(source_cell, dict) else None)
+        columns = _summary(source, names, source_link=source_link)
         columns.update(ticket_history.project(cfg, key, logs, submitter_id=source.get("staffId")))
-        row.update(columns)
+        row.update(_with_submission_attachment(columns, source_link))
         next_cache.pop(key, None)
         next_cache[key] = {"stamp": stamp, "fields": columns}
     if len(next_cache) > _DETAIL_CACHE_LIMIT:
