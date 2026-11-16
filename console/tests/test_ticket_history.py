@@ -30,11 +30,12 @@ class TicketHistoryTests(unittest.TestCase):
         other_operation = _event(903, 4_000, "普通工单更新不会成为回复", action="更新工单")
         created = {"actionType": 1, "operatorId": 37}
         value = ticket_history.project(self.cfg, "56", [supplemental, edit, created, feishu, supplemental, other_operation])
-        self.assertIn("提报人补充 · 工单经办人\n补充信息\n具体操作如下。\n附件 1 个", value[_C["latest"]])
+        self.assertIn("修改回复 · 工单经办人\n补充信息写明版本号", value[_C["latest"]])
         self.assertNotIn("已复现", value[_C["latest"]])
         timeline = value[_C["history"]]
         self.assertIn("飞书 → 七鱼 · 技术反馈\n处理状态：已复现", timeline)
         self.assertIn("七鱼 → 飞书 · 修改回复", timeline)
+        self.assertIn("提报人补充 · 工单经办人\n补充信息\n具体操作如下。\n附件 1 个", timeline)
         self.assertEqual(timeline.count("具体操作如下。"), 1)
         self.assertLess(timeline.index("已复现"), timeline.index("具体操作如下。"))
         self.assertLess(timeline.index("具体操作如下。"), timeline.index("补充信息写明版本号"))

@@ -93,12 +93,12 @@ class TicketFieldBackfillTests(TestCase):
             follow_up = {"text": "查看跟进附件", "link": link + "#ticket-followup-attachments"}
             row = {"record_id": "recFixture10", "fields": {
                 "网易七鱼工单ID": "10", "点击查看详情": {"text": "查看工单", "link": link},
-                "跟进附件": {"text": "旧链接", "link": "https://qiyu.fanwulink.cn/#tickets?id=10"},
+                "点击查看跟进回复": {"text": "旧链接", "link": "https://qiyu.fanwulink.cn/#tickets?id=10"},
                 "工单往来记录": "既有记录", "回复内容": "保留反馈",
             }}
             other = {"record_id": "recFixture11", "fields": {
                 "网易七鱼工单ID": "11", "点击查看详情": {"text": "查看工单", "link": other_link},
-                "跟进附件": {"text": "人工维护的链接", "link": "https://example.test/attachment"},
+                "点击查看跟进回复": {"text": "人工维护的链接", "link": "https://example.test/attachment"},
             }}
 
             def feishu(target, method, resource, *, params=None, data=None):
@@ -106,11 +106,11 @@ class TicketFieldBackfillTests(TestCase):
                 if resource == "/records/search":
                     conditions = data["filter"]["conditions"]
                     if conditions[0]["operator"] == "isEmpty":
-                        self.assertIn("跟进附件", data["field_names"])
+                        self.assertIn("点击查看跟进回复", data["field_names"])
                         return {"items": [deepcopy(row), deepcopy(other)], "has_more": False}
                     return {"items": [deepcopy(row)], "has_more": False}
                 self.assertEqual(resource, "/records/batch_update")
-                self.assertEqual(data["records"], [{"record_id": "recFixture10", "fields": {"跟进附件": follow_up}}])
+                self.assertEqual(data["records"], [{"record_id": "recFixture10", "fields": {"点击查看跟进回复": follow_up}}])
                 row["fields"].update(data["records"][0]["fields"])
                 return {"records": [{"record_id": "recFixture10"}]}
 
@@ -121,7 +121,7 @@ class TicketFieldBackfillTests(TestCase):
                   patch.object(backfill.TicketClient, "detail") as fetch_detail,
                   patch.object(backfill.TicketClient, "history", return_value=[{}]) as history,
                   patch.object(backfill.ticket_history, "project", return_value={
-                      "跟进附件": follow_up, "工单往来记录": "投影不用于回填",
+                      "点击查看跟进回复": follow_up, "工单往来记录": "投影不用于回填",
                   }) as project,
                   patch.object(sync, "_call", side_effect=feishu)):
                 result = backfill.run(state, attachments_only=True)

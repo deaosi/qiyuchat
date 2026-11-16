@@ -18,7 +18,7 @@ from src.voc_feishu_content import _private_names, _public_text
 from src.voc_service import maintenance
 from src.web import ticket_guest
 from src.web.guest_evidence import PUBLIC_ORIGIN
-from src.web.tickets import TICKET_PRIORITIES, TICKET_STATUSES, _field_value, list_tickets, submitter_names
+from src.web.tickets import TICKET_PRIORITIES, TICKET_STATUSES, _field_value, _millis, list_tickets, submitter_names, ticket_updated_at
 
 
 TABLE_NAME = "七鱼工单"
@@ -28,13 +28,14 @@ MATCH_SIZE = 20
 DETAIL_LIMIT = 12
 DETAIL_BUDGET_SECONDS = 25
 _DETAIL_CACHE_LIMIT = 128
-_DETAIL_CACHE_VERSION = 2
+_DETAIL_CACHE_VERSION = 3
+_DETAIL_BATCH = 4
+_RETRY_MS = 30_000
 _MINUTE = 60_000
 _RECONCILE = 10 * _MINUTE
 _DAY = 24 * 60 * _MINUTE
 _FEEDBACK_QUIET_MS = 15_000
-_SCHEMA_VERSION = 5
-_WORK_SECONDS = 9
+_SCHEMA_VERSION = 6
 _ARCHIVE_START_BUDGET = 12
 _ZONE = timezone(timedelta(hours=8))
 _ID = re.compile(r"[1-9][0-9]{0,18}")
@@ -320,7 +321,7 @@ def _submitters(cfg, desired, staff_ids, state_dir):
             "deferred": deferred, "unavailable": unavailable}
 
 
-def _enrich(cfg, desired, state_dir, *, incremental=False):
+def _enrich(cfg, desired, state_dir, *, incremental=False, refresh=False, minimum_updates=None):
     if not desired:
         return {"fetched": 0, "failed": 0, "deferred": 0}
     cache_path = state_dir / "ticket-summaries.json"
@@ -333,16 +334,17 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
     names_loaded = False
     fetched = failures = deferred = 0
     started = monotonic()
+    minimum_updates = minimum_updates or {}
     for key, row in desired.items():
         stamp = [row[_FIELDS["created"]], row[_FIELDS["updated"]], row[_FIELDS["title"]]]
         previous = cache.get(key)
         cached = previous.get("fields") if isinstance(previous, dict) else None
         followup = cached.get(ticket_history.COLUMNS["attachments"]) if isinstance(cached, dict) else None
-        valid_link = followup is None or (isinstance(followup, dict) and (
-            ticket_guest.matches_followup(cfg, key, followup.get("link"))
-            or ticket_guest.matches_reply(cfg, key, followup.get("link"))))
-        if (isinstance(cached, dict) and previous.get("version") == _DETAIL_CACHE_VERSION
-                and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values()) and valid_link):
+        if (not refresh and isinstance(cached, dict) and previous.get("version") == _DETAIL_CACHE_VERSION
+                and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values())
+                and (followup is None or (isinstance(followup, dict) and (
+                    ticket_guest.matches_followup(cfg, key, followup.get("link"))
+                    or ticket_guest.matches_reply(cfg, key, followup.get("link")))))):
             row.update(cached)
             if not incremental:
                 next_cache[key] = previous
@@ -357,6 +359,14 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         except TicketError:
             failures += 1
             continue
+        if refresh:
+            observed = max(ticket_updated_at(source, logs) or 0, _millis(source.get("createTime")) or 0,
+                           _time(row.get(_FIELDS["created"])) or 0)
+            floor = max(_time(row.get(_FIELDS["updated"])) or 0, minimum_updates.get(key, 0))
+            if observed < floor:
+                deferred += 1
+                continue
+            row[_FIELDS["updated"]] = observed or None
         if not names_loaded:
             names = _private_names(cfg, {})
             names_loaded = True
@@ -563,47 +573,91 @@ def _drain_feedback(cfg, target, queue, lane, now, window, *, baseline=None):
     return result
 
 
-def _drain_exports(cfg, target, queue, state_dir, lane, detail_lane, now, deadline):
+def _drain_details(cfg, target, queue, state_dir, lane, batch, now, *, review_lane=None):
+    details = {"fetched": 0, "failed": 0, "deferred": 0, "updated": 0}
+    submitters = {"fetched": 0, "filled": 0, "pending": 0, "deferred": 0, "unavailable": 0}
+    if not batch:
+        return details, submitters
+    postponed = set()
+    pending_submitters = set()
+    confirmed = {}
+    try:
+        lookup = replace(target, fields={**target.fields, "closed": ticket_archive.CLOSED_AT})
+        existing = sync._existing(lookup, batch)
+        desired = {}
+        minimum_updates = {}
+        for key, row in existing.items():
+            cells = row["fields"]
+            if sync._value(cells.get(ticket_archive.CLOSED_AT)):
+                continue
+            if not _source_matches(cfg, key, cells.get(_FIELDS["source"])):
+                postponed.add(key)
+                continue
+            desired[key] = dict(batch[key]["fields"])
+            minimum_updates[key] = _time(cells.get(_FIELDS["updated"])) or 0
+        if desired:
+            staff_ids = {key: batch[key]["staff_id"] for key in desired}
+            details.update(_enrich(cfg, desired, state_dir, incremental=True, refresh=True,
+                                   minimum_updates=minimum_updates))
+            columns = set(_DETAIL.values())
+            ready = {key: fields for key, fields in desired.items() if columns <= fields.keys()}
+            postponed.update(desired.keys() - ready.keys())
+            if ready:
+                if review_lane is not None:
+                    submitters = _submitters(cfg, ready, staff_ids, state_dir)
+                    pending_submitters = {key for key, fields in ready.items()
+                                          if staff_ids[key] and _FIELDS["submitter"] not in fields}
+                columns.update((_FIELDS["updated"], _FIELDS["submitter"]))
+                writes = {key: {name: value for name, value in fields.items() if name in columns}
+                          for key, fields in ready.items()}
+                _, details["updated"] = _upsert(target, writes, existing=existing)
+                confirmed = {key: batch[key] for key in ready}
+        details["deferred"] = max(details["deferred"], len(postponed))
+        if review_lane is not None:
+            # Schedule one fresh check after the first confirmed write. Repeat discoveries
+            # leave that check's original due time in place, even if a new reply arrives.
+            ticket_work.enqueue(queue, review_lane, confirmed, now_ms=now + _MINUTE, replace_existing=False)
+    except _SYNC_ERRORS:
+        postponed = set(batch)
+        details.update(status="failed", message="本轮工单资料稍后重试。")
+    if postponed:
+        ticket_work.defer(queue, lane, postponed, until_ms=now + _RETRY_MS)
+    pending_submitters.difference_update(postponed)
+    if pending_submitters:
+        ticket_work.defer(queue, lane, pending_submitters, until_ms=now + _RECONCILE)
+    ticket_work.finish(queue, lane, batch.keys() - postponed - pending_submitters)
+    return details, submitters
+
+
+def _drain_exports(cfg, target, queue, state_dir, lane, detail_lane, review_lane, now):
     inserted = updated = 0
-    while monotonic() < deadline:
-        batch = ticket_work.due(queue, lane, now_ms=now, limit=MATCH_SIZE)
-        if not batch:
-            break
+    base_error = False
+    batch = ticket_work.due(queue, lane, now_ms=now, limit=MATCH_SIZE)
+    if batch:
         try:
             desired, existing = _current_export(target, {key: item["fields"] for key, item in batch.items()})
             if desired:
                 created, changed = _upsert(target, desired, existing=existing)
                 inserted += created
                 updated += changed
-                ticket_work.enqueue(queue, detail_lane, {key: batch[key] for key in desired}, now_ms=now)
+            # Existing tickets still need a fresh log read when the search timestamp lags Feishu.
+            active = {key for key, row in existing.items() if not sync._value(row["fields"].get(ticket_archive.CLOSED_AT))}
+            ticket_work.enqueue(queue, detail_lane, {key: batch[key] for key in desired.keys() | active}, now_ms=now)
         except _SYNC_ERRORS:
-            ticket_work.defer(queue, lane, batch, until_ms=now + 2 * _MINUTE)
-            raise
-        ticket_work.finish(queue, lane, batch)
+            ticket_work.defer(queue, lane, batch, until_ms=now + _RETRY_MS)
+            base_error = True
+        else:
+            ticket_work.finish(queue, lane, batch)
 
-    details = {"fetched": 0, "failed": 0, "deferred": 0}
-    submitters = {"fetched": 0, "filled": 0, "pending": 0, "deferred": 0, "unavailable": 0}
-    if monotonic() >= deadline:
-        return inserted, updated, details, submitters
-    batch = ticket_work.due(queue, detail_lane, now_ms=now, limit=3)
-    if not batch:
-        return inserted, updated, details, submitters
-    postponed = set()
-    try:
-        desired, existing = _current_export(target, {key: item["fields"] for key, item in batch.items()})
-        if desired:
-            staff_ids = {key: batch[key]["staff_id"] for key in desired}
-            submitters = _submitters(cfg, desired, staff_ids, state_dir)
-            details = _enrich(cfg, desired, state_dir, incremental=True)
-            _upsert(target, desired, existing=existing)
-            postponed = {key for key, fields in desired.items() if not set(_DETAIL.values()) <= fields.keys()
-                         or (staff_ids[key] is not None and _FIELDS["submitter"] not in fields)}
-    except _SYNC_ERRORS:
-        postponed = set(batch)
-        details = {"status": "failed", "message": "本轮工单资料稍后重试。"}
-    if postponed:
-        ticket_work.defer(queue, detail_lane, postponed, until_ms=now + _RECONCILE)
-    ticket_work.finish(queue, detail_lane, batch.keys() - postponed)
+    fresh = ticket_work.due(queue, detail_lane, now_ms=now, limit=_DETAIL_BATCH)
+    details, submitters = _drain_details(cfg, target, queue, state_dir, detail_lane, fresh, now, review_lane=review_lane)
+    verification = ticket_work.due(queue, review_lane, now_ms=now, limit=_DETAIL_BATCH)
+    checked, _ = _drain_details(cfg, target, queue, state_dir, review_lane, verification, now)
+    for name in ("fetched", "failed", "deferred", "updated"):
+        details[name] += checked[name]
+    details["rechecked"] = checked["fetched"]
+    if base_error or checked.get("status") == "failed":
+        details.update(status="failed", message="本轮工单资料稍后重试。")
     return inserted, updated, details, submitters
 
 
@@ -696,8 +750,8 @@ def run(state_dir, *, incremental=False):
         feedback_start = _recent_checkpoint(
             state, "feishu_until", feedback_end, _MINUTE, _RECONCILE * 2 if retry_feedback else None)
         queue = state_dir / "ticket-work.db"
-        inbound, outbound, details_lane = (f"{direction}:{target.table_id}"
-                                           for direction in ("feedback", "records", "details"))
+        inbound, outbound, details_lane, review_lane = (f"{direction}:{target.table_id}"
+                                                        for direction in ("feedback", "records", "details", "verification"))
         try:
             if incremental:
                 pending_scan = state.get("feedback_scan")
@@ -727,6 +781,7 @@ def run(state_dir, *, incremental=False):
             setup["feedback_header_baseline"] = baseline
             support._write_state(setup_path, setup)
         previous_qiyu = state.get("qiyu_until", 0)
+        source_error = ""
         try:
             if incremental:
                 start = _recent_checkpoint(state, "qiyu_until", now, _MINUTE,
@@ -741,18 +796,25 @@ def run(state_dir, *, incremental=False):
                 end = now
                 desired, coverage, staff_ids = _recent(cfg, datetime.now(_ZONE).date())
         except TicketError as exc:
-            raise sync.SyncError("无法读取七鱼工单，请核对七鱼接口状态或权限。", exc.http_status) from None
+            source_error = "无法读取七鱼工单增量，下一轮继续读取。"
+            if not incremental:
+                raise sync.SyncError(source_error, exc.http_status) from None
+            desired, staff_ids = {}, {}
+            end = previous_qiyu if type(previous_qiyu) is int and previous_qiyu > 0 else start
+            coverage = {"created_scope": "qiyu", "updated_scope": "qiyu",
+                        "created_period": [start, end], "updated_period": [start, end]}
         if maintenance(cfg):
             return {"status": "maintenance"}
         if incremental:
             ticket_work.enqueue(queue, outbound, {key: {"fields": fields, "staff_id": staff_ids[key]}
                                                  for key, fields in desired.items()}, now_ms=now)
-            state["qiyu_until"] = max(end, previous_qiyu) if type(previous_qiyu) is int else end
-            if reconcile:
-                state["reconciled_at"] = now
-            support._write_state(state_path, state)
+            if not source_error:
+                state["qiyu_until"] = max(end, previous_qiyu) if type(previous_qiyu) is int else end
+                if reconcile:
+                    state["reconciled_at"] = now
+                support._write_state(state_path, state)
             inserted, changed, details, submitters = _drain_exports(
-                cfg, target, queue, state_dir, outbound, details_lane, now, monotonic() + _WORK_SECONDS,
+                cfg, target, queue, state_dir, outbound, details_lane, review_lane, now,
             )
         else:
             submitters = _submitters(cfg, desired, staff_ids, state_dir)
@@ -771,7 +833,7 @@ def run(state_dir, *, incremental=False):
         archive = {}
         if (incremental and monotonic() - started < _ARCHIVE_START_BUDGET
                 and now - state.get("history_reconciled_at", 0) >= _DAY
-                and not desired and not feedback.get("checked")
+                and not source_error and not desired and not feedback.get("checked")
                 and feedback.get("status") != "failed"):
             try:
                 # Review older updates in a bounded slice without advancing the live cursor.
@@ -779,7 +841,7 @@ def run(state_dir, *, incremental=False):
                 older, history_coverage, older_staff = _incremental_projection(cfg, history_start, now)
                 ticket_work.enqueue(queue, outbound, {
                     key: {"fields": fields, "staff_id": older_staff[key]} for key, fields in older.items()
-                }, now_ms=now)
+                }, now_ms=now, replace_existing=False)
                 history_end = history_coverage["created_period"][1]
                 state["history_until"] = history_end + 1 if history_end < now else 0
                 if history_end == now:
@@ -805,7 +867,7 @@ def run(state_dir, *, incremental=False):
                 state["archive_retry_at"] = now + _RECONCILE
                 support._write_state(state_path, state)
     status = "partial" if (
-        "linked" in (coverage["created_scope"], coverage["updated_scope"])
+        source_error or "linked" in (coverage["created_scope"], coverage["updated_scope"])
         or feedback.get("status") == "failed" or feedback.get("failed") or feedback.get("awaiting_review")
         or details.get("status") == "failed" or details.get("failed") or details.get("deferred")
         or submitters.get("status") == "failed" or submitters.get("pending")
@@ -814,10 +876,12 @@ def run(state_dir, *, incremental=False):
     return {"status": status, "tickets": len(desired), "created": inserted, "updated": changed,
             "url": target.destination, "historical_guest_links_updated": migrated,
             "details": details, "feedback": feedback, "submitters": submitters,
-            **({"incremental": True, "reconciled": reconcile, "daily": daily,
+            **({"source_error": source_error} if source_error else {}),
+            **({"incremental": True, "reconciled": reconcile and not source_error, "daily": daily,
                 "archive": {key: value for key, value in archive.items() if key != "next_cursor"},
                 "queued": {name: ticket_work.count(queue, lane) for name, lane in
-                           (("feedback", inbound), ("records", outbound), ("details", details_lane))},
+                           (("feedback", inbound), ("records", outbound), ("details", details_lane),
+                            ("verification", review_lane))},
                 "qiyu_lag_seconds": round((now - end) / 1000, 3),
                 "duration_seconds": round((time() * 1000 - now) / 1000, 3)} if incremental else {}),
             **coverage}

@@ -9,7 +9,7 @@ from src.qiyu.ticket import _id
 from src.web import ticket_guest, ticket_media, tickets
 
 
-COLUMNS = {"latest": "最新七鱼跟进", "history": "工单往来记录", "attachments": "跟进附件"}
+COLUMNS = {"latest": "最新七鱼跟进", "history": "工单往来记录", "attachments": "点击查看跟进回复"}
 _ZONE = timezone(timedelta(hours=8))
 _REPLY_ACTION = re.compile(r"(?:(?:工单|追加|补充)?回复(?:了?工单)?|repl(?:y|ied)(?: to (?:the )?ticket)?)", re.I)
 _REPLY_FIELD = re.compile(r"(?:(?:工单)?回复(?:内容|工单)?|comment|reply)", re.I)
@@ -120,7 +120,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
             has_attachments |= bool(_attached_count(ticket_guest.followup_media(entry)))
             if not has_native_reply and message:
                 has_native_reply = bool(ticket_guest.native_followup_text(entry))
-            if not latest and role != "修改回复":
+            if not latest:
                 latest = "\n".join(part for part in (header, _shorten(message, _MAX_LATEST), marker) if part)
         summary = "\n".join(part for part in (header, _shorten(message, _MAX_REPLY), marker) if part)
         if omitted or len(entries) >= _MAX_REPLIES or history_length + len(summary) + 2 > _MAX_HISTORY:

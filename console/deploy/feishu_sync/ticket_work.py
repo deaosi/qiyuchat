@@ -43,7 +43,8 @@ def _database(path: Path):
         raise ValueError("工单同步队列暂不可用。") from None
 
 
-def enqueue(path: Path, lane: str, entries: dict[str, dict], *, now_ms: int, expedite_changes: bool = True) -> None:
+def enqueue(path: Path, lane: str, entries: dict[str, dict], *, now_ms: int,
+            expedite_changes: bool = True, replace_existing: bool = True) -> None:
     """Coalesce by ticket ID. An identical replay retains its existing retry time."""
     if not entries:
         return
@@ -54,9 +55,10 @@ def enqueue(path: Path, lane: str, entries: dict[str, dict], *, now_ms: int, exp
                 payload = excluded.payload,
                 ready_at = CASE WHEN ? THEN min(ticket_work.ready_at, excluded.ready_at)
                                 ELSE ticket_work.ready_at END
-            WHERE ticket_work.payload <> excluded.payload
+            WHERE ? AND ticket_work.payload <> excluded.payload
         """, ((lane, key, json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-                                    allow_nan=False), now_ms, expedite_changes) for key, value in entries.items()))
+                                    allow_nan=False), now_ms, expedite_changes, replace_existing)
+              for key, value in entries.items()))
 
 
 def due(path: Path, lane: str, *, now_ms: int, limit: int) -> dict[str, dict]:

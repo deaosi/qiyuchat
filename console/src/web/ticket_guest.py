@@ -55,7 +55,7 @@ _LABELED_SECRET = re.compile(
 )
 _REDACTION = re.compile(r"\[(?:名称|链接|标识)已隐藏\]|\[(?:详细地址)?已脱敏\]")
 _MAX_MEDIA = 40
-_MAX_REPLY_COUNT = 12
+_MAX_REPLY_COUNT = 100
 _MAX_REPLY_TEXT = 1200
 _MAX_LINKED_SESSIONS = 20
 _TICKET_TIMELINE_ACTIONS = frozenset({1, 2, 5, 6, 10, 15, 25, 40, 45, 50, 55, 60, 61, 65, 100})
@@ -432,12 +432,19 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
 
     source_logs = logs or []
     followups = []
+    replies_truncated = False
     if scope in _SCOPE_FRAGMENTS:
         seen = set()
         ordered_logs = sorted(source_logs, key=lambda entry: tickets._millis(entry.get("time")) or 0, reverse=True)
         for entry in ordered_logs:
             text = native_followup_text(entry) if scope == "replies" else ""
-            images, attachments = scoped_links(followup_media(entry))
+            sources = followup_media(entry)
+            if scope == "replies" and len(followups) >= _MAX_REPLY_COUNT:
+                if text or next(ticket_media.source_items(sources), None) is not None:
+                    replies_truncated = True
+                    break
+                continue
+            images, attachments = scoped_links(sources)
             fresh_images, fresh_attachments = [], []
             for items, fresh in ((images, fresh_images), (attachments, fresh_attachments)):
                 for item in items:
@@ -452,8 +459,6 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
                     item["text"] = text
                 followups.append(item)
             if scope == "attachments" and len(media) >= _MAX_MEDIA:
-                break
-            if scope == "replies" and len(followups) >= _MAX_REPLY_COUNT:
                 break
     history = [{**entry, "info": _public_raw_fields(entry.get("info"), history=True)}
                for entry in _visible_history(source_logs)]
@@ -484,6 +489,8 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
         payload["followup_attachments"] = followups
     elif scope == "replies":
         payload["followup_replies"] = list(reversed(followups))
+        if replies_truncated:
+            payload["followup_replies_truncated"] = True
     if cfg is not None and (identifier := _id(raw.get("id"))) is not None:
         payload["sessions"] = _shared_sessions(cfg, identifier, names, scoped_links)
         payload["technical_feedback"] = _shared_feedback(cfg, identifier, names)

@@ -49,3 +49,15 @@ class TestTicketWork(TestCase):
         with self.assertRaises(TypeError):
             ticket_work.enqueue(self.path, "out", {"2": {}, "3": {"unserializable": object()}}, now_ms=20)
         self.assertEqual(ticket_work.due(self.path, "out", now_ms=30, limit=10), {"1": {"title": "问题"}})
+
+    def test_historical_replay_fills_missing_work_without_replacing_live_work(self):
+        latest = {"1": {"status": "已解决", "updated_at": 300}}
+        ticket_work.enqueue(self.path, "out", latest, now_ms=10)
+        ticket_work.defer(self.path, "out", ["1"], until_ms=100)
+        historical = {"1": {"status": "处理中", "updated_at": 200}, "2": {"status": "处理中", "updated_at": 200}}
+        ticket_work.enqueue(self.path, "out", historical, now_ms=20, replace_existing=False)
+
+        self.assertEqual(ticket_work.due(self.path, "out", now_ms=20, limit=10), {"2": historical["2"]})
+        ticket_work.finish(self.path, "out", ["2"])
+        self.assertEqual(ticket_work.next_due(self.path, "out"), 100)
+        self.assertEqual(ticket_work.due(self.path, "out", now_ms=100, limit=10), latest)

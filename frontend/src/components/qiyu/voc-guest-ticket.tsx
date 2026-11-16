@@ -44,6 +44,7 @@ export type GuestTicketPayload = {
   technical_feedback?: Omit<TechnicalFeedback, 'error' | 'feishu_url'> | null
   followup_attachments?: GuestFollowup[]
   followup_replies?: GuestFollowup[]
+  followup_replies_truncated?: boolean
 }
 
 const ticketPath = /^\/guest\/ticket\/[A-Za-z0-9_-]{43}$/
@@ -51,7 +52,7 @@ const imageId = /^[a-f0-9]{64}$/
 const attachmentAnchor = 'ticket-followup-attachments'
 const replyAnchor = 'ticket-followup-replies'
 
-export function VocGuestTicket({ ticket, history, history_available, sessions, technical_feedback, followup_attachments, followup_replies }: GuestTicketPayload) {
+export function VocGuestTicket({ ticket, history, history_available, sessions, technical_feedback, followup_attachments, followup_replies, followup_replies_truncated }: GuestTicketPayload) {
   const path = window.location.pathname
   const followupAnchor = followup_replies ? replyAnchor : attachmentAnchor
   const followupLabel = followup_replies ? '工单跟进' : '跟进附件'
@@ -118,6 +119,7 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
           }} />}
           {followups && <section className="space-y-2" aria-labelledby={followupAnchor}>
             <h2 id={followupAnchor} ref={followupHeading} tabIndex={-1} className="scroll-mt-4 text-sm font-semibold">{followupLabel}</h2>
+            {followup_replies && followup_replies_truncated && <p className="text-sm text-muted-foreground">仅展示最近 {followups.length} 条跟进。</p>}
             {followups.length ? <ul className="divide-y rounded-lg border">
               {followups.map((item, index) => <li className="space-y-2 p-4" key={`${item.time}-${index}`}>
                 <p className="text-xs tabular-nums text-muted-foreground">{ticketTime(item.time)}</p>

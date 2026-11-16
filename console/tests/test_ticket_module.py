@@ -467,6 +467,27 @@ class TicketModuleTests(LocalFixture):
             for hidden in ("此备注不可见", "testSecret", "私密内容.pdf", "语海同步", "source-token"):
                 self.assertNotIn(hidden, str(reply_payload))
 
+    def test_reply_guest_view_keeps_latest_hundred_and_flags_earlier_replies(self):
+        detail = {"id": 581001, "title": "工单标题"}
+        base_time = 1794537200000
+        logs = [
+            {"id": 1234500 + index, "time": base_time + index * 1000, "actionType": 20,
+             "action": "回复", "customerSee": False, "info": [{"content": f"跟进内容 {index}"}]}
+            for index in range(101)
+        ]
+        attachment = {"id": 1234499, "time": base_time - 1000, "actionType": 20, "action": "回复",
+                      "customerSee": False, "attachments": [{
+                          "name": "旧回复截图.png", "url": "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef.png",
+                      }]}
+        exact, _ = ticket_guest._project(detail, "A" * 43, logs=logs[1:], scope="replies")
+        self.assertNotIn("followup_replies_truncated", exact)
+        clipped, media = ticket_guest._project(detail, "A" * 43, logs=[attachment, *logs[1:]], scope="replies")
+        self.assertTrue(clipped["followup_replies_truncated"])
+        self.assertEqual(clipped["followup_replies"], exact["followup_replies"])
+        self.assertEqual([entry["text"] for entry in clipped["followup_replies"]],
+                         [f"跟进内容 {index}" for index in range(1, 101)])
+        self.assertFalse(media)
+
     def test_guest_ticket_keeps_readable_overlapping_public_values(self):
         detail = {
             "id": 581010,

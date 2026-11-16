@@ -159,7 +159,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertIn("补充了现场截图", row["最新七鱼跟进"])
         self.assertLess(row["工单往来记录"].index("请提供截图"), row["工单往来记录"].index("补充了现场截图"))
         self.assertNotIn("语海同步", row["工单往来记录"])
-        self.assertTrue(tickets.ticket_guest.matches_reply(self.cfg, "42", row["跟进附件"]["link"]))
+        self.assertTrue(tickets.ticket_guest.matches_reply(self.cfg, "42", row["点击查看跟进回复"]["link"]))
         legacy = tickets._summary({"id": 42, "content": "原生工单描述"}, None, source_link=link)
         self.assertEqual(legacy["问题需求"], "原生工单描述")
         self.assertEqual(legacy["客户群名称"], "")
@@ -320,6 +320,58 @@ class TestTicketFeishuSync(unittest.TestCase):
         with patch.object(sync, "_call", side_effect=self.fake_api):
             selected, _ = tickets._current_export(self.target, desired)
         self.assertEqual(set(selected), {"44"})
+
+    def test_same_timestamp_replies_and_late_attachment_are_reconciled_after_write_timeout(self):
+        queue = Path(self.cfg.runtime.state_dir) / "ticket-work.db"
+        state = queue.parent
+        now = 1794648722000
+        old = {"id": "42", "created_at": now - 10_000, "updated_at": now - 2000, "status_code": 10}
+        projected = tickets._projection(self.cfg, [old])
+        row = {**projected["42"], "更新时间": now, "状态": "已完结"}
+        self.rows["42"] = {"record_id": "recFixture42", "fields": row}
+        work = {"42": {"fields": projected["42"], "staff_id": None}}
+        first = {"id": 7, "actionType": 20, "action": "回复", "time": now,
+                 "info": [{"content": "第一轮回复"}]}
+        second = {"id": 8, "actionType": 20, "action": "回复", "time": now,
+                  "info": [{"content": "第二轮回复"}]}
+        attachment = {"name": "截图.png", "url": "https://shop.qiyukf.net/" + "a" * 32 + ".png"}
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(tickets.TicketClient, "detail", return_value={"id": 42, "createTime": now - 10_000}),
+              patch.object(tickets.TicketClient, "history", return_value=[first]) as history):
+            self.assertEqual(tickets._enrich(self.cfg, projected, state)["failed"], 0)
+            history.return_value = [first, second]
+            # Simulate a cached first reply even though the new reply has an identical source timestamp.
+            work["42"]["fields"] = tickets._projection(self.cfg, [old])["42"]
+            tickets.ticket_work.enqueue(queue, "records", work, now_ms=now)
+            _, _, result, _ = tickets._drain_exports(self.cfg, self.target, queue, state, "records", "details", "check", now)
+            self.assertEqual(result["updated"], 1)
+            self.assertIn("第二轮回复", row["最新七鱼跟进"])
+            self.assertIn("第一轮回复", row["工单往来记录"])
+            self.assertEqual(row["状态"], "已完结")
+            self.assertEqual(row["更新时间"], now)
+            self.assertEqual(tickets.ticket_work.count(queue, "details"), 0)
+            self.assertEqual(tickets.ticket_work.count(queue, "check"), 1)
+
+            # A successful HTTP response can arrive too late for the client. Confirm by reread.
+            with patch.object(sync, "_call") as rpc:
+                def timeout_after_write(*args, **kwargs):
+                    result = self.fake_api(*args, **kwargs)
+                    if args[2] == "/records/batch_update":
+                        raise sync.SyncError("模拟写入后超时")
+                    return result
+                rpc.side_effect = timeout_after_write
+                history.return_value = [first, {**second, "attachments": [attachment]}]
+                _, _, result, _ = tickets._drain_exports(
+                    self.cfg, self.target, queue, state, "records", "details", "check", now + 60_000)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(tickets.ticket_work.next_due(queue, "check"), now + 90_000)
+            self.assertEqual(row["点击查看跟进回复"]["text"], "查看回复和附件")
+            _, _, result, _ = tickets._drain_exports(self.cfg, self.target, queue, state, "records", "details",
+                                                     "check", now + 90_000)
+            self.assertEqual(result["updated"], 0)
+            self.assertNotIn("status", result)
+            self.assertEqual(tickets.ticket_work.count(queue, "check"), 0)
+            self.assertEqual(len(self.rows), 1)
 
     def test_auto_close_only_changes_status_and_close_time(self):
         archive = tickets.ticket_archive
