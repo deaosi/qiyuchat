@@ -23,7 +23,7 @@ from .. import ticket_feedback, voc_feishu_content, voc_feishu_sync
 from ..model_protocol import ModelProtocolError
 from ..local import MAX_FILE_BYTES, clean_local, import_file, parse_import, template_bytes
 from ..log import get
-from . import admin_keys, api, case_media, guest_evidence, ticket_guest, ticket_media, tickets
+from . import admin_keys, api, case_media, feishu_robot, guest_evidence, ticket_guest, ticket_media, tickets
 
 log = get("web")
 STATIC = Path(__file__).parent / "static"
@@ -32,6 +32,15 @@ LOGIN_LANDSCAPE = Path(__file__).with_name("login-landscape.js")
 PANEL_PAGE = Path(__file__).with_name("panel.html")
 PANEL_SCRIPT = Path(__file__).with_name("panel.js")
 PANEL_PATHS = frozenset(("/panel", "/panel.js", "/api/panel/keys"))
+FEISHU_ROBOT_PAGE = "/feishu-robot"
+FEISHU_ROBOT_ASSETS = {
+    FEISHU_ROBOT_PAGE: ("feishu-robot.html", "text/html; charset=utf-8"),
+    "/feishu-robot.js": ("feishu-robot.js", "text/javascript; charset=utf-8"),
+    "/feishu-robot.css": ("feishu-robot.css", "text/css; charset=utf-8"),
+}
+FEISHU_ROBOT_ACCESS = "/api/feishu-robot/access"
+FEISHU_ROBOT_STATUS = "/api/feishu-robot/status"
+FEISHU_ROBOT_PATHS = frozenset((*FEISHU_ROBOT_ASSETS, FEISHU_ROBOT_ACCESS, FEISHU_ROBOT_STATUS))
 SESSION_AGE = 30 * 86400
 MANAGED_SESSION = re.compile(r"s1\.([a-f0-9]{32})\.([0-9]{1,12})\.([a-f0-9]{32})\.([a-f0-9]{64})")
 TICKET_LOGIN_TARGET = re.compile(r"/#tickets\?id=[1-9][0-9]{0,18}")
@@ -231,13 +240,14 @@ class Handler(BaseHTTPRequestHandler):
         payload = f"s1.{key_id}.{int(time.time()) + SESSION_AGE}.{secrets.token_hex(16)}"
         return f"{payload}.{self._sign_managed_session(payload)}"
 
-    def _managed_session_ok(self, value: str) -> bool:
+    def _managed_session_id(self, value: str) -> str | None:
         match = MANAGED_SESSION.fullmatch(value)
         if not match or int(match[2]) <= time.time():
-            return False
+            return None
         payload, _, signature = value.rpartition(".")
-        return (hmac.compare_digest(self._sign_managed_session(payload), signature)
-                and self.server.key_store.active_id(match[1]))
+        if hmac.compare_digest(self._sign_managed_session(payload), signature) and self.server.key_store.active_id(match[1]):
+            return match[1]
+        return None
 
     def _cookie_value(self, name: str) -> str:
         for part in self.headers.get("Cookie", "").split(";"):
@@ -284,14 +294,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _login_html(self, error: str = "", panel: bool = False, next_ticket: str = "") -> bytes:
+    @staticmethod
+    def _login_destination(values: list[str]) -> str:
+        if len(values) != 1:
+            return ""
+        destination = values[0]
+        if destination in ("/panel", FEISHU_ROBOT_PAGE) or TICKET_LOGIN_TARGET.fullmatch(destination):
+            return destination
+        return ""
+
+    def _login_html(self, error: str = "", destination: str = "") -> bytes:
         template = LOGIN_PAGE.read_text(encoding="utf-8")
-        destination = "/panel" if panel else next_ticket
         next_field = f'      <input type="hidden" name="next" value="{escape(destination)}">\n' if destination else ""
         return template.replace("<!--LOGIN_ERROR-->", escape(error)).replace("      <!--LOGIN_NEXT-->\n", next_field).encode("utf-8")
 
-    def _send_login(self, error: str = "", status: int = 401, *, panel: bool = False, next_ticket: str = "") -> None:
-        self._send(self._login_html(error, panel, next_ticket), "text/html; charset=utf-8", status)
+    def _send_login(self, error: str = "", status: int = 401, *, destination: str = "") -> None:
+        self._send(self._login_html(error, destination), "text/html; charset=utf-8", status)
 
     def _panel_forbidden(self, *, page: bool = False) -> None:
         message = "此页面仅对使用恒密钥登录的管理员开放。"
@@ -307,16 +325,57 @@ class Handler(BaseHTTPRequestHandler):
         presented = self.headers.get("X-Admin-Key", "").strip() or self._cookie_value(self.COOKIE)
         if self._permanent_key_ok(presented):
             return True
-        if presented and not (self._managed_session_ok(presented) or self.server.key_store.identify(presented)):
+        if presented and not (self._managed_session_id(presented) or self.server.key_store.identify(presented)):
             self._note_fail()
             if self._rate_limited():
                 self._json({"error": "尝试次数过多，请 10 分钟后再试"}, 429)
                 return False
         if path == "/panel" and not presented:
-            self._send_login("请使用恒密钥登录密钥管理。", panel=True)
+            self._send_login("请使用恒密钥登录密钥管理。", destination="/panel")
         else:
             self._panel_forbidden(page=path == "/panel")
         return False
+
+    def _feishu_robot_forbidden(self, path: str) -> None:
+        message = "恒管理员尚未开放此密钥的飞书机器人访问权限。"
+        if path == FEISHU_ROBOT_PAGE:
+            self._send(message.encode("utf-8"), "text/plain; charset=utf-8", 403)
+        else:
+            self._json({"error": message}, 403)
+
+    def _feishu_robot_get(self, path: str) -> None:
+        if not self._need_auth():
+            self._json({"error": "飞书机器人管理需要启用管理员密钥。"}, 403)
+            return
+        header = self.headers.get("X-Admin-Key", "").strip()
+        presented = header or self._cookie_value(self.COOKIE)
+        permanent = self._permanent_key_ok(presented)
+        key_id = None
+        if not permanent:
+            if header:
+                key_id = self.server.key_store.identify(header)
+            else:
+                key_id = self._managed_session_id(presented)
+        if not (permanent or key_id):
+            if presented:
+                self._note_fail()
+            if self._rate_limited():
+                self._json({"error": "尝试次数过多，请 10 分钟后再试"}, 429)
+            elif path == FEISHU_ROBOT_PAGE:
+                self._redirect("/login?next=" + quote(FEISHU_ROBOT_PAGE, safe=""))
+            else:
+                self._json({"error": "未登录或密钥不正确"}, 401)
+            return
+        allowed = permanent or bool(key_id and self.server.key_store.has_feishu_access(key_id))
+        if path == FEISHU_ROBOT_ACCESS:
+            self._json({"allowed": allowed})
+        elif not allowed:
+            self._feishu_robot_forbidden(path)
+        elif path == FEISHU_ROBOT_STATUS:
+            self._json(feishu_robot.status(self.server.cfg, include_settings=permanent))
+        else:
+            filename, content_type = FEISHU_ROBOT_ASSETS[path]
+            self._send(Path(__file__).with_name(filename).read_bytes(), content_type)
 
     def _gate(self, path: str, qs: dict[str, list[str]]) -> bool:
         """返回 True = 放行；False = 已经回过响应，调用方直接返回。"""
@@ -338,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
         key_id = None
         if not permanent and not from_cookie and not from_query:
             key_id = self.server.key_store.identify(presented)
-        if permanent or key_id or (from_cookie and self._managed_session_ok(presented)):
+        if permanent or key_id or (from_cookie and self._managed_session_id(presented)):
             if from_query:
                 # 地址栏里的密钥换成 Cookie，避免留在历史记录/日志里
                 self._redirect(path, self._cookie_header(presented))
@@ -377,13 +436,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             path, qs = unquote(u.path), parse_qs(u.query, max_num_fields=30)
             if path == "/login":
-                self._send_login(status=200)
+                self._send_login(status=200, destination=self._login_destination(qs.get("next", [])))
                 return
             if path == "/login-landscape.js":
                 self._send(LOGIN_LANDSCAPE.read_bytes(), "text/javascript; charset=utf-8")
                 return
             if path == "/logout":
                 self._redirect("/login", f"{self.COOKIE}=; Path=/; Max-Age=0; HttpOnly")
+                return
+            if path in FEISHU_ROBOT_PATHS:
+                self._feishu_robot_get(path)
                 return
             if not self._gate(path, qs):
                 return
@@ -719,26 +781,26 @@ class Handler(BaseHTTPRequestHandler):
         data = self.rfile.read(length).decode("utf-8", "replace")
         form = parse_qs(data, max_num_fields=10)
         key = (form.get("key") or [""])[0].strip()
-        next_values = form.get("next", [])
-        panel = next_values == ["/panel"]
-        next_ticket = next_values[0] if len(next_values) == 1 and TICKET_LOGIN_TARGET.fullmatch(next_values[0]) else ""
+        destination = self._login_destination(form.get("next", []))
         if not self._need_auth():
-            self._redirect(next_ticket or "/")
+            self._redirect(destination if TICKET_LOGIN_TARGET.fullmatch(destination) else "/")
             return
         if self._permanent_key_ok(key):
-            self._redirect("/panel" if panel else next_ticket or "/", self._cookie_header(key))
+            self._redirect(destination or "/", self._cookie_header(key))
             return
         if key_id := self.server.key_store.identify(key):
-            if panel:
+            if destination == "/panel":
                 self._panel_forbidden(page=True)
+            elif destination == FEISHU_ROBOT_PAGE and not self.server.key_store.has_feishu_access(key_id):
+                self._feishu_robot_forbidden(destination)
             else:
-                self._redirect(next_ticket or "/", self._cookie_header(self._managed_session(key_id)))
+                self._redirect(destination or "/", self._cookie_header(self._managed_session(key_id)))
             return
         self._note_fail()
         if self._rate_limited():
-            self._send_login("尝试次数过多，请 10 分钟后再试", 429, panel=panel, next_ticket=next_ticket)
+            self._send_login("尝试次数过多，请 10 分钟后再试", 429, destination=destination)
             return
-        self._send_login("密钥不正确", panel=panel, next_ticket=next_ticket)
+        self._send_login("密钥不正确", destination=destination)
 
     def _panel_write(self, data: bytes) -> None:
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -757,6 +819,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(store.update(body))
             elif action == "revoke":
                 self._json(store.revoke(body))
+            elif action == "feishu_access":
+                self._json(store.set_feishu_access(body))
             else:
                 raise ValueError("未知密钥管理操作。")
         except admin_keys.MissingKey as exc:
@@ -774,6 +838,9 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(u.query, max_num_fields=30)
             if path == "/login":
                 self._handle_login()
+                return
+            if path in FEISHU_ROBOT_PATHS:
+                self._send(b"", "text/plain; charset=utf-8", 405, extra={"Allow": "GET"})
                 return
             if not self._gate(path, qs):
                 return

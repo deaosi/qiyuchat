@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { ArrowDownToLine, ArrowLeft, BookOpen, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, FileText, History, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Ticket, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft, BookOpen, Bot, CalendarDays, CircleHelp, CirclePlus, FileSpreadsheet, FileText, History, LayoutDashboard, Layers3, ListFilter, LoaderCircle, LogOut, MessagesSquare, MessageSquareText, Moon, Settings2, ShieldCheck, Sun, Ticket, Upload, UsersRound, ContactRound, ChartNoAxesCombined, RefreshCw, SearchX, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
@@ -59,13 +59,22 @@ const readView = (): View => { const id = location.hash.slice(1).split('?')[0]; 
 const readCustomerGroup = (): string => readView() === 'customers' && typeof history.state?.customerGroup === 'string' ? history.state.customerGroup : ''
 const numberText = (value: unknown) => typeof value === 'number' ? value.toLocaleString('zh-CN') : '—'
 
-const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport }: { view: View; total?: number; navigate: (view: View) => void; onImport: () => void }) {
+const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport, showFeishuRobot }: { view: View; total?: number; navigate: (view: View) => void; onImport: () => void; showFeishuRobot: boolean }) {
   const { setOpenMobile } = useSidebar()
   const activePage = view === 'clusters' ? 'cleaning' : view
   return <Sidebar collapsible="offcanvas" variant="inset">
     <SidebarHeader className="border-b px-4 py-4"><div className="flex h-7 items-center justify-between gap-2"><span className="text-base font-semibold tracking-tight">语海Voc</span><Badge variant="outline" className="text-[10px] font-normal">工作台</Badge></div></SidebarHeader>
     <SidebarContent className="gap-1 pt-2">{sidebarGroups.map(group => <SidebarGroup key={group}><SidebarGroupLabel>{group}</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{sidebarPages.filter(item => item.group === group).map(item => <SidebarMenuItem key={item.id}><SidebarMenuButton isActive={activePage === item.id} onClick={() => { navigate(item.id); setOpenMobile(false) }} tooltip={item.title}><item.icon /><span>{item.title}</span>{item.id === 'pairs' && total !== undefined && <span className="ml-auto text-xs tabular-nums text-muted-foreground">{total.toLocaleString('zh-CN')}</span>}</SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup>)}
-      <SidebarGroup className="mt-auto"><SidebarGroupLabel>系统设置</SidebarGroupLabel><SidebarGroupContent><SidebarMenu><SidebarMenuItem><SidebarMenuButton isActive={view === 'settings'} onClick={() => { navigate('settings'); setOpenMobile(false) }} tooltip="模型网关"><SlidersHorizontal /><span>模型网关</span></SidebarMenuButton></SidebarMenuItem><SidebarMenuItem><SidebarMenuButton onClick={onImport}><CirclePlus /><span>导入会话数据</span></SidebarMenuButton></SidebarMenuItem><SidebarMenuItem><SidebarMenuButton onClick={() => toast.info('统计按业务会话中的有效问答计算；有回复不代表已解决。')}><CircleHelp /><span>统计说明</span></SidebarMenuButton></SidebarMenuItem><SidebarMenuItem><SidebarMenuButton asChild><a href="/logout"><LogOut /><span>退出登录</span></a></SidebarMenuButton></SidebarMenuItem></SidebarMenu></SidebarGroupContent></SidebarGroup>
+      <SidebarGroup className="mt-auto">
+        <SidebarGroupLabel>系统设置</SidebarGroupLabel>
+        <SidebarGroupContent><SidebarMenu>
+          <SidebarMenuItem><SidebarMenuButton isActive={view === 'settings'} onClick={() => { navigate('settings'); setOpenMobile(false) }} tooltip="模型网关"><SlidersHorizontal /><span>模型网关</span></SidebarMenuButton></SidebarMenuItem>
+          {showFeishuRobot && <SidebarMenuItem><SidebarMenuButton asChild tooltip="飞书机器人"><a href="/feishu-robot"><Bot /><span>飞书机器人</span></a></SidebarMenuButton></SidebarMenuItem>}
+          <SidebarMenuItem><SidebarMenuButton onClick={onImport}><CirclePlus /><span>导入会话数据</span></SidebarMenuButton></SidebarMenuItem>
+          <SidebarMenuItem><SidebarMenuButton onClick={() => toast.info('统计按业务会话中的有效问答计算；有回复不代表已解决。')}><CircleHelp /><span>统计说明</span></SidebarMenuButton></SidebarMenuItem>
+          <SidebarMenuItem><SidebarMenuButton asChild><a href="/logout"><LogOut /><span>退出登录</span></a></SidebarMenuButton></SidebarMenuItem>
+        </SidebarMenu></SidebarGroupContent>
+      </SidebarGroup>
     </SidebarContent><SidebarFooter className="border-t p-3"><div className="flex items-center gap-3 rounded-lg px-2 py-1.5"><Avatar className="size-8 rounded-lg"><AvatarFallback className="rounded-lg text-xs">管理</AvatarFallback></Avatar><div className="grid flex-1 gap-0.5 text-sm"><span className="font-medium">管理员</span><span className="text-xs text-muted-foreground">业务数据工作台</span></div><ShieldCheck className="size-4 text-muted-foreground" /></div></SidebarFooter>
   </Sidebar>
 })
@@ -125,6 +134,7 @@ function Workspace() {
   const tableExportKey = JSON.stringify([view, tableScope, view === 'pairs' ? initialReply : 'all'])
   const captureTableFilters = useCallback((filters: ApiFilters) => setTableExport({ key: tableExportKey, filters }), [tableExportKey])
   const meta = useApi<MetaData>('meta', { source }, refreshKey, view !== 'tickets')
+  const feishuAccess = useApi<{ allowed: boolean }>('feishu-robot/access', { source }, refreshKey)
   const summary = useApi<SummaryData>('summary', sharedScope, refreshKey, view === 'overview')
   const trend = useApi<TrendData>('trend', sharedScope, refreshKey, view === 'overview')
   const status = useApi<LocalStatus>('status', { source }, refreshKey, view === 'cleaning')
@@ -226,7 +236,7 @@ function Workspace() {
   const exportTemplate = async () => { if (downloadingTemplate) return; setDownloadingTemplate(true); try { await downloadTemplate(); toast.success('已下载会话导入模板') } catch (error) { toast.error(error instanceof Error ? error.message : '模板下载失败，请重试。') } finally { setDownloadingTemplate(false) } }
 
   return <SidebarProvider style={{ '--sidebar-width': 'calc(var(--spacing) * 64)', '--header-height': 'calc(var(--spacing) * 14)' } as CSSProperties}>
-    <AppSidebar view={view} total={meta.data?.total} navigate={sideNavigate} onImport={openImport} />
+    <AppSidebar view={view} total={meta.data?.total} navigate={sideNavigate} onImport={openImport} showFeishuRobot={feishuAccess.data?.allowed === true} />
     <SidebarInset data-density={compact ? 'compact' : 'normal'} data-motion={motion ? 'on' : 'off'}>
       <header className="relative flex h-(--header-height) shrink-0 items-center gap-2 border-b"><PageActivity /><div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6"><SidebarTrigger className="-ml-1" /><Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" /><h1 key={view} className="qiyu-page-title text-base font-medium">{page.title}</h1><div className="ml-auto flex items-center gap-2">
         <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="显示设置"><Settings2 className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-48"><DropdownMenuLabel>显示设置</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuCheckboxItem checked={motion} onCheckedChange={setMotion}>切换动画</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={compact} onCheckedChange={setCompact}>紧凑表格</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun /> : <Moon />}切换{theme === 'dark' ? '浅色' : '深色'}外观</DropdownMenuItem></DropdownMenuContent></DropdownMenu>

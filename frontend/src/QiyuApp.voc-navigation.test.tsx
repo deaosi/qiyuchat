@@ -29,13 +29,16 @@ const completeSop: VocPlaybook = {
     result_evidence: [sopRef('result', '重新测试后，场景成功触发。')], escalation: '' }],
 }
 let completeSops: VocPlaybook[]
+let feishuAllowed: boolean
 
 beforeEach(() => {
   completeSops = [completeSop]
+  feishuAllowed = false
   vi.stubGlobal('matchMedia', vi.fn(() => ({ addEventListener: vi.fn(), removeEventListener: vi.fn(), matches: false })))
   query.mockImplementation((endpoint: string, _filters: unknown, _key: number, enabled = true) => ({
     data: !enabled ? null : {
       meta: { total: 3, groups: [], staff: [] },
+      'feishu-robot/access': { allowed: feishuAllowed },
       clusters: { items: [{ cluster_id: 42, question: '怎么开启图片回复？', count: 3, variants: 2, customers: 2,
         groups: 1, unanswered: 2, share: 100, first_seen: '2026-11-01', last_seen: '2026-11-07', samples: ['怎么开启图片回复？', '图片消息怎么触发？'] }],
         total: 1, offset: 0, limit: 20, totals: { questions: 3, unanswered: 2 } },
@@ -60,6 +63,15 @@ afterEach(() => {
 })
 
 describe('VOC navigation', () => {
+  it.each([true, false])('shows the Feishu robot entry only when authorized (%s)', allowed => {
+    feishuAllowed = allowed
+    window.history.replaceState(null, '', '#questions')
+    render(<QiyuApp />)
+
+    const link = screen.queryByRole('link', { name: '飞书机器人' })
+    expect(link?.getAttribute('href') ?? null).toBe(allowed ? '/feishu-robot' : null)
+  })
+
   it('opens a shared topic at the fixed dates and omits customer and staff identifiers from its link', () => {
     const id = 't_' + 'a'.repeat(24)
     const href = topicHref(id, { source: 'local', start: '2026-11-01', end: '2026-11-07', group: '测试群', staff: '测试客服' })

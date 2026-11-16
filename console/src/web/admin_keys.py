@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS admin_key (
     created_at INTEGER NOT NULL,
     revoked_at INTEGER,
     preview TEXT NOT NULL,
+    feishu_access INTEGER NOT NULL DEFAULT 0 CHECK (feishu_access IN (0, 1)),
     CHECK (expires_at IS NULL OR expires_at > starts_at)
 )
 """
@@ -52,7 +53,8 @@ def _status(row, now):
 
 
 def _public(row, now):
-    return {**{field: row[field] for field in _PUBLIC}, "status": _status(row, now)}
+    return {**{field: row[field] for field in _PUBLIC},
+            "status": _status(row, now), "feishu_access": bool(row["feishu_access"])}
 
 
 def _validate_action(body, action, fields):
@@ -97,6 +99,10 @@ class KeyStore:
         db.row_factory = sqlite3.Row
         return db
 
+    @staticmethod
+    def _has_feishu_access_column(db):
+        return any(column["name"] == "feishu_access" for column in db.execute("PRAGMA table_info(admin_key)"))
+
     @contextmanager
     def _write(self):
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -110,6 +116,9 @@ class KeyStore:
         with closing(self._connect(writable=True)) as db, db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(_SCHEMA)
+            if not self._has_feishu_access_column(db):
+                db.execute("ALTER TABLE admin_key ADD COLUMN "
+                           "feishu_access INTEGER NOT NULL DEFAULT 0 CHECK (feishu_access IN (0, 1))")
             yield db
 
     def list(self) -> list[dict]:
@@ -118,7 +127,9 @@ class KeyStore:
         except FileNotFoundError:
             return []
         with closing(self._connect()) as db:
-            rows = db.execute(f"SELECT {_SELECT_PUBLIC} FROM admin_key ORDER BY created_at DESC, id DESC").fetchall()
+            access_column = "feishu_access" if self._has_feishu_access_column(db) else "0 AS feishu_access"
+            rows = db.execute(f"SELECT {_SELECT_PUBLIC},{access_column} FROM admin_key "
+                              "ORDER BY created_at DESC, id DESC").fetchall()
         now = int(time.time())
         return [_public(row, now) for row in rows]
 
@@ -145,9 +156,19 @@ class KeyStore:
     def active_id(self, key_id: str) -> bool:
         return bool(isinstance(key_id, str) and _ID.fullmatch(key_id) and self._active("id", key_id))
 
+    def has_feishu_access(self, key_id: str) -> bool:
+        try:
+            self._check_file()
+            with closing(self._connect()) as db:
+                row = db.execute("SELECT starts_at,expires_at,revoked_at,feishu_access FROM admin_key WHERE id=?",
+                                 (key_id,)).fetchone()
+                return bool(row and row["feishu_access"] and _status(row, int(time.time())) == "active")
+        except (OSError, sqlite3.Error):
+            return False
+
     @staticmethod
     def _record(db, key_id):
-        row = db.execute(f"SELECT {_SELECT_PUBLIC} FROM admin_key WHERE id=?", (key_id,)).fetchone()
+        row = db.execute(f"SELECT {_SELECT_PUBLIC},feishu_access FROM admin_key WHERE id=?", (key_id,)).fetchone()
         if row is None:
             raise MissingKey("未找到该管理员密钥。")
         return row
@@ -185,6 +206,21 @@ class KeyStore:
         with self._write() as db:
             now = int(time.time())
             self._record(db, key_id)
-            db.execute("UPDATE admin_key SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (now, key_id))
+            db.execute("UPDATE admin_key SET revoked_at=?,feishu_access=0 WHERE id=? AND revoked_at IS NULL",
+                       (now, key_id))
+            record = _public(self._record(db, key_id), now)
+        return {"record": record}
+
+    def set_feishu_access(self, body: dict) -> dict:
+        _validate_action(body, "feishu_access", {"id", "allowed"})
+        key_id = _key_id(body.get("id"))
+        allowed = body.get("allowed")
+        if type(allowed) is not bool:
+            raise ValueError("请选择是否允许访问飞书机器人。")
+        with self._write() as db:
+            now = int(time.time())
+            if _status(self._record(db, key_id), now) in ("revoked", "expired"):
+                raise InactiveKey("已撤销或已过期的密钥无法修改。")
+            db.execute("UPDATE admin_key SET feishu_access=? WHERE id=?", (int(allowed), key_id))
             record = _public(self._record(db, key_id), now)
         return {"record": record}

@@ -7,6 +7,7 @@ import hashlib
 import http.client
 import json
 import re
+import sqlite3
 import threading
 import time
 from dataclasses import replace
@@ -16,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.response import addinfourl
 
 from tests.test_local import LocalFixture, make_csv
@@ -592,6 +593,7 @@ class TestAdminKey(LocalFixture):
 
     def setUp(self):
         super().setUp()
+        self.cfg = replace(self.cfg, runtime=replace(self.cfg.runtime, state_dir=self.temp.name))
         self.server = DashboardServer(("127.0.0.1", 0), self.cfg, admin_key=self.KEY)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -680,9 +682,6 @@ class TestAdminKey(LocalFixture):
         return status, json.loads(raw)
 
     def test_managed_keys_and_permanent_panel_access(self):
-        import time
-        from urllib.parse import urlencode
-
         status, body, _ = self.call("/panel")
         self.assertEqual(status, 401)
         self.assertIn(b'name="next" value="/panel"', body)
@@ -735,6 +734,125 @@ class TestAdminKey(LocalFixture):
         self.assertEqual(self.panel_write({"action": "update", "id": key_id, **schedule})[0], 409)
         status, _, headers = self.call("/login", "POST", urlencode({"key": self.KEY, "next": "/panel"}).encode())
         self.assertEqual((status, headers["Location"]), (302, "/panel"))
+
+    def test_feishu_robot_access_is_opt_in_and_applies_to_existing_sessions(self):
+        owner = {"X-Admin-Key": self.KEY}
+        page = "/feishu-robot"
+        access_api = "/api/feishu-robot/access"
+        status_api = "/api/feishu-robot/status"
+        protected_routes = (page, "/feishu-robot.js", "/feishu-robot.css", status_api)
+        status, _, headers = self.call(page + "?key=" + self.KEY)
+        self.assertEqual((status, headers["Location"]), (302, "/login?next=%2Ffeishu-robot"))
+        status, body, _ = self.call(headers["Location"])
+        self.assertEqual(status, 200)
+        self.assertIn(b'name="next" value="/feishu-robot"', body)
+        for route in (*protected_routes[1:], access_api):
+            self.assertEqual(self.call(route)[0], 401)
+        self.assertEqual(self.call("/guest/feishu-robot")[0], 404)
+
+        now = int(time.time())
+        status, created = self.panel_write({
+            "action": "create", "label": "普通管理员", "starts_at": now - 5, "expires_at": now + 600,
+        })
+        self.assertEqual(status, 201)
+        key, record = created["key"], created["record"]
+        self.assertIs(record["feishu_access"], False)
+        grant = {"action": "feishu_access", "id": record["id"], "allowed": True}
+        credentials = {"X-Admin-Key": key}
+        login = urlencode({"key": key, "next": page}).encode()
+        status, _, headers = self.call("/login", "POST", login)
+        self.assertEqual(status, 403)
+        self.assertNotIn("Set-Cookie", headers)
+        status, _, headers = self.call("/login", "POST", urlencode({"key": key}).encode())
+        self.assertEqual(status, 302)
+        session = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+
+        with patch("src.web.server.feishu_robot.status") as robot_status:
+            robot_status.side_effect = lambda cfg, *, include_settings: (
+                {"health": "ok", "settings": {}} if include_settings else {"health": "ok"}
+            )
+            for auth in (credentials, session):
+                status, body, _ = self.call(access_api, headers=auth)
+                self.assertEqual((status, json.loads(body)), (200, {"allowed": False}))
+                for route in protected_routes:
+                    self.assertEqual(self.call(route, headers=auth)[0], 403)
+                self.assertEqual(self.panel_write(grant, headers={"X-Admin-Key": "", **auth})[0], 403)
+            robot_status.assert_not_called()
+            self.assertEqual(self.panel_write({**grant, "allowed": 1})[0], 400)
+            self.assertEqual(self.panel_write(grant, headers={"Origin": "https://elsewhere.example"})[0], 403)
+            status, result = self.panel_write(grant)
+            self.assertEqual(status, 200)
+            self.assertIs(result["record"]["feishu_access"], True)
+            status, body, _ = self.call("/api/panel/keys", headers=owner)
+            self.assertEqual(status, 200)
+            self.assertIs(json.loads(body)["keys"][0]["feishu_access"], True)
+
+            for auth in (credentials, session, owner):
+                status, body, _ = self.call(access_api, headers=auth)
+                self.assertEqual((status, json.loads(body)), (200, {"allowed": True}))
+                for route in protected_routes:
+                    status, body, received = self.call(route, headers=auth)
+                    self.assertEqual(status, 200, route)
+                    self.assertEqual(received["Cache-Control"], "no-store")
+                self.assertEqual("settings" in json.loads(body), auth == owner)
+                robot_status.assert_called_with(self.cfg, include_settings=auth == owner)
+            self.assertEqual(self.call("/panel", headers=session)[0], 403)
+            self.assertEqual(self.call(status_api + "?include_settings=true", headers=session)[0], 200)
+            robot_status.assert_called_with(self.cfg, include_settings=False)
+            self.assertEqual(self.call(status_api, "POST", headers=owner)[0], 405)
+            status, _, headers = self.call("/login", "POST", login)
+            self.assertEqual((status, headers["Location"]), (302, page))
+
+            self.assertEqual(self.panel_write({**grant, "allowed": False})[0], 200)
+            self.assertEqual(self.call(status_api, headers=session)[0], 403)
+            self.assertEqual(self.panel_write(grant)[0], 200)
+            self.assertEqual(self.panel_write({"action": "revoke", "id": record["id"]})[0], 200)
+            self.assertEqual(self.call(status_api, headers=session)[0], 401)
+            self.assertEqual(self.call(status_api, headers=credentials)[0], 401)
+
+    def test_feishu_robot_legacy_key_migration_and_expiry(self):
+        owner = {"X-Admin-Key": self.KEY}
+        key_id, token = "a" * 32, "yvoc_" + "A" * 43
+        now = int(time.time())
+        path = self.server.key_store.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(mode=0o600)
+        db = sqlite3.connect(path)
+        try:
+            with db:
+                db.execute("""
+                    CREATE TABLE admin_key (
+                        id TEXT PRIMARY KEY, digest BLOB NOT NULL UNIQUE, label TEXT NOT NULL,
+                        starts_at INTEGER NOT NULL, expires_at INTEGER, created_at INTEGER NOT NULL,
+                        revoked_at INTEGER, preview TEXT NOT NULL
+                    )
+                """)
+                db.execute("INSERT INTO admin_key VALUES(?,?,?,?,?,?,NULL,?)",
+                           (key_id, hashlib.sha256(token.encode("ascii")).digest(), "现有管理员",
+                            now - 60, now + 600, now - 60, "yvoc_…AAAAAA"))
+        finally:
+            db.close()
+
+        access_api = "/api/feishu-robot/access"
+        status_api = "/api/feishu-robot/status"
+        status, body, _ = self.call("/api/panel/keys", headers=owner)
+        self.assertEqual(status, 200)
+        self.assertIs(json.loads(body)["keys"][0]["feishu_access"], False)
+        status, _, headers = self.call("/login", "POST", urlencode({"key": token}).encode())
+        self.assertEqual(status, 302)
+        session = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+        self.assertEqual(self.call(status_api, headers=session)[0], 403)
+        grant = {"action": "feishu_access", "id": key_id, "allowed": True}
+        self.assertEqual(self.panel_write(grant)[0], 200)
+        status, body, _ = self.call(access_api, headers=session)
+        self.assertEqual((status, json.loads(body)), (200, {"allowed": True}))
+        with patch("src.web.admin_keys.time.time", return_value=now + 601):
+            self.assertEqual(self.call(status_api, headers=session)[0], 401)
+            self.assertEqual(self.panel_write(grant)[0], 409)
+
+        self.server.admin_key = ""
+        self.assertEqual(self.call(status_api)[0], 403)
+        self.assertEqual(self.call(access_api)[0], 403)
 
     def test_login_form(self):
         body = ("key=" + self.KEY).encode()

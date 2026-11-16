@@ -23,6 +23,7 @@ const issued = element("issued");
 const secret = element("issued-key");
 
 let records = [];
+const pendingAccess = new Map();
 let editing = null;
 let revoking = null;
 let saving = false;
@@ -94,6 +95,48 @@ function dateCell(row, value, empty) {
   td.replaceChildren(time);
 }
 
+function permissionCell(row, record) {
+  const label = document.createElement("label");
+  const input = document.createElement("input");
+  const state = document.createElement("span");
+  const inactive = record.status !== "active" && record.status !== "scheduled";
+  const pending = pendingAccess.has(record.id);
+  label.className = "permission";
+  input.type = "checkbox";
+  input.checked = pendingAccess.get(record.id) ?? (record.feishu_access === true);
+  input.disabled = inactive || pending;
+  input.setAttribute("aria-label", `允许「${record.label}」访问飞书机器人页`);
+  state.textContent = inactive ? "不可用" : pending ? "保存中…" : input.checked ? "允许访问" : "未授权";
+  label.append(input, state);
+  cell(row, "").append(label);
+  input.addEventListener("change", () => saveFeishuAccess(record, input, state));
+}
+
+async function saveFeishuAccess(record, input, state) {
+  const { id, label } = record;
+  const allowed = input.checked;
+  pendingAccess.set(id, allowed);
+  input.disabled = true;
+  state.textContent = "保存中…";
+  setMessage("notice");
+  try {
+    const data = await request({ action: "feishu_access", id, allowed });
+    if (data.record?.id !== id || data.record.feishu_access !== allowed) {
+      throw new Error("权限变更未能确认");
+    }
+    const current = records.find((item) => item.id === id);
+    if (current) current.feishu_access = allowed;
+    setMessage("notice", `已${allowed ? "允许" : "取消"}「${label}」访问飞书机器人页。`);
+  } catch (error) {
+    setMessage("notice", error.status && error.status < 500
+      ? error.message
+      : "权限变更未能确认，请重新加载页面核对。");
+  } finally {
+    pendingAccess.delete(id);
+    render();
+  }
+}
+
 function render() {
   list.replaceChildren();
   retry.hidden = true;
@@ -125,6 +168,7 @@ function render() {
     cell(row, "").append(state);
     dateCell(row, record.starts_at, "—");
     dateCell(row, record.expires_at, "长期有效");
+    permissionCell(row, record);
     const actions = cell(row, "", "actions");
     if (record.status === "active" || record.status === "scheduled") {
       actions.append(action("编辑", () => openEditor(record)));
@@ -264,4 +308,16 @@ window.addEventListener("pagehide", () => {
   if (issued.open) issued.close();
 });
 
+function showPanelSection() {
+  const section = location.hash === "#feishu" ? "feishu" : "keys";
+  for (const link of document.querySelectorAll(".panel-nav a")) {
+    const active = link.hash === `#${section}`;
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+    element(`panel-${link.hash.slice(1)}`).hidden = !active;
+  }
+}
+
+window.addEventListener("hashchange", showPanelSection);
+showPanelSection();
 void loadKeys();

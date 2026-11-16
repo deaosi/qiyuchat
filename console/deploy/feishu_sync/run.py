@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from deploy.feishu_sync import dashboard, source, support, top as top_table
 from src import voc_feishu_sync as sync
+from src.web import feishu_robot
 
 BATCH_SIZE = 100
 REGISTER_LIMIT = 1500
@@ -611,6 +612,7 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
             count = previous.get("register_count", previous["documents"]["topics"]["count"])
             return {"status": "already_checked", "all_topics": count,
                     "top_topics": min(100, previous["documents"]["topics"]["count"]),
+                    "sops": len(previous.get("published_sops", previous["documents"]["sops"]["records"])),
                     "dashboard_url": update_dashboard(previous)}
         schema = support._schema(target)
         if not support._compact(target, schema) or any(target.fields[role] not in schema for role in original_roles):
@@ -664,6 +666,19 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
         return publish(stage)
 
 
+def _record_robot(state_dir, lane, result, *, timestamp=None):
+    if not lane:
+        return
+    try:
+        support._safe_state(state_dir)
+        path = feishu_robot.receipt_path(state_dir, lane)
+        with sync._write_lock(path.with_suffix(".lock")):
+            support._write_state(path, feishu_robot.receipt(path, lane, result, timestamp=timestamp))
+    except _SYNC_ERRORS:
+        # The display receipt cannot change the outcome of the synchronization itself.
+        print("Feishu robot health receipt could not be saved.", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
@@ -685,6 +700,9 @@ def main():
     if args.links_only and (not args.apply or args.refresh or args.dashboard_only or args.tickets_only):
         parser.error("--links-only requires --apply and is independent of other modes")
     state_dir = args.state_dir.absolute()
+    lane = "tickets" if args.tickets_only else None
+    if args.apply and not (args.tickets_only or args.links_only or args.dashboard_only):
+        lane = "voc"
     try:
         if args.tickets_only:
             from deploy.feishu_sync import tickets
@@ -695,8 +713,13 @@ def main():
         else:
             result = run(state_dir, args.apply, refresh=args.refresh, dashboard_only=args.dashboard_only)
     except _SYNC_ERRORS as exc:
+        _record_robot(state_dir, lane, {"status": "failed", "http_status": getattr(exc, "status", None)})
         message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "全量同步的数据暂不可核验。"
         raise SystemExit(message) from None
+    except Exception:
+        _record_robot(state_dir, lane, {"status": "failed"})
+        raise
+    _record_robot(state_dir, lane, result)
     print(json.dumps(result, ensure_ascii=True))
     if result["status"] == "failed":
         raise SystemExit(1)
