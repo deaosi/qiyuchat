@@ -98,8 +98,7 @@ def run(state_dir, *, limit=20, after=None, attachments_only=False):
                 if history[attachment_column]:
                     desired[key] = {attachment_column: history[attachment_column]}
             else:
-                columns = {**tickets._summary(raw, names, source_link=link), **history}
-                desired[key] = tickets._with_submission_attachment(columns, link)
+                desired[key] = {**tickets._summary(raw, names, source_link=link), **history}
         if tickets.maintenance(cfg):
             return {"status": "maintenance"}
 
