@@ -305,7 +305,8 @@ class TicketModuleTests(LocalFixture):
                   ]}
         logs = [
             {"id": 1234567, "actionType": 1, "action": "创建工单", "operatorId": 32, "operator": "提交客服",
-             "time": 1794537000000, "info": [{"title": "受理方式", "content": "客服提交"}]},
+             "time": 1794537000000, "info": [{"title": "受理方式", "content": "客服提交"},
+                                              {"title": "工单状态", "content": "受理中"}]},
             {"id": 1234568, "actionType": 20, "action": "回复", "customerSee": True, "operator": "公开回复员",
              "time": 1794537100000, "info": [{"title": "备注", "content": "已提交排查"}]},
             {"id": 1234569, "actionType": 20, "action": "回复", "customerSee": False,
@@ -356,6 +357,7 @@ class TicketModuleTests(LocalFixture):
             self.assertTrue(payload["history_available"])
             self.assertEqual([entry["action"] for entry in payload["history"]], ["完结", "回复", "创建工单"])
             self.assertEqual(payload["history"][0]["details"], [])
+            self.assertIn({"label": "新建时状态", "value": "受理中"}, payload["history"][2]["details"])
             self.assertEqual(payload["ticket"]["updated_at"], 1794537300000)
             self.assertEqual(payload["ticket"]["fields"][:2], [
                 {"label": "店铺名", "value": "示例商家"},

@@ -212,7 +212,10 @@ function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus, onUpdated }:
             setEdit(data.edit ?? null)
           }}>编辑工单</Button>}
         </div>
-        <DialogDescription>七鱼工单 #{id}{data?.ticket.status ? ` · ${data.ticket.status}` : ''}</DialogDescription>
+        <DialogDescription className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span>七鱼工单 #{id}</span>
+          {data?.ticket.status && <Badge variant="secondary" className="font-normal">当前状态 {data.ticket.status}</Badge>}
+        </DialogDescription>
       </DialogHeader>
       <div className="min-h-0 flex-1 overflow-auto px-5 py-5 sm:px-6">
         {details.loading ? <LoadingState label="正在读取七鱼工单…" /> : <div className="space-y-6">

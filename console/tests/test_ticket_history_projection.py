@@ -4,6 +4,25 @@ from src.web import tickets
 
 
 class TicketHistoryProjectionTests(TestCase):
+    def test_status_history_distinguishes_initial_state_from_later_changes(self):
+        logs = [
+            {"id": 11, "actionType": 1, "action": "新建工单", "time": 1794537000000,
+             "info": [{"title": "工单状态", "content": "受理中"}]},
+            {"id": 12, "actionType": 100, "action": "更新工单", "time": 1794537100000,
+             "info": [{"titleLang": "工单状态", "content": "由受理中更改为已完结"}]},
+            {"id": 13, "actionType": 25, "action": "完结", "time": 1794537200000,
+             "info": [{"title": "工单状态", "content": "已完结"}, {"title": "备注", "content": "排查完成"}]},
+        ]
+
+        history = tickets.project_history(logs, lambda _: ([], []))
+
+        self.assertEqual([event["time"] for event in history], [1794537200000, 1794537100000, 1794537000000])
+        self.assertEqual([event["details"] for event in history], [
+            [{"label": "当时状态", "value": "已完结"}, {"label": "备注", "value": "排查完成"}],
+            [{"label": "状态变更", "value": "由受理中更改为已完结"}],
+            [{"label": "新建时状态", "value": "受理中"}],
+        ])
+
     def test_forwarded_reply_requires_a_complete_title_and_marker(self):
         body = "技术回复：检查完成"
         token = "0123456789abcdef"

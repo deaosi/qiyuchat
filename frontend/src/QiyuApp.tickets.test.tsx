@@ -5,7 +5,7 @@ import QiyuApp from './QiyuApp'
 
 const id = '9007199254740993'
 const feishuUrl = 'https://freecallai.feishu.cn/base/example?table=tblExample'
-const ticket = { id, title: '订单复核', status: '处理中', priority: '高', owner: '值班受理客服', submitter: '原工单提报客服',
+const ticket = { id, title: '订单复核', status: '已完结', priority: '高', owner: '值班受理客服', submitter: '原工单提报客服',
   created_at: Date.UTC(2026, 0, 1, 1), updated_at: Date.UTC(2026, 0, 1, 3), linked_session_count: 1 }
 const edit = { revision: 'ticket-revision', title: ticket.title, priority: 8,
   fields: [{ id: '11', label: '平台&版本', value: '抖音 · Windows', multiline: false },
@@ -26,6 +26,10 @@ const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
     history: [
       ...(followup ? [followup] : []),
       { id: '783', action: '回复工单', operator: '测试客服', time: ticket.updated_at, details: [{ label: '回复', value: '处理已记录。' }] },
+      { id: '782', action: '更新工单', operator: '测试客服', time: ticket.updated_at,
+        details: [{ label: '状态变更', value: '由受理中更改为已完结' }] },
+      { id: '781', action: '新建工单', operator: '测试客服', time: ticket.created_at,
+        details: [{ label: '新建时状态', value: '受理中' }] },
     ],
     history_available: true,
     sessions: [{ session_id: 'linked-session', started_at: ticket.created_at, qa_id: 24 }],
@@ -78,7 +82,7 @@ describe('七鱼工单', () => {
 
     expect(await screen.findByRole('dialog', { name: '更新后的标题' })).toBe(popup)
     expect(detail.getByText('新的订单说明。')).toBeTruthy()
-    expect(detail.getByText(`七鱼工单 #${id} · 处理中`)).toBeTruthy()
+    expect(detail.getByText('当前状态 已完结')).toBeTruthy()
     const call = fetchApi.mock.calls.find(([path]) => path.startsWith('/api/tickets/update?'))!
     expect(JSON.parse(String(call[1]?.body))).toEqual({ id, revision: edit.revision, title: '更新后的标题',
       fields: { '12': '新的订单说明。' } })
@@ -104,7 +108,13 @@ describe('七鱼工单', () => {
     expect(feedback.getByText('3.9.1')).toBeTruthy()
     expect(feedback.getByText('已回传七鱼')).toBeTruthy()
     expect(feedback.getByRole('link', { name: '在飞书查看工单' }).getAttribute('href')).toBe(feishuUrl)
-    expect(detail.getByText(`七鱼工单 #${id} · 处理中`)).toBeTruthy()
+    expect(detail.getByText(`七鱼工单 #${id}`)).toBeTruthy()
+    expect(detail.getByText('当前状态 已完结')).toBeTruthy()
+    const events = within(detail.getByRole('region', { name: '处理记录' }))
+    expect(events.getByText('新建时状态')).toBeTruthy()
+    expect(events.getByText('受理中')).toBeTruthy()
+    expect(events.getByText('状态变更')).toBeTruthy()
+    expect(events.getByText('由受理中更改为已完结')).toBeTruthy()
     expect(fetchApi.mock.calls.some(([path]) => path.startsWith('/api/tickets/detail?') && new URL(path, location.origin).searchParams.get('id') === id)).toBe(true)
 
     fireEvent.click(detail.getByRole('button', { name: '查看会话' }))

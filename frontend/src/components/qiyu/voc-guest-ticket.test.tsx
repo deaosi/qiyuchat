@@ -23,6 +23,7 @@ it('renders the shared ticket with only images scoped to the open guest link', (
     }} />)
 
     expect(screen.getByRole('heading', { name: '商品答复异常' })).toBeTruthy()
+    expect(screen.getByText('当前状态 处理中')).toBeTruthy()
     expect(screen.getByText('机器人未按设置回复。')).toBeTruthy()
     expect(screen.getAllByRole('img')).toHaveLength(1)
     expect(screen.queryByRole('link')).toBeNull()

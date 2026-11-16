@@ -106,7 +106,7 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
         <div className="space-y-3 border-b bg-linear-to-b from-muted/55 to-background p-5 sm:px-8 sm:py-6">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <h1 id="ticket-heading" className="min-w-0 text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">{ticket.title}</h1>
-            {ticket.status && <Badge variant="secondary" className="font-normal">{ticket.status}</Badge>}
+            {ticket.status && <Badge variant="secondary" className="font-normal">当前状态 {ticket.status}</Badge>}
           </div>
           {ticket.id && <p className="text-xs text-muted-foreground">七鱼工单 #{ticket.id}</p>}
         </div>

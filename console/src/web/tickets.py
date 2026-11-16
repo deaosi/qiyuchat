@@ -31,6 +31,7 @@ _PRIVATE_LABELS = frozenset(("用户姓名", "访客姓名", "用户手机", "�
 _FILTER_SCAN_LIMIT = 2000
 _EDIT_LOCKS = tuple(Lock() for _ in range(64))
 _CREATE_ACTIONS = frozenset((1, 2, 127, 128, 129, 130))
+_STATUS_CHANGE = re.compile(r"(?:由|从).+?(?:更改为|变更为|修改为|调整为|改为|变为|到).+")
 _SYNC_MARKER = re.compile(r"〔语海同步\s+[0-9a-f]+〕", re.I)
 _FORWARDED_REPLY_HEADER = f"(?:{re.escape(FEEDBACK_REPLY_TITLE)}|{re.escape(LEGACY_FEEDBACK_REPLY_TITLE)})"
 _FORWARDED_REPLY = re.compile(
@@ -339,7 +340,8 @@ def project_history(logs: list[dict], media_links, *, reply_authors: dict[str, s
         event_images, event_attachments = media_links(_attachments(entry.get("attachments")))
         reply_token = None
         details = []
-        is_reply = _id(entry.get("actionType")) in (20, 101)
+        action_type = _id(entry.get("actionType"))
+        is_reply = action_type in (20, 101)
         for field in _attachments(entry.get("info")):
             label = _text(field.get("title") or field.get("titleLang"), 100)
             if label.casefold() in _PRIVATE_LABELS:
@@ -351,6 +353,15 @@ def project_history(logs: list[dict], media_links, *, reply_authors: dict[str, s
             body, reply_token = forwarded
             if body:
                 details.append({"label": label, "value": mask_pii(body)})
+        for detail in details:
+            if detail["label"] != "工单状态":
+                continue
+            if action_type in _CREATE_ACTIONS:
+                detail["label"] = "新建时状态"
+            elif _STATUS_CHANGE.fullmatch(detail["value"]):
+                detail["label"] = "状态变更"
+            else:
+                detail["label"] = "当时状态"
         history.append({
             "id": str(_id(entry.get("id")) or f"log-{index + 1}"),
             "action": _text(entry.get("action") or entry.get("actionLang"), 200) or "工单变更",
