@@ -529,13 +529,24 @@ def _feedback_input_columns(target):
     return inputs
 
 
-def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_state=None):
+def _feedback_revision(fields, input_columns):
+    try:
+        feedback = _feedback(fields, input_columns.get("attachments"), input_columns.get("investigation"))
+    except sync.SyncError as exc:
+        return digest({"invalid_feedback": str(exc)})
+    return digest(ticket_feedback._normalized(feedback))
+
+
+def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_state=None, include_revision=False):
     records = {}
     ids = set()
-    input_columns = list(_feedback_input_columns(target).values())
-    columns = [_FIELDS["key"], _FIELDS["source"], *input_columns]
+    input_columns = _feedback_input_columns(target)
+    columns = [_FIELDS["key"], _FIELDS["source"], *input_columns.values()]
+    receipt = _OUTPUT["status"]
+    if include_revision and ticket_fields.select(target, {receipt: None}):
+        columns.append(receipt)
     query = {"field_names": columns, "filter": {"conjunction": "or", "conditions": [
-        {"field_name": name, "operator": "isNotEmpty", "value": []} for name in input_columns
+        {"field_name": name, "operator": "isNotEmpty", "value": []} for name in input_columns.values()
     ]}}
     if exclude_closed:
         columns.append(ticket_archive.CLOSED_AT)
@@ -563,14 +574,15 @@ def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_sta
             raise sync.SyncError("飞书技术回复记录格式无法核对。")
         if exclude_closed and sync._value(fields.get(ticket_archive.CLOSED_AT)):
             continue
-        if not any(fields.get(name) for name in input_columns):
+        incomplete = include_revision and sync._value(fields.get(receipt)) in ("回传失败", "待回传", "待核对七鱼回复")
+        if not incomplete and not any(fields.get(name) for name in input_columns.values()):
             continue
         key = sync._value(fields.get(_FIELDS["key"]))
         if (not isinstance(key, str) or not _ID.fullmatch(key) or key in records or record_id in ids
                 or not _source_matches(cfg, key, fields.get(_FIELDS["source"]))):
             raise sync.SyncError("飞书技术回复无法唯一匹配七鱼工单，请核对工单ID及语海详情。", 409)
         ids.add(record_id)
-        records[key] = record_id
+        records[key] = {"record_id": record_id, "revision": _feedback_revision(fields, input_columns)} if include_revision else record_id
     return records
 
 
@@ -633,8 +645,6 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
                     if baseline[key] == [record_id, digest(ticket_feedback._normalized(feedback))]:
                         continue
                     handled.add(key)
-                if not any(feedback.values()):
-                    continue
                 kwargs = {}
                 if type(edited_at := fields.get(ticket_reply_delta.TIME_FIELD)) is int and isinstance(target, ticket_fields.Target):
                     def resolve_author(changed_text, files):
@@ -658,6 +668,7 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
                         except sync.SyncError as exc:
                             raise ticket_feedback.AttachmentDownloadError(str(exc)) from None
                     kwargs["download"] = download
+                    kwargs["validate_files"] = ticket_feedback_media.validate_planned
                 result = ticket_feedback.ingest(cfg, ticket_id=key, record_id=record_id,
                                                 feedback=feedback, feishu_url=target.destination, **kwargs)
             imported += int(result.get("changed") is True)
@@ -666,7 +677,7 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             if pending is not None:
                 if result["status"] == "待回传":
                     waiting[key] = int(time() * 1000) + _FEEDBACK_QUIET_MS
-                elif result["status"] in ("回传失败", "待核对七鱼回复"):
+                elif result["status"] in ("回传失败", "待核对七鱼回复") and not result.get("blocked"):
                     waiting[key] = window[1] + _FEEDBACK_QUIET_MS + _RECONCILE
             error = result.get("error") or ""
             values = {_OUTPUT["status"]: result["status"], _OUTPUT["returned_at"]: result["returned_at"],
@@ -704,13 +715,14 @@ def _current_export(target, desired):
 
 
 def _feedback_work(cfg, target, queue, lane, now, window, *, batch_state, retry_after=None):
-    rows = _technical_rows(cfg, target, window=window, exclude_closed=True, batch_state=batch_state)
+    rows = _technical_rows(cfg, target, window=window, exclude_closed=True, batch_state=batch_state, include_revision=True)
+    ticket_work.enqueue(queue, lane, rows, now_ms=now)
     retries = {}
     if retry_after is not None:
         retries = ticket_feedback.retry_records(cfg, limit=100, after=retry_after)
-        for key, record in retries.items():
-            rows.setdefault(key, record)
-    ticket_work.enqueue(queue, lane, {key: {"record_id": record} for key, record in rows.items()}, now_ms=now)
+        # A retry for an older row must keep the scanned revision and existing retry time.
+        retry_rows = {key: {"record_id": record} for key, record in retries.items() if key not in rows}
+        ticket_work.enqueue(queue, lane, retry_rows, now_ms=now, replace_existing=False)
     return next(reversed(retries), "") if len(retries) == 100 else ""
 
 

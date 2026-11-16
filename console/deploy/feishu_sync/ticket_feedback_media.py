@@ -8,7 +8,7 @@ from time import monotonic
 from typing import TypedDict
 
 from deploy.feishu_sync import ticket_fields
-from src import voc_feishu_sync as sync
+from src import ticket_feedback, voc_feishu_sync as sync
 from src.qiyu.ticket import MAX_REPLY_ATTACHMENTS, MAX_REPLY_ATTACHMENT_BYTES
 
 
@@ -43,6 +43,29 @@ def parse_cell(value) -> list[Attachment]:
             raise sync.SyncError("飞书返回的技术回复附件资料不一致，请重新上传。", 409)
         files[token] = attachment
     return [files[token] for token in sorted(files)]
+
+
+def validate_planned(files: list[Attachment]) -> None:
+    """Apply limits to the new files selected for this reply."""
+    count = len(files)
+    size = sum(file["size"] for file in files)
+    reasons = []
+    if count > MAX_REPLY_ATTACHMENTS:
+        reasons.append(f"本轮有 {count} 个新附件，最多回传 {MAX_REPLY_ATTACHMENTS} 个附件")
+    if size > MAX_REPLY_ATTACHMENT_BYTES:
+        reasons.append(f"本轮新附件合计 {size:,} 字节，超过 5 MiB")
+    if not reasons:
+        return
+
+    reason = "。".join(reasons) + "。"
+    details = []
+    for file in sorted(files, key=lambda item: item["size"], reverse=True):
+        detail = f"「{file['name']}」（{file['size']:,} 字节）"
+        if len(reason) + sum(len(item) + 1 for item in details) + len(detail) > 268:
+            break
+        details.append(detail)
+    omitted = f"等 {count} 个" if len(details) < count else ""
+    raise ticket_feedback.AttachmentLimitError(reason + "、".join(details) + omitted + "。请调整附件后再同步。")
 
 
 def _download_file(target, record_id, field_id, file, folder, output, deadline) -> bytes:
@@ -90,10 +113,10 @@ def download(target, record_id: str, field_id: str, files: list[Attachment]) -> 
     if not sync._RECORD_ID.fullmatch(record_id) or not ticket_fields._FIELD_ID.fullmatch(field_id):
         raise sync.SyncError("无法核对飞书技术回复附件所属的记录或字段。", 409)
     files = parse_cell(files)
-    if len(files) > MAX_REPLY_ATTACHMENTS:
-        raise sync.SyncError(f"每次技术回复最多回传 {MAX_REPLY_ATTACHMENTS} 个附件。", 409)
-    if sum(item["size"] for item in files) > MAX_REPLY_ATTACHMENT_BYTES:
-        raise sync.SyncError("每次技术回复回传的附件合计不能超过 5 MB。", 409)
+    try:
+        validate_planned(files)
+    except ticket_feedback.AttachmentLimitError as exc:
+        raise sync.SyncError(str(exc), 409) from None
     if not files:
         return []
     deadline = monotonic() + _DOWNLOAD_TIMEOUT

@@ -54,16 +54,22 @@ CREATE TABLE IF NOT EXISTS ticket_feedback_reply_author (
 _PUBLIC_FIELDS = ("status", "reply", "resolved_version", "investigation", "feishu_url", "received_at",
                   "writeback_status", "written_at", "error")
 _STATES = {
+    "": "",
     "pending": "待回传",
     "succeeded": "已回传",
     "failed": "回传失败",
     "uncertain": "待核对七鱼回复",
+    "blocked": "回传失败",
 }
 ATTACHMENT_ONLY_REPLY = "请查看随回复提交的附件。"
 
 
 class AttachmentDownloadError(Exception):
     pass
+
+
+class AttachmentLimitError(Exception):
+    """The original attachments cannot be sent in a single Qiyu reply."""
 
 
 class FeedbackChanged(Exception):
@@ -127,7 +133,7 @@ def _reply_text(values: dict, token: str) -> str:
 
 
 def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool, attachments=(),
-               attachment_manifest=()) -> tuple[str, int | None, str]:
+               attachment_manifest=(), before_send=None) -> tuple[str, int | None, str]:
     try:
         client = TicketClient(cfg.qiyu)
         if reconcile:
@@ -135,7 +141,7 @@ def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool, att
                 return "uncertain", None, "等待七鱼回复记录确认。"
         else:
             options = {"attachments": attachments} if attachments else {}
-            client.post_feedback(int(ticket_id), text, **options)
+            client.post_feedback(int(ticket_id), text, before_send=before_send, **options)
     except TicketReplyVisible as exc:
         return "uncertain", None, str(exc)
     except TicketReplyUnconfirmed:
@@ -198,7 +204,10 @@ def _finish(conn, ticket_id, token, text, files, state, written_at, error):
 
 
 def _result(state, written_at, error, *, changed):
-    return {"status": _STATES[state], "returned_at": written_at, "changed": changed, "error": error}
+    result = {"status": _STATES[state], "returned_at": written_at, "changed": changed, "error": error}
+    if state == "blocked":
+        result["blocked"] = True
+    return result
 
 
 def _prepare(conn):
@@ -210,18 +219,19 @@ def _prepare(conn):
 
 
 def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, feishu_url: str = "", download=None,
-           resolve_author=None) -> dict:
+           validate_files=None, resolve_author=None) -> dict:
     """Run under the Feishu table's write lock and keep inbox data before external writes."""
     if (not re.fullmatch(r"[1-9][0-9]{0,18}", ticket_id) or int(ticket_id) > 2 ** 63 - 1
             or not re.fullmatch(r"rec[A-Za-z0-9]{4,60}", record_id)):
         raise ValueError("飞书反馈的工单编号或记录编号无效。")
     values = _normalized(feedback)
-    if not any(values.values()):
-        return {"status": "", "returned_at": None, "changed": False, "error": ""}
+    has_input = any(values.values())
     revision = digest(values)
     files = values.get("attachments", [])
     text = {key: value for key, value in values.items() if key != "attachments"}
     path = _path(cfg)
+    if not has_input and not path.is_file():
+        return _result("", None, "", changed=False)
     with connection(path, write=True) as conn:
         _prepare(conn)
         with transaction(conn):
@@ -230,32 +240,35 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
             if ((same_ticket and same_ticket["record_id"] != record_id)
                     or (bound_ticket and bound_ticket["ticket_id"] != ticket_id)):
                 raise ValueError("飞书记录和七鱼工单的关联已变化，请核对工单 ID。")
+            if same_ticket is None and not has_input:
+                return _result("", None, "", changed=False)
             delivery = _delivery(conn, ticket_id, same_ticket, files)
 
         changed = same_ticket is None or same_ticket["revision"] != revision
-        if not changed and same_ticket["writeback_status"] == "succeeded":
-            return _result("succeeded", same_ticket["written_at"], "", changed=False)
+        if not changed:
+            saved_state = same_ticket["writeback_status"]
+            if saved_state == "blocked":
+                return _result(saved_state, None, same_ticket["error"], changed=False)
+            if saved_state == "succeeded":
+                written_at = same_ticket["written_at"]
+                return _result("succeeded" if has_input or written_at else "", written_at, "", changed=False)
         planned = json.loads(delivery["planned_files"]) if delivery["planned_files"] is not None else None
         if planned is None and same_ticket is not None:
             planned = _legacy_files(same_ticket, files)
-        reconcile = same_ticket is not None and same_ticket["writeback_status"] == "uncertain"
-        if changed and reconcile and files:
-            present = {item["file_token"] for item in files}
-            if planned is None or any(item["file_token"] in present for item in planned):
-                # An edit can arrive before the previous reply's attachments become visible.
-                # Resolve those files against the previous marker before selecting the next reply.
-                if planned is None:
-                    return _result("uncertain", None, "上一轮回复的附件仍待七鱼确认。", changed=False)
-                previous_text = _stored_text(same_ticket)
-                previous_token = same_ticket["reply_token"]
-                state, written_at, error = _writeback(
-                    cfg, ticket_id, _reply_text({**previous_text, "attachments": planned}, previous_token),
-                    reconcile=True, attachment_manifest=tuple((item["name"], item["size"]) for item in planned),
-                )
-                _finish(conn, ticket_id, previous_token, previous_text, planned, state, written_at, error)
-                if state != "succeeded":
-                    return _result(state, written_at, error, changed=False)
-                delivery = _delivery(conn, ticket_id, same_ticket, files)
+        if same_ticket is not None and same_ticket["writeback_status"] == "uncertain":
+            # Resolve the exact previous reply before accepting edits, even if all its files were removed.
+            if planned is None:
+                return _result("uncertain", None, "上一轮回复的附件清单暂时无法核对。", changed=False)
+            previous_text = _stored_text(same_ticket)
+            previous_token = same_ticket["reply_token"]
+            state, written_at, error = _writeback(
+                cfg, ticket_id, _reply_text({**previous_text, "attachments": planned}, previous_token),
+                reconcile=True, attachment_manifest=tuple((item["name"], item["size"]) for item in planned),
+            )
+            _finish(conn, ticket_id, previous_token, previous_text, planned, state, written_at, error)
+            if state != "succeeded" or not changed:
+                return _result(state, written_at, error, changed=False)
+            delivery = _delivery(conn, ticket_id, same_ticket, files)
 
         with transaction(conn):
             if changed:
@@ -269,7 +282,7 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
                                     writeback_status='succeeded', written_at=?, error='' WHERE ticket_id=?""",
                                  (revision, text["status"], text["reply"], text["version"], text.get("investigation", ""),
                                   written_at, ticket_id))
-                    return _result("succeeded", written_at, "", changed=False)
+                    return _result("succeeded" if has_input or written_at else "", written_at, "", changed=False)
                 token = token_hex(8)
                 conn.execute("""
                     INSERT INTO ticket_feedback
@@ -287,9 +300,15 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
                              (json.dumps(planned), ticket_id))
             else:
                 token = same_ticket["reply_token"]
-            reconcile = reconcile and not changed
         if planned is None:
             raise ValueError("七鱼技术回复的待回传附件无法核对。")
+        if planned and validate_files is not None:
+            try:
+                validate_files(planned)
+            except AttachmentLimitError as exc:
+                error = str(exc)
+                _finish(conn, ticket_id, token, text, planned, "blocked", None, error)
+                return _result("blocked", None, error, changed=changed)
         if resolve_author is not None and changed:
             previous = _stored_text(same_ticket) if same_ticket is not None else {}
             changed_text = {role: item for role, item in text.items() if item and item != previous.get(role)}
@@ -300,7 +319,7 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
         manifest = tuple((item["name"], item["size"]) for item in planned)
         attachments = ()
         try:
-            if planned and not reconcile:
+            if planned:
                 if download is None:
                     raise AttachmentDownloadError("飞书技术回复附件暂时无法下载。")
                 attachments = download(planned)
@@ -311,12 +330,13 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
         except AttachmentDownloadError as exc:
             state, written_at, error = "failed", None, str(exc)
         else:
-            # Persist the intent before sending. After an interruption only read back the same token.
-            conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ? AND reply_token = ?",
-                         (ticket_id, token))
+            def mark_uncertain():
+                conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ? AND reply_token = ?",
+                             (ticket_id, token))
+
             state, written_at, error = _writeback(cfg, ticket_id, _reply_text({**text, "attachments": planned}, token),
-                                                  reconcile=reconcile, attachments=attachments,
-                                                  attachment_manifest=manifest)
+                                                  reconcile=False, attachments=attachments,
+                                                  attachment_manifest=manifest, before_send=mark_uncertain)
         _finish(conn, ticket_id, token, text, planned, state, written_at, error)
     return _result(state, written_at, error, changed=changed)
 
@@ -332,6 +352,10 @@ def get(cfg: Settings, ticket_id: str) -> dict | None:
     if row is None:
         return None
     values = dict(row)
+    if values.get("writeback_status") == "blocked":
+        values["writeback_status"] = "failed"
+    if values.get("writeback_status") == "succeeded" and values.get("written_at") is None:
+        return None
     return {field: values.get(field, "") for field in _PUBLIC_FIELDS}
 
 

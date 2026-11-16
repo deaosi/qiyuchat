@@ -1,10 +1,14 @@
+import json
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, call, patch
+from urllib.parse import urlsplit
 
 from src import ticket_feedback
-from src.config import RuntimeConfig, Settings
+from src.config import QiyuConfig, RuntimeConfig, Settings
+from src.qiyu import ticket
 from src.qiyu.ticket import TicketError, TicketReplyUnconfirmed
 
 
@@ -16,10 +20,10 @@ class TestTicketFeedback(unittest.TestCase):
         self.values = {"status": "已修复", "reply": "检查订单\r\n已验证  ", "version": "3.4.0"}
         self.feishu_url = "https://fixture.feishu.cn/base/example?table=tblFixture"
 
-    def ingest(self, *, ticket_id="9007199254740993", record_id="recExample1", feedback=None, download=None):
+    def ingest(self, *, ticket_id="9007199254740993", record_id="recExample1", feedback=None, **options):
         return ticket_feedback.ingest(
             self.cfg, ticket_id=ticket_id, record_id=record_id,
-            feedback=self.values if feedback is None else feedback, feishu_url=self.feishu_url, download=download,
+            feedback=self.values if feedback is None else feedback, feishu_url=self.feishu_url, **options,
         )
 
     @staticmethod
@@ -160,7 +164,7 @@ class TestTicketFeedback(unittest.TestCase):
             self.assertEqual(self.ingest(feedback=initial, download=download)["status"], "已回传")
             self.assertEqual(self.ingest(feedback=edited, download=download)["status"], "已回传")
             download.assert_called_once_with([old_image])
-            self.assertEqual(write.call_args.kwargs, {})
+            self.assertNotIn("attachments", write.call_args.kwargs)
             sent = self.ingest(feedback=appended, download=download)
             for attachments in ([new_image, old_image, new_file], [new_image], appended["attachments"]):
                 current = {**appended, "attachments": attachments}
@@ -205,6 +209,109 @@ class TestTicketFeedback(unittest.TestCase):
         self.assertEqual(download.call_args_list, [call([first_image]), call([added_image])])
         self.assertIn("技术回复：已验证新截图", write.call_args.args[1])
         self.assertEqual(write.call_args.kwargs["attachments"], [("补充截图.png", b"abc")])
+
+    def test_oversize_feedback_only_blocks_the_same_revision_and_clears_without_writing(self):
+        oversize = {**self.file("boxLargeFile", "诊断日志.zip"), "size": ticket.MAX_REPLY_ATTACHMENT_BYTES + 1}
+        corrected = self.file("boxSmallFile", "诊断日志.zip")
+        feedback = {"attachments": [oversize]}
+        message = "附件超出 5 MiB：诊断日志.zip"
+
+        def validate(files):
+            if files == [oversize]:
+                raise ticket_feedback.AttachmentLimitError(message)
+
+        validator = Mock(side_effect=validate)
+        download = Mock(side_effect=self.download_files)
+        options = {"validate_files": validator, "download": download}
+        with patch.object(ticket_feedback.TicketClient, "post_feedback") as write:
+            first = self.ingest(feedback=feedback, **options)
+            repeated = self.ingest(feedback=feedback, **options)
+            self.assertEqual((first["status"], first["error"], first["blocked"]), ("回传失败", message, True))
+            self.assertEqual((repeated["status"], repeated["error"], repeated["changed"]), ("回传失败", message, False))
+            self.assertEqual(ticket_feedback.get(self.cfg, "9007199254740993")["writeback_status"], "failed")
+            self.assertEqual(ticket_feedback.retry_records(self.cfg), {})
+            write.assert_not_called()
+            download.assert_not_called()
+            cleared = self.ingest(feedback={}, **options)
+            self.assertEqual((cleared["status"], cleared["error"]), ("", ""))
+            self.assertEqual(self.ingest(feedback={}, **options), cleared)
+            self.assertIsNone(ticket_feedback.get(self.cfg, "9007199254740993"))
+            self.assertEqual(self.ingest(feedback={"attachments": [corrected]}, **options)["status"], "已回传")
+            write.assert_called_once()
+            download.assert_called_once_with([corrected])
+        self.assertEqual(validator.call_args_list, [call([oversize]), call([corrected])])
+
+    def test_http_timeout_preserves_original_reply_when_attachment_is_removed_and_text_edited(self):
+        self.cfg = Settings(qiyu=QiyuConfig(app_key="test-key", app_secret="test-secret"), runtime=self.cfg.runtime)
+        previous_file = self.file("boxOriginalFile", "诊断日志.zip")
+        first = {**self.values, "attachments": [previous_file]}
+        corrected = {**self.values, "reply": "文件已从飞书移除"}
+        visible = False
+        history = []
+        writes = []
+
+        def respond(request, *, timeout):
+            path = urlsplit(request.full_url).path
+            payload = json.loads(request.data)
+            if path == ticket.HISTORY:
+                response = {"code": 200, "data": history if visible else []}
+            elif path == ticket.DETAIL:
+                response = {"code": 200, "data": {"id": 42, "holderId": 20, "status": 10}}
+            else:
+                self.assertEqual(path, ticket.REPLY)
+                self.assertEqual(ticket_feedback.get(self.cfg, "42")["writeback_status"], "uncertain")
+                writes.append(payload)
+                entry = {"actionType": 20, "customerSee": False, "info": [{"content": payload["comment"]}]}
+                if payload["attachments"]:
+                    entry["attachments"] = [{"name": previous_file["name"], "size": previous_file["size"],
+                                             "url": "https://qiyukf.net/original"}]
+                history.append(entry)
+                if len(writes) == 1:
+                    raise TimeoutError("connection lost after storing the native reply")
+                response = {"code": 200, "message": True}
+            return BytesIO(json.dumps(response).encode())
+
+        options = {"ticket_id": "42", "download": self.download_files}
+        with patch("src.http.urllib.request.urlopen", side_effect=respond):
+            self.assertEqual(self.ingest(feedback=first, **options)["status"], "待核对七鱼回复")
+            self.assertEqual(self.ingest(feedback={}, **options)["status"], "待核对七鱼回复")
+            self.assertEqual(self.ingest(feedback=corrected, **options)["status"], "待核对七鱼回复")
+            self.assertEqual(len(writes), 1)
+            visible = True
+            self.assertEqual(self.ingest(feedback=corrected, **options)["status"], "已回传")
+            self.assertEqual(self.ingest(feedback=corrected, **options)["status"], "已回传")
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(len({entry["comment"].splitlines()[-1] for entry in writes}), 2)
+        self.assertEqual(writes[1]["attachments"], [])
+
+    def test_timeout_before_post_remains_retryable_without_entering_confirmation(self):
+        self.cfg = Settings(qiyu=QiyuConfig(app_key="test-key", app_secret="test-secret"), runtime=self.cfg.runtime)
+        paths = []
+        history = []
+
+        def respond(request, *, timeout):
+            path = urlsplit(request.full_url).path
+            paths.append(path)
+            if path == ticket.HISTORY:
+                if len(paths) == 1:
+                    self.assertEqual(ticket_feedback.get(self.cfg, "42")["writeback_status"], "pending")
+                    raise TimeoutError("preflight read timed out")
+                response = {"code": 200, "data": history}
+            elif path == ticket.DETAIL:
+                response = {"code": 200, "data": {"id": 42, "holderId": 20, "status": 10}}
+            else:
+                self.assertEqual(path, ticket.REPLY)
+                self.assertEqual(ticket_feedback.get(self.cfg, "42")["writeback_status"], "uncertain")
+                history.append({"actionType": 20, "customerSee": False,
+                                "info": [{"content": json.loads(request.data)["comment"]}]})
+                response = {"code": 200, "message": True}
+            return BytesIO(json.dumps(response).encode())
+
+        with patch("src.http.urllib.request.urlopen", side_effect=respond):
+            self.assertEqual(self.ingest(ticket_id="42")["status"], "回传失败")
+            self.assertEqual(ticket_feedback.retry_records(self.cfg), {"42": "recExample1"})
+            self.assertEqual(self.ingest(ticket_id="42")["status"], "已回传")
+        self.assertEqual(paths, [ticket.HISTORY, ticket.HISTORY, ticket.DETAIL, ticket.REPLY, ticket.HISTORY])
 
 
 if __name__ == "__main__":

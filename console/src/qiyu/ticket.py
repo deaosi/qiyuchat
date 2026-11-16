@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from base64 import b64encode
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import json
 import threading
 import time
@@ -53,7 +53,8 @@ class TicketClient:
     def __init__(self, config: QiyuConfig) -> None:
         self.config = config
 
-    def _post(self, path: str, body: dict[str, Any], result_key: str) -> Any:
+    def _post(self, path: str, body: dict[str, Any], result_key: str, *,
+              before_send: Callable[[], None] | None = None) -> Any:
         global _next_request
         if not self.config.app_key or not self.config.app_secret:
             raise TicketError("七鱼工单接口尚未配置", http_status=503)
@@ -63,6 +64,8 @@ class TicketClient:
                 time.sleep(delay)
             _next_request = time.monotonic() + 0.25
         query, payload = signed_query(self.config.app_key, self.config.app_secret, body)
+        if before_send is not None:
+            before_send()
         try:
             result = request("POST", f"{self.config.base_url.rstrip('/')}{path}?{query}",
                              body=payload, timeout=min(self.config.timeout, 12), retries=1)
@@ -169,7 +172,8 @@ class TicketClient:
             raise ValueError("七鱼工单回复参数无效")
         return _has_reply(self.history(identifier), text, attachment_names, attachment_manifest=attachment_manifest)
 
-    def post_feedback(self, ticket_id: int, text: str, *, attachments: Sequence[tuple[str, bytes]] = ()) -> bool:
+    def post_feedback(self, ticket_id: int, text: str, *, attachments: Sequence[tuple[str, bytes]] = (),
+                      before_send: Callable[[], None] | None = None) -> bool:
         """Append one native reply and confirm it in the ticket history."""
         identifier = _id(ticket_id)
         if identifier is None:
@@ -189,7 +193,7 @@ class TicketClient:
                 "ticketId": identifier, "staffId": holder, "comment": text,
                 "attachments": [{"fileName": name, "type": 1, "payload": b64encode(data).decode("ascii")}
                                 for name, data in attachments],
-            }, "message")
+            }, "message", before_send=before_send)
         except TicketError as write_error:
             if write_error.upstream_code in _REPLY_REJECTED or write_error.upstream_code in _REPLY_HTTP_REJECTED:
                 raise

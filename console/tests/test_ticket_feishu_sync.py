@@ -473,6 +473,108 @@ class TestTicketFeishuSync(unittest.TestCase):
         ingest.assert_not_called()
         self.assertFalse(self.writes)
 
+    def _feedback_queue_fixture(self, fields, timestamp):
+        from deploy.feishu_sync import ticket_fields
+
+        primary = tickets._FIELDS["key"]
+        modified = tickets.ticket_reply_delta.TIME_FIELD
+        names = [primary, tickets._FIELDS["source"], *tickets._INPUT.values(), *tickets._OUTPUT.values(),
+                 tickets.ticket_archive.CLOSED_AT, modified]
+        approved = {name: (f"fldFixture{index}", 1) for index, name in enumerate(names)}
+        target = ticket_fields.Target(**vars(self.target), approved=approved, primary=primary, skipped=(),
+                                      feedback_attachment="回复附件", attachment_id="fldMedia")
+        schema = {name: (identity, name == primary) for name, identity in approved.items()}
+        schema["回复附件"] = (("fldMedia", 17), False)
+        fields[modified] = timestamp
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        queue = Path(self.cfg.runtime.state_dir) / "ticket-work.db"
+        current = timestamp
+
+        def feishu(target, method, resource, *, params=None, data=None):
+            if resource == "/records/search" and data.get("automatic_fields"):
+                row = {**deepcopy(self.rows["42"]), "last_modified_time": fields[modified]}
+                return {"items": [row], "has_more": False}
+            result = self.fake_api(target, method, resource, params=params, data=data)
+            if resource == "/records/batch_update":
+                fields[modified] = current
+            return result
+
+        def poll(now):
+            nonlocal current
+            current = now
+            window = (now - 60_000, now - 15_000)
+            with (patch.object(sync, "_call", side_effect=feishu),
+                  patch.object(ticket_fields, "schema", return_value=schema),
+                  patch.object(tickets.ticket_reply_author, "resolve", return_value="")):
+                tickets._feedback_work(self.cfg, target, queue, "inbox", now, window,
+                                       batch_state={}, retry_after="")
+                return tickets._drain_feedback(self.cfg, target, queue, "inbox", now, window)
+
+        return queue, poll
+
+    def test_oversize_attachment_reports_filename_and_recovers_on_the_next_eligible_poll(self):
+        now = 1_794_600_000_000
+        fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
+        oversized = {"name": "复现录像.mp4", "size": 9 * 1024 * 1024, "file_token": "recordingToken"}
+        fields["回复附件"] = [oversized]
+        queue, poll = self._feedback_queue_fixture(fields, now - 15_000)
+        with (patch.object(tickets.ticket_feedback_media, "_download_file", return_value=b"ok") as download,
+              patch.object(tickets.TicketClient, "post_feedback") as post):
+            self.assertEqual(poll(now)["failed"], 1)
+            self.assertEqual(fields["回传状态"], "回传失败")
+            self.assertIn("复现录像.mp4", fields["回传失败原因"])
+            self.assertIn("9,437,184 字节", fields["回传失败原因"])
+            self.assertEqual(tickets.ticket_feedback.retry_records(self.cfg), {})
+            self.assertIsNone(tickets.ticket_work.next_due(queue, "inbox"))
+            poll(now + 30_000)
+            download.assert_not_called()
+            post.assert_not_called()
+            self.assertEqual(self.writes, ["/records/batch_update"])
+
+            # Removing the only input clears its failure receipt with no Qiyu reply.
+            fields["回复附件"] = []
+            fields[tickets.ticket_reply_delta.TIME_FIELD] = now + 45_000
+            self.assertEqual(poll(now + 60_000)["checked"], 1)
+            self.assertEqual(fields["回传状态"], "")
+            self.assertEqual(fields["回传失败原因"], "")
+            post.assert_not_called()
+
+            # A later oversize revision can also be repaired by replacing the original.
+            fields["回复附件"] = [oversized]
+            fields[tickets._INPUT["reply"]] = "附上复现文件"
+            fields[tickets.ticket_reply_delta.TIME_FIELD] = now + 75_000
+            self.assertEqual(poll(now + 90_000)["failed"], 1)
+            fields["回复附件"] = [{"name": "复现日志.txt", "size": 2, "file_token": "documentToken"}]
+            fields[tickets.ticket_reply_delta.TIME_FIELD] = now + 105_000
+            self.assertEqual(poll(now + 120_000)["imported"], 1)
+            self.assertEqual(fields["回传状态"], "已回传")
+            self.assertEqual(fields["回传失败原因"], "")
+            download.assert_called_once()
+            post.assert_called_once()
+            self.assertEqual(post.call_args.kwargs["attachments"], [("复现日志.txt", b"ok")])
+
+    def test_feedback_edit_wakes_backoff_but_receipt_edits_and_temporary_urls_do_not(self):
+        now = 1_794_600_000_000
+        fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
+        fields[tickets._INPUT["reply"]] = "初稿"
+        fields["回复附件"] = [{"name": "复现日志.txt", "size": 2, "file_token": "documentToken"}]
+        queue, poll = self._feedback_queue_fixture(fields, now - 15_000)
+        with (patch.object(tickets.ticket_feedback_media, "_download_file",
+                           side_effect=[sync.SyncError("模拟下载超时"), b"ok"]) as download,
+              patch.object(tickets.TicketClient, "post_feedback") as post):
+            self.assertEqual(poll(now)["failed"], 1)
+            self.assertEqual(tickets.ticket_work.next_due(queue, "inbox"), now + tickets._RECONCILE)
+            fields["回复附件"][0]["tmp_url"] = "https://example.com/renewed"
+            self.assertEqual(poll(now + 30_000)["checked"], 0)
+            download.assert_called_once()
+
+            fields[tickets._INPUT["reply"]] = "修正版"
+            fields[tickets.ticket_reply_delta.TIME_FIELD] = now + 45_000
+            self.assertEqual(poll(now + 60_000)["imported"], 1)
+            self.assertEqual(download.call_count, 2)
+            post.assert_called_once()
+            self.assertIn("修正版", post.call_args.args[1])
+
     def test_queued_export_never_overwrites_a_closed_or_newer_row(self):
         items = [{"id": "42", "updated_at": 100}, {"id": "43", "updated_at": 100}, {"id": "44", "updated_at": 100}]
         desired = tickets._projection(self.cfg, items)

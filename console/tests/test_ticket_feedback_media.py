@@ -25,11 +25,13 @@ class TicketFeedbackMediaTests(unittest.TestCase):
         crowded = [{**self.files[0], "file_token": f"mediaExample{index}"}
                    for index in range(media.MAX_REPLY_ATTACHMENTS + 1)]
         oversized = [{**self.files[0], "size": media.MAX_REPLY_ATTACHMENT_BYTES + 1}]
-        for files, error in ((crowded, f"{media.MAX_REPLY_ATTACHMENTS} 个附件"), (oversized, "5 MB")):
+        for files, error in ((crowded, f"{media.MAX_REPLY_ATTACHMENTS} 个附件"), (oversized, "5 MiB")):
             with self.subTest(error=error), patch.object(media.subprocess, "run") as execute:
                 self.assertEqual(media.parse_cell(files), files)
-                with self.assertRaisesRegex(sync.SyncError, error):
+                with self.assertRaisesRegex(sync.SyncError, error) as rejected:
                     media.download(self.target, self.record_id, self.field_id, files)
+                self.assertIn("复现.pdf", str(rejected.exception))
+                self.assertIn(f"{files[0]['size']:,} 字节", str(rejected.exception))
                 execute.assert_not_called()
 
     def test_only_returns_original_bytes_when_identity_and_length_match(self):
