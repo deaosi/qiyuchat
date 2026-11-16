@@ -28,8 +28,6 @@ def parse_cell(value) -> list[Attachment]:
         return []
     if not isinstance(value, list):
         raise sync.SyncError("技术回复附件须填写飞书附件列。", 409)
-    if len(value) > MAX_REPLY_ATTACHMENTS:
-        raise sync.SyncError(f"每次技术回复最多回传 {MAX_REPLY_ATTACHMENTS} 个附件。", 409)
     files = {}
     for item in value:
         if not isinstance(item, dict):
@@ -44,8 +42,6 @@ def parse_cell(value) -> list[Attachment]:
         if token in files and files[token] != attachment:
             raise sync.SyncError("飞书返回的技术回复附件资料不一致，请重新上传。", 409)
         files[token] = attachment
-    if sum(item["size"] for item in files.values()) > MAX_REPLY_ATTACHMENT_BYTES:
-        raise sync.SyncError("每次技术回复回传的附件合计不能超过 5 MB。", 409)
     return [files[token] for token in sorted(files)]
 
 
@@ -94,6 +90,10 @@ def download(target, record_id: str, field_id: str, files: list[Attachment]) -> 
     if not sync._RECORD_ID.fullmatch(record_id) or not ticket_fields._FIELD_ID.fullmatch(field_id):
         raise sync.SyncError("无法核对飞书技术回复附件所属的记录或字段。", 409)
     files = parse_cell(files)
+    if len(files) > MAX_REPLY_ATTACHMENTS:
+        raise sync.SyncError(f"每次技术回复最多回传 {MAX_REPLY_ATTACHMENTS} 个附件。", 409)
+    if sum(item["size"] for item in files) > MAX_REPLY_ATTACHMENT_BYTES:
+        raise sync.SyncError("每次技术回复回传的附件合计不能超过 5 MB。", 409)
     if not files:
         return []
     deadline = monotonic() + _DOWNLOAD_TIMEOUT

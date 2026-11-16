@@ -1,7 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from src import ticket_feedback
 from src.config import RuntimeConfig, Settings
@@ -16,11 +16,19 @@ class TestTicketFeedback(unittest.TestCase):
         self.values = {"status": "已修复", "reply": "检查订单\r\n已验证  ", "version": "3.4.0"}
         self.feishu_url = "https://fixture.feishu.cn/base/example?table=tblFixture"
 
-    def ingest(self, *, ticket_id="9007199254740993", record_id="recExample1", feedback=None):
+    def ingest(self, *, ticket_id="9007199254740993", record_id="recExample1", feedback=None, download=None):
         return ticket_feedback.ingest(
             self.cfg, ticket_id=ticket_id, record_id=record_id,
-            feedback=self.values if feedback is None else feedback, feishu_url=self.feishu_url,
+            feedback=self.values if feedback is None else feedback, feishu_url=self.feishu_url, download=download,
         )
+
+    @staticmethod
+    def file(token, name):
+        return {"file_token": token, "name": name, "size": 3}
+
+    @staticmethod
+    def download_files(files):
+        return [(item["name"], b"abc") for item in files]
 
     def test_posts_normalized_feedback_once_as_a_native_reply(self):
         ticket_id = "9007199254740993"
@@ -119,6 +127,64 @@ class TestTicketFeedback(unittest.TestCase):
         self.assertIn("请查看随回复提交的附件。", write.call_args.args[1])
         verify.assert_called_once_with(*write.call_args.args, attachment_names=("复现.png",))
         self.assertTrue(ticket_feedback.confirmed(self.cfg, "42", feedback))
+
+    def test_only_new_attachment_tokens_are_sent_after_earlier_replies(self):
+        old_image = self.file("boxOldImage", "截图.png")
+        new_image = self.file("boxNewImage", "截图.png")
+        new_file = self.file("boxNewText", "说明.txt")
+        initial = {**self.values, "attachments": [old_image]}
+        edited = {**initial, "reply": "已确认"}
+        appended = {**edited, "attachments": [old_image, new_file, new_image]}
+        download = Mock(side_effect=self.download_files)
+        with patch.object(ticket_feedback.TicketClient, "post_feedback") as write:
+            self.assertEqual(self.ingest(feedback=initial, download=download)["status"], "已回传")
+            self.assertEqual(self.ingest(feedback=edited, download=download)["status"], "已回传")
+            download.assert_called_once_with([old_image])
+            self.assertEqual(write.call_args.kwargs, {})
+            sent = self.ingest(feedback=appended, download=download)
+            for attachments in ([new_image, old_image, new_file], [new_image], appended["attachments"]):
+                current = {**appended, "attachments": attachments}
+                self.assertEqual(self.ingest(feedback=current, download=download)["returned_at"], sent["returned_at"])
+                self.assertTrue(ticket_feedback.confirmed(self.cfg, "9007199254740993", current))
+        self.assertEqual(download.call_args_list, [call([old_image]), call([new_image, new_file])])
+        self.assertEqual(write.call_count, 3)
+        self.assertIn("技术回复：已确认", write.call_args_list[1].args[1])
+        self.assertEqual(write.call_args.kwargs["attachments"], [("截图.png", b"abc"), ("说明.txt", b"abc")])
+
+    def test_legacy_confirmed_revision_recovers_only_the_matching_attachment_subset(self):
+        previous = self.file("boxOldImage", "旧截图.png")
+        addition = self.file("boxNewImage", "新截图.png")
+        first = {**self.values, "attachments": [previous]}
+        update = {**self.values, "reply": "补充说明", "attachments": [previous, addition]}
+        download = Mock(side_effect=self.download_files)
+        with patch.object(ticket_feedback.TicketClient, "post_feedback") as write:
+            self.ingest(feedback=first, download=download)
+            with ticket_feedback.connection(ticket_feedback._path(self.cfg), write=True) as conn:
+                conn.execute("DELETE FROM ticket_feedback_delivery")
+                conn.execute("DELETE FROM ticket_feedback_sent_file")
+            self.assertEqual(self.ingest(feedback=update, download=download)["status"], "已回传")
+        self.assertEqual(download.call_args_list, [call([previous]), call([addition])])
+        self.assertEqual(write.call_args.kwargs["attachments"], [("新截图.png", b"abc")])
+
+    def test_edited_reply_waits_for_prior_attachment_to_be_confirmed(self):
+        first_image = self.file("boxFirstImage", "旧截图.png")
+        added_image = self.file("boxLaterImage", "补充截图.png")
+        first = {**self.values, "attachments": [first_image]}
+        edit = {**self.values, "reply": "已验证新截图", "attachments": [first_image, added_image]}
+        download = Mock(side_effect=self.download_files)
+        with (patch.object(ticket_feedback.TicketClient, "post_feedback",
+                           side_effect=[TicketReplyUnconfirmed("旧截图待确认"), True]) as write,
+              patch.object(ticket_feedback.TicketClient, "has_feedback", side_effect=[False, True]) as verify):
+            self.assertEqual(self.ingest(feedback=first, download=download)["status"], "待核对七鱼回复")
+            self.assertEqual(self.ingest(feedback=edit, download=download)["status"], "待核对七鱼回复")
+            write.assert_called_once()
+            download.assert_called_once_with([first_image])
+            self.assertEqual(self.ingest(feedback=edit, download=download)["status"], "已回传")
+        prior = call(*write.call_args_list[0].args, attachment_names=("旧截图.png",))
+        self.assertEqual(verify.call_args_list, [prior, prior])
+        self.assertEqual(download.call_args_list, [call([first_image]), call([added_image])])
+        self.assertIn("技术回复：已验证新截图", write.call_args.args[1])
+        self.assertEqual(write.call_args.kwargs["attachments"], [("补充截图.png", b"abc")])
 
 
 if __name__ == "__main__":

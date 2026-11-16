@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import combinations
+import json
 from pathlib import Path
 import re
 from secrets import token_hex
@@ -9,7 +11,7 @@ import time
 from urllib.parse import urlsplit
 
 from .config import Settings
-from .qiyu.ticket import TicketClient, TicketError, TicketReplyUnconfirmed, TicketReplyVisible
+from .qiyu.ticket import MAX_REPLY_ATTACHMENTS, TicketClient, TicketError, TicketReplyUnconfirmed, TicketReplyVisible
 from .voc_assets import connection, digest, transaction
 
 
@@ -30,6 +32,17 @@ CREATE TABLE IF NOT EXISTS ticket_feedback (
 );
 CREATE INDEX IF NOT EXISTS ticket_feedback_retry
 ON ticket_feedback(writeback_status) WHERE writeback_status IN ('pending', 'failed', 'uncertain');
+CREATE TABLE IF NOT EXISTS ticket_feedback_delivery (
+    ticket_id TEXT PRIMARY KEY,
+    planned_files TEXT,
+    last_text_revision TEXT,
+    last_written_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS ticket_feedback_sent_file (
+    ticket_id TEXT NOT NULL,
+    file_token_hash TEXT NOT NULL,
+    PRIMARY KEY (ticket_id, file_token_hash)
+);
 """
 _PUBLIC = """SELECT status, reply, resolved_version, feishu_url, received_at,
                    writeback_status, written_at, error
@@ -119,6 +132,59 @@ def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool, att
     return "succeeded", int(time.time() * 1000), ""
 
 
+def _stored_text(row):
+    return {"status": row["status"], "reply": row["reply"], "version": row["resolved_version"]}
+
+
+def _legacy_files(row, files):
+    """Recover attachment identities only if the pre-upgrade revision matches."""
+    text = _stored_text(row)
+    if row["revision"] == digest(text):
+        return []
+    if row["revision"] == digest({**text, "attachments": files}):
+        return files
+    # Before this upgrade the source cell was limited to five files.
+    if len(files) <= MAX_REPLY_ATTACHMENTS * 2:
+        for count in range(1, min(MAX_REPLY_ATTACHMENTS, len(files) - 1) + 1):
+            for subset in combinations(files, count):
+                if row["revision"] == digest({**text, "attachments": subset}):
+                    return list(subset)
+    return None
+
+
+def _mark_delivered(conn, ticket_id, text, files, written_at):
+    conn.execute("""
+        UPDATE ticket_feedback_delivery SET last_text_revision = ?, last_written_at = ? WHERE ticket_id = ?
+    """, (digest(text), written_at, ticket_id))
+    conn.executemany("INSERT OR IGNORE INTO ticket_feedback_sent_file VALUES (?, ?)",
+                     ((ticket_id, digest(item["file_token"])) for item in files))
+
+
+def _delivery(conn, ticket_id, previous, files):
+    query = "SELECT * FROM ticket_feedback_delivery WHERE ticket_id = ?"
+    delivery = conn.execute(query, (ticket_id,)).fetchone()
+    if delivery is None:
+        legacy = _legacy_files(previous, files) if previous is not None else []
+        conn.execute("INSERT INTO ticket_feedback_delivery (ticket_id, planned_files) VALUES (?, ?)",
+                     (ticket_id, json.dumps(legacy) if legacy is not None else None))
+        if previous is not None and previous["writeback_status"] == "succeeded":
+            _mark_delivered(conn, ticket_id, _stored_text(previous), legacy or [], previous["written_at"])
+        delivery = conn.execute(query, (ticket_id,)).fetchone()
+    return delivery
+
+
+def _finish(conn, ticket_id, token, text, files, state, written_at, error):
+    with transaction(conn):
+        saved = conn.execute("""UPDATE ticket_feedback SET writeback_status = ?, written_at = ?, error = ?
+                                WHERE ticket_id = ? AND reply_token = ?""", (state, written_at, error, ticket_id, token))
+        if saved.rowcount == 1 and state == "succeeded":
+            _mark_delivered(conn, ticket_id, text, files, written_at)
+
+
+def _result(state, written_at, error, *, changed):
+    return {"status": _STATES[state], "returned_at": written_at, "changed": changed, "error": error}
+
+
 def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, feishu_url: str = "", download=None) -> dict:
     """Run under the Feishu table's write lock and keep inbox data before external writes."""
     if (not re.fullmatch(r"[1-9][0-9]{0,18}", ticket_id) or int(ticket_id) > 2 ** 63 - 1
@@ -128,6 +194,8 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
     if not any(values.values()):
         return {"status": "", "returned_at": None, "changed": False, "error": ""}
     revision = digest(values)
+    files = values.get("attachments", [])
+    text = {key: values[key] for key in ("status", "reply", "version")}
     path = _path(cfg)
     with connection(path, write=True) as conn:
         conn.executescript(_SCHEMA)
@@ -137,11 +205,45 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
             if ((same_ticket and same_ticket["record_id"] != record_id)
                     or (bound_ticket and bound_ticket["ticket_id"] != ticket_id)):
                 raise ValueError("飞书记录和七鱼工单的关联已变化，请核对工单 ID。")
-            changed = same_ticket is None or same_ticket["revision"] != revision
-            if not changed and same_ticket["writeback_status"] == "succeeded":
-                return {"status": _STATES["succeeded"], "returned_at": same_ticket["written_at"],
-                        "changed": False, "error": ""}
+            delivery = _delivery(conn, ticket_id, same_ticket, files)
+
+        changed = same_ticket is None or same_ticket["revision"] != revision
+        if not changed and same_ticket["writeback_status"] == "succeeded":
+            return _result("succeeded", same_ticket["written_at"], "", changed=False)
+        planned = json.loads(delivery["planned_files"]) if delivery["planned_files"] is not None else None
+        if planned is None and same_ticket is not None:
+            planned = _legacy_files(same_ticket, files)
+        reconcile = same_ticket is not None and same_ticket["writeback_status"] == "uncertain"
+        if changed and reconcile and files:
+            present = {item["file_token"] for item in files}
+            if planned is None or any(item["file_token"] in present for item in planned):
+                # An edit can arrive before the previous reply's attachments become visible.
+                # Resolve those files against the previous marker before selecting the next reply.
+                if planned is None:
+                    return _result("uncertain", None, "上一轮回复的附件仍待七鱼确认。", changed=False)
+                previous_text = _stored_text(same_ticket)
+                previous_token = same_ticket["reply_token"]
+                state, written_at, error = _writeback(
+                    cfg, ticket_id, _reply_text({**previous_text, "attachments": planned}, previous_token),
+                    reconcile=True, attachment_names=tuple(item["name"] for item in planned),
+                )
+                _finish(conn, ticket_id, previous_token, previous_text, planned, state, written_at, error)
+                if state != "succeeded":
+                    return _result(state, written_at, error, changed=False)
+                delivery = _delivery(conn, ticket_id, same_ticket, files)
+
+        with transaction(conn):
             if changed:
+                sent = {row[0] for row in conn.execute(
+                    "SELECT file_token_hash FROM ticket_feedback_sent_file WHERE ticket_id = ?", (ticket_id,))}
+                planned = [item for item in files if digest(item["file_token"]) not in sent]
+                unchanged_text = delivery["last_text_revision"] == digest(text)
+                if not planned and (unchanged_text or not any(text.values())):
+                    written_at = delivery["last_written_at"]
+                    conn.execute("""UPDATE ticket_feedback SET revision=?, status=?, reply=?, resolved_version=?,
+                                    writeback_status='succeeded', written_at=?, error='' WHERE ticket_id=?""",
+                                 (revision, text["status"], text["reply"], text["version"], written_at, ticket_id))
+                    return _result("succeeded", written_at, "", changed=False)
                 token = token_hex(8)
                 conn.execute("""
                     INSERT INTO ticket_feedback
@@ -154,29 +256,32 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
                         received_at = excluded.received_at, writeback_status = 'pending', written_at = NULL, error = ''
                 """, (ticket_id, record_id, revision, token, values["status"], values["reply"], values["version"],
                       _origin_link(feishu_url), int(time.time() * 1000)))
+                conn.execute("UPDATE ticket_feedback_delivery SET planned_files = ? WHERE ticket_id = ?",
+                             (json.dumps(planned), ticket_id))
             else:
                 token = same_ticket["reply_token"]
-            reconcile = not changed and same_ticket["writeback_status"] == "uncertain"
-        files = values.get("attachments", [])
-        names = tuple(item["name"] for item in files)
+            reconcile = reconcile and not changed
+        if planned is None:
+            raise ValueError("七鱼技术回复的待回传附件无法核对。")
+        names = tuple(item["name"] for item in planned)
         attachments = ()
         try:
-            if files and not reconcile:
+            if planned and not reconcile:
                 if download is None:
                     raise AttachmentDownloadError("飞书技术回复附件暂时无法下载。")
-                attachments = download(files)
+                attachments = download(planned)
                 if tuple(name for name, _ in attachments) != names:
                     raise AttachmentDownloadError("飞书下载的附件与本次技术回复不一致。")
         except AttachmentDownloadError as exc:
             state, written_at, error = "failed", None, str(exc)
         else:
             # Persist the intent before sending. After an interruption only read back the same token.
-            conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ?", (ticket_id,))
-            state, written_at, error = _writeback(cfg, ticket_id, _reply_text(values, token), reconcile=reconcile,
-                                                  attachments=attachments, attachment_names=names)
-        conn.execute("""UPDATE ticket_feedback SET writeback_status = ?, written_at = ?, error = ?
-                        WHERE ticket_id = ? AND reply_token = ?""", (state, written_at, error, ticket_id, token))
-    return {"status": _STATES[state], "returned_at": written_at, "changed": changed, "error": error}
+            conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ? AND reply_token = ?",
+                         (ticket_id, token))
+            state, written_at, error = _writeback(cfg, ticket_id, _reply_text({**text, "attachments": planned}, token),
+                                                  reconcile=reconcile, attachments=attachments, attachment_names=names)
+        _finish(conn, ticket_id, token, text, planned, state, written_at, error)
+    return _result(state, written_at, error, changed=changed)
 
 
 def get(cfg: Settings, ticket_id: str) -> dict | None:

@@ -17,11 +17,20 @@ class TicketFeedbackMediaTests(unittest.TestCase):
         self.record_id = "recTicket"
         self.field_id = "fldMedia"
 
-    def test_revision_excludes_expiring_urls_and_respects_size_limit(self):
+    def test_revision_excludes_expiring_urls(self):
         decorated = {**self.files[0], "tmp_url": "https://invalid.example/temporary", "type": "application/pdf"}
         self.assertEqual(media.parse_cell([decorated]), self.files)
-        with self.assertRaisesRegex(sync.SyncError, "5 MB"):
-            media.parse_cell([{**decorated, "size": media.MAX_REPLY_ATTACHMENT_BYTES + 1}])
+
+    def test_reply_limits_apply_to_downloaded_files_and_allow_larger_cell_history(self):
+        crowded = [{**self.files[0], "file_token": f"mediaExample{index}"}
+                   for index in range(media.MAX_REPLY_ATTACHMENTS + 1)]
+        oversized = [{**self.files[0], "size": media.MAX_REPLY_ATTACHMENT_BYTES + 1}]
+        for files, error in ((crowded, f"{media.MAX_REPLY_ATTACHMENTS} 个附件"), (oversized, "5 MB")):
+            with self.subTest(error=error), patch.object(media.subprocess, "run") as execute:
+                self.assertEqual(media.parse_cell(files), files)
+                with self.assertRaisesRegex(sync.SyncError, error):
+                    media.download(self.target, self.record_id, self.field_id, files)
+                execute.assert_not_called()
 
     def test_only_returns_original_bytes_when_identity_and_length_match(self):
         def mock_download(args, *, cwd, **kwargs):
