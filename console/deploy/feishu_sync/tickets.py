@@ -93,7 +93,10 @@ def _table(report: sync.Target, *, incremental=False, setup=None) -> ticket_fiel
                 or not isinstance(attachment.get("id"), str) or not ticket_fields._FIELD_ID.fullmatch(attachment["id"])):
             raise sync.SyncError("飞书技术回复附件的字段绑定无效。", 409)
         attachment_name = attachment["name"]
-        if fields.get(attachment_name) == ((attachment["id"], 17), False):
+        current_name = next((name for name, metadata in fields.items()
+                             if metadata == ((attachment["id"], 17), False) and name not in expected), None)
+        if current_name is not None:
+            attachment_name = current_name
             attachment_id = attachment["id"]
     target = replace(target, fields={role: name for role, name in target.fields.items() if name in matching})
     return ticket_fields.Target(**vars(target), approved=matching, primary=primary,

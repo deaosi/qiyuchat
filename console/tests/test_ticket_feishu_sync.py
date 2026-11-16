@@ -316,13 +316,22 @@ class TestTicketFeishuSync(unittest.TestCase):
             target = tickets._table(self.target, setup=setup)
             self.assertNotIn(column, target.approved)
             self.assertEqual(tickets._import_feedback(self.cfg, target)["imported"], 1)
-            self.assertEqual(tickets._import_feedback(self.cfg, target)["imported"], 0)
+            renamed = "回复附件"
+            schema[-1]["field_name"] = renamed
+            schema.append({"field_id": "fldOtherAttachment", "type": 17, "field_name": column, "is_primary": False})
+            fields[renamed] = fields.pop(column)
+            fields[column] = [{**file, "file_token": "boxDifferentToken"}]
+            renamed_target = tickets._table(self.target, setup=setup)
+            self.assertEqual(renamed_target.feedback_attachment, renamed)
+            self.assertEqual(renamed_target.attachment_id, field_id)
+            self.assertEqual(tickets._import_feedback(self.cfg, renamed_target)["imported"], 0)
             with self.assertRaisesRegex(sync.SyncError, "只读"):
-                tickets.ticket_fields.batch(target, "update", [{"record_id": "recFixture42", "fields": {column: None}}])
+                tickets.ticket_fields.batch(renamed_target, "update",
+                                           [{"record_id": "recFixture42", "fields": {renamed: None}}])
         download.assert_called_once_with(target, "recFixture42", field_id, [file])
         send.assert_called_once()
         self.assertEqual(send.call_args.kwargs["attachments"], [(file["name"], b"png")])
-        self.assertEqual(self.rows["42"]["fields"][column], [file])
+        self.assertEqual(self.rows["42"]["fields"][renamed], [file])
         self.assertEqual(self.rows["42"]["fields"]["回传状态"], "已回传")
 
     def test_existing_feedback_is_not_sent_when_only_the_link_changes(self):
