@@ -96,3 +96,13 @@ def next_due(path: Path, lane: str) -> int | None:
         row = conn.execute("SELECT ready_at FROM ticket_work WHERE lane = ? ORDER BY ready_at LIMIT 1",
                            (lane,)).fetchone()
         return row[0] if row else None
+
+
+def has_pending(path: Path, ticket_id: str, lanes: tuple[str, ...]) -> bool:
+    """Check for queued work, including jobs whose retry time has not arrived."""
+    placeholders = ", ".join("?" for _ in lanes)
+    with _database(path) as conn:
+        return conn.execute(
+            f"SELECT 1 FROM ticket_work WHERE ticket_id = ? AND lane IN ({placeholders}) LIMIT 1",
+            (ticket_id, *lanes),
+        ).fetchone() is not None

@@ -75,7 +75,7 @@ class AttachmentLimitError(Exception):
 
 
 class FeedbackChanged(Exception):
-    """The source was edited while its attachments were downloading."""
+    """The source is no longer safe to use for this reply."""
 
 
 def _path(cfg: Settings) -> Path:
@@ -221,7 +221,7 @@ def _prepare(conn):
 
 
 def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, feishu_url: str = "", download=None,
-           validate_files=None, resolve_author=None) -> dict:
+           validate_files=None, resolve_author=None, verify_source=None) -> dict:
     """Run under the Feishu table's write lock and keep inbox data before external writes."""
     if (not re.fullmatch(r"[1-9][0-9]{0,18}", ticket_id) or int(ticket_id) > 2 ** 63 - 1
             or not re.fullmatch(r"rec[A-Za-z0-9]{4,60}", record_id)):
@@ -320,6 +320,13 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
                              (ticket_id, token, author))
         manifest = tuple((item["name"], item["size"]) for item in planned)
         attachments = ()
+
+        def mark_uncertain():
+            if verify_source is not None:
+                verify_source()
+            conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ? AND reply_token = ?",
+                         (ticket_id, token))
+
         try:
             if planned:
                 if download is None:
@@ -327,18 +334,14 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
                 attachments = download(planned)
                 if tuple((name, len(data)) for name, data in attachments) != manifest:
                     raise AttachmentDownloadError("飞书下载的附件与本次技术回复不一致。")
-        except FeedbackChanged:
-            return _result("pending", None, "", changed=False)
-        except AttachmentDownloadError as exc:
-            state, written_at, error = "failed", None, str(exc)
-        else:
-            def mark_uncertain():
-                conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ? AND reply_token = ?",
-                             (ticket_id, token))
-
             state, written_at, error = _writeback(cfg, ticket_id, _reply_text({**text, "attachments": planned}, token),
                                                   reconcile=False, attachments=attachments,
                                                   attachment_manifest=manifest, before_send=mark_uncertain)
+        except FeedbackChanged:
+            _finish(conn, ticket_id, token, text, planned, "pending", None, "")
+            return _result("pending", None, "", changed=False)
+        except AttachmentDownloadError as exc:
+            state, written_at, error = "failed", None, str(exc)
         _finish(conn, ticket_id, token, text, planned, state, written_at, error)
     return _result(state, written_at, error, changed=changed)
 

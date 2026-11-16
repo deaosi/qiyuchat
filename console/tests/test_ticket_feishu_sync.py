@@ -9,6 +9,7 @@ from unittest.mock import patch
 from deploy.feishu_sync import tickets
 from src import voc_feishu_sync as sync
 from src.config import RuntimeConfig, Settings
+from src.qiyu import ticket as qiyu
 
 
 class TestTicketFeishuSync(unittest.TestCase):
@@ -190,9 +191,12 @@ class TestTicketFeishuSync(unittest.TestCase):
             self.assertEqual(tickets._upsert(self.target, tickets._projection(cfg, [{**source, "status_code": 20}])), (0, 1))
             result["changed"] = False
             self.assertEqual(tickets._import_feedback(cfg, self.target)["imported"], 0)
-        ingest.assert_called_with(cfg, ticket_id="42", record_id="recFixture42",
-                                  feedback={"status": "已处理", "reply": "已修复，待验证", "version": "1.6.3"},
-                                  feishu_url=self.target.destination)
+        received = ingest.call_args.kwargs.copy()
+        self.assertTrue(callable(received.pop("verify_source")))
+        self.assertEqual(ingest.call_args.args, (cfg,))
+        self.assertEqual(received, {"ticket_id": "42", "record_id": "recFixture42",
+                                    "feedback": {"status": "已处理", "reply": "已修复，待验证", "version": "1.6.3"},
+                                    "feishu_url": self.target.destination})
         self.assertEqual(fields["回传状态"], "已回传")
         self.assertEqual(fields["回传时间"], result["returned_at"])
         self.assertEqual(fields[tickets._INPUT["reply"]], [{"text": "已修复，待验证"}])
@@ -210,6 +214,69 @@ class TestTicketFeishuSync(unittest.TestCase):
                 tickets._import_feedback(self.cfg, self.target)
         ingest.assert_not_called()
         self.assertEqual(self.writes, [])
+
+    def test_text_reply_changes_during_qiyu_preflight_without_sending_the_old_revision(self):
+        reply = tickets._INPUT["reply"]
+        fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
+        fields[reply] = "初稿"
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        replies = []
+
+        def qiyu_request(path, body, _result, *, before_send=None):
+            if path == qiyu.HISTORY:
+                return list(replies)
+            if path == qiyu.DETAIL:
+                fields[reply] = "编辑后的回复"
+                return {"id": 42, "holderId": 23, "status": 10}
+            self.assertEqual(path, qiyu.REPLY)
+            before_send()
+            replies.append({"actionType": 20, "customerSee": False,
+                            "info": [{"content": body["comment"]}], "attachments": []})
+            return True
+
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(qiyu.TicketClient, "_post", side_effect=qiyu_request)):
+            first = tickets._import_feedback(self.cfg, self.target, exclude_closed=True)
+            self.assertEqual(first["imported"], 0)
+            self.assertEqual(replies, [])
+            self.assertEqual(self.writes, [])
+            self.assertEqual(tickets.ticket_feedback.get(self.cfg, "42")["writeback_status"], "pending")
+            self.assertEqual(tickets._import_feedback(self.cfg, self.target, exclude_closed=True)["imported"], 1)
+
+        self.assertEqual(len(replies), 1)
+        self.assertIn("技术回复：编辑后的回复", replies[0]["info"][0]["content"])
+        self.assertEqual(fields[tickets._OUTPUT["status"]], "已回传")
+
+    def test_manual_feedback_does_not_send_for_preexisting_or_concurrently_closed_rows(self):
+        closed_at = tickets.ticket_archive.CLOSED_AT
+        new = tickets._projection(self.cfg, [{"id": "42"}, {"id": "43"}])
+        for key, fields in new.items():
+            fields[tickets._INPUT["reply"]] = "不应回传"
+            self.rows[key] = {"record_id": "recFixture" + key, "fields": fields}
+        new["42"][closed_at] = 100
+        remote_replies = []
+
+        def qiyu_request(path, body, _result, *, before_send=None):
+            self.assertEqual(body["ticketId"], 43)
+            if path == qiyu.HISTORY:
+                return []
+            if path == qiyu.DETAIL:
+                new["43"][closed_at] = 200
+                return {"id": 43, "holderId": 23, "status": 10}
+            self.assertEqual(path, qiyu.REPLY)
+            before_send()
+            remote_replies.append(body)
+            return True
+
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(qiyu.TicketClient, "_post", side_effect=qiyu_request)):
+            outcome = tickets._import_feedback(self.cfg, self.target, exclude_closed=True)
+        self.assertEqual(outcome["checked"], 1)
+        self.assertEqual(outcome["imported"], 0)
+        self.assertEqual(remote_replies, [])
+        self.assertEqual(self.writes, [])
+        self.assertIsNone(tickets.ticket_feedback.get(self.cfg, "42"))
+        self.assertEqual(tickets.ticket_feedback.get(self.cfg, "43")["writeback_status"], "pending")
 
     def test_imports_multiline_technical_reply_with_mentions_and_links(self):
         url = "https://docs.example.com/steps?case=42#retest"
@@ -280,6 +347,33 @@ class TestTicketFeishuSync(unittest.TestCase):
             self.assertEqual(tickets.run(state)["historical_guest_links_updated"], 2)
             self.assertEqual(tickets.run(state)["historical_guest_links_updated"], 0)
         self.assertEqual(migrate.call_count, 2)
+
+    def test_manual_sync_does_not_enrich_archived_rows_or_overwrite_a_late_close(self):
+        closed_at = tickets.ticket_archive.CLOSED_AT
+        status = tickets._FIELDS["status"]
+        desired = tickets._projection(self.cfg, [{"id": key, "updated_at": 100, "status_code": 10}
+                                                  for key in ("42", "43")])
+        for key, fields in desired.items():
+            self.rows[key] = {"record_id": "recFixture" + key, "fields": dict(fields)}
+        self.rows["42"]["fields"].update({status: "已关闭", closed_at: 200})
+
+        def enrich(_cfg, candidates, _state):
+            self.assertEqual(set(candidates), {"43"})
+            self.rows["43"]["fields"].update({status: "已关闭", closed_at: 300})
+            return {"fetched": 0, "failed": 0, "deferred": 0}
+
+        state = Path(self.cfg.runtime.state_dir)
+        coverage = {"created_scope": "qiyu", "updated_scope": "qiyu"}
+        with (patch.object(tickets, "settings", return_value=self.cfg),
+              patch.object(tickets.support, "target_table", return_value=self.target),
+              patch.object(tickets, "_configured_table", return_value=(self.target, {"guest_links_migrated": True})),
+              patch.object(tickets, "_recent", return_value=(desired, coverage, {"42": None, "43": None})),
+              patch.object(tickets, "_enrich", side_effect=enrich),
+              patch.object(sync, "_call", side_effect=self.fake_api)):
+            result = tickets.run(state)
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(self.writes, [])
+        self.assertEqual([self.rows[key]["fields"][status] for key in ("42", "43")], ["已关闭", "已关闭"])
 
     def test_fixed_header_validation_does_not_recreate_missing_columns(self):
         with (patch.object(tickets.top, "_find_table", return_value=self.target.table_id),
@@ -357,7 +451,8 @@ class TestTicketFeishuSync(unittest.TestCase):
               patch.object(sync, "_call", side_effect=api),
               patch.object(tickets.ticket_feedback_media, "download",
                            return_value=[(file["name"], b"png")]) as download,
-              patch.object(tickets.TicketClient, "post_feedback") as send):
+              patch.object(tickets.TicketClient, "post_feedback",
+                           side_effect=lambda *args, before_send, **kwargs: before_send()) as send):
             target = tickets._table(self.target, setup=setup)
             self.assertNotIn(column, target.approved)
             self.assertEqual(tickets._import_feedback(self.cfg, target)["imported"], 1)
@@ -393,10 +488,11 @@ class TestTicketFeishuSync(unittest.TestCase):
             send.reset_mock()
             download.side_effect = edit_while_downloading
             self.assertEqual(tickets._import_feedback(self.cfg, renamed_target)["imported"], 0)
-            self.assertEqual(fields["回传状态"], "待回传")
-            send.assert_not_called()
+            self.assertEqual(fields["回传状态"], "已回传")
+            self.assertEqual(tickets.ticket_feedback.get(self.cfg, "42")["writeback_status"], "pending")
             download.assert_called_once_with(renamed_target, "recFixture42", field_id, [new_file])
 
+            send.reset_mock()
             download.side_effect = None
             download.return_value = [("诊断.log", b"log")]
             self.assertEqual(tickets._import_feedback(self.cfg, renamed_target)["imported"], 1)
@@ -574,6 +670,41 @@ class TestTicketFeishuSync(unittest.TestCase):
             self.assertEqual(download.call_count, 2)
             post.assert_called_once()
             self.assertIn("修正版", post.call_args.args[1])
+
+    def test_missing_feishu_detail_row_gets_a_bounded_recheck(self):
+        state = Path(self.cfg.runtime.state_dir)
+        queue = state / "ticket-work.db"
+        now = 1794648722000
+        batch = {"42": {"fields": {"网易七鱼工单ID": "42"}, "staff_id": None}}
+        tickets.ticket_work.enqueue(queue, "details", batch, now_ms=now)
+        with patch.object(sync, "_call", side_effect=self.fake_api):
+            result, _ = tickets._drain_details(self.cfg, self.target, queue, state, "details", batch, now,
+                                               review_lane="review")
+            self.assertEqual(result["deferred"], 1)
+            self.assertEqual(tickets.ticket_work.count(queue, "details"), 0)
+            self.assertEqual(tickets.ticket_work.next_due(queue, "review"), now + 30_000)
+            checked, _ = tickets._drain_details(self.cfg, self.target, queue, state, "review", batch, now + 30_000)
+        self.assertEqual(checked["failed"], 1)
+        self.assertEqual(tickets.ticket_work.count(queue, "review"), 0)
+        self.assertEqual(self.writes, [])
+
+    def test_replayed_ticket_does_not_rewrite_an_identical_feishu_row(self):
+        item = {"id": "42", "title": "现有工单", "status_code": 10, "updated_at": 1794648722000}
+        desired = tickets._projection(self.cfg, [item])
+        self.rows["42"] = {"record_id": "recFixture42", "fields": dict(desired["42"])}
+
+        def api(target, method, resource, *, params=None, data=None):
+            response = self.fake_api(target, method, resource, params=params, data=data)
+            if resource == "/records/search":
+                for record in response["items"]:
+                    record["fields"] = {name: value for name, value in record["fields"].items()
+                                        if name in data["field_names"]}
+            return response
+
+        with patch.object(sync, "_call", side_effect=api):
+            selected, existing = tickets._current_export(self.target, desired)
+            self.assertEqual(tickets._upsert(self.target, selected, existing=existing), (0, 0))
+        self.assertEqual(self.writes, [])
 
     def test_queued_export_never_overwrites_a_closed_or_newer_row(self):
         items = [{"id": "42", "updated_at": 100}, {"id": "43", "updated_at": 100}, {"id": "44", "updated_at": 100}]

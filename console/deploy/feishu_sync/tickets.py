@@ -551,10 +551,11 @@ def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_sta
     if exclude_closed:
         columns.append(ticket_archive.CLOSED_AT)
         # The v1 filter API only supports flat conditions. Prioritize excluding archived rows
-        # on the server; look for technical edits on the projected active rows.
-        query["filter"] = {"conjunction": "and", "conditions": [
-            {"field_name": ticket_archive.CLOSED_AT, "operator": "isEmpty", "value": []}
-        ]}
+        # in incremental reads; full scans can select rows with technical input first.
+        if window is not None:
+            query["filter"] = {"conjunction": "and", "conditions": [
+                {"field_name": ticket_archive.CLOSED_AT, "operator": "isEmpty", "value": []}
+            ]}
     ticket_fields.require(target, [*columns, *((ticket_reply_delta.TIME_FIELD,) if window is not None else ())])
     if window is None:
         rows = (row for page in _record_pages(target, query) for row in page)
@@ -590,7 +591,7 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
     if pending is not None:
         rows = pending
     else:
-        rows = _technical_rows(cfg, target, window=window) if window else _technical_rows(cfg, target)
+        rows = _technical_rows(cfg, target, window=window, exclude_closed=exclude_closed)
     # Durable pending or ambiguous writes remain eligible after the time window has moved on.
     retries = ticket_feedback.retry_records(cfg) if retry else {}
     for key, record in retries.items():
@@ -641,11 +642,25 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             except sync.SyncError as exc:
                 result = {"status": "回传失败", "returned_at": None, "error": str(exc)}
             else:
+                revision = digest(ticket_feedback._normalized(feedback))
                 if baseline is not None and key in baseline:
-                    if baseline[key] == [record_id, digest(ticket_feedback._normalized(feedback))]:
+                    if baseline[key] == [record_id, revision]:
                         continue
                     handled.add(key)
-                kwargs = {}
+
+                def verify_source():
+                    try:
+                        fresh = sync._existing(lookup, {key: {}}).get(key)
+                    except sync.SyncError as exc:
+                        raise ticket_feedback.FeedbackChanged() from exc
+                    current = fresh["fields"] if fresh else {}
+                    if (not fresh or fresh["record_id"] != record_id
+                            or exclude_closed and sync._value(current.get(ticket_archive.CLOSED_AT))
+                            or not _source_matches(cfg, key, current.get(_FIELDS["source"]))
+                            or _feedback_revision(current, feedback_inputs) != revision):
+                        raise ticket_feedback.FeedbackChanged()
+
+                kwargs = {"verify_source": verify_source}
                 if type(edited_at := fields.get(ticket_reply_delta.TIME_FIELD)) is int and isinstance(target, ticket_fields.Target):
                     def resolve_author(changed_text, files):
                         return ticket_reply_author.resolve(
@@ -656,15 +671,7 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
                 if feedback.get("attachments"):
                     def download(files):
                         try:
-                            attachments = ticket_feedback_media.download(target, record_id, target.attachment_id, files)
-                            fresh = sync._existing(lookup, {key: {}}).get(key)
-                            current = fresh["fields"] if fresh else {}
-                            if (not fresh or fresh["record_id"] != record_id
-                                    or sync._value(current.get(ticket_archive.CLOSED_AT))
-                                    or not _source_matches(cfg, key, current.get(_FIELDS["source"]))
-                                    or _feedback(current, attachment_column, investigation_column) != feedback):
-                                raise ticket_feedback.FeedbackChanged()
-                            return attachments
+                            return ticket_feedback_media.download(target, record_id, target.attachment_id, files)
                         except sync.SyncError as exc:
                             raise ticket_feedback.AttachmentDownloadError(str(exc)) from None
                     kwargs["download"] = download
@@ -679,6 +686,11 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
                     waiting[key] = int(time() * 1000) + _FEEDBACK_QUIET_MS
                 elif result["status"] in ("回传失败", "待核对七鱼回复") and not result.get("blocked"):
                     waiting[key] = window[1] + _FEEDBACK_QUIET_MS + _RECONCILE
+            if result["status"] == "待回传":
+                # The source changed during preflight. Wait for its next stable version
+                # before writing a receipt to a row that may have been closed or reassigned.
+                handled.discard(key)
+                continue
             error = result.get("error") or ""
             values = {_OUTPUT["status"]: result["status"], _OUTPUT["returned_at"]: result["returned_at"],
                       _OUTPUT["error"]: error[:300]}
@@ -701,9 +713,14 @@ def _incremental_projection(cfg, start, end):
 
 
 def _current_export(target, desired):
-    ticket_fields.require(target, (_FIELDS["updated"], ticket_archive.CLOSED_AT))
-    lookup = replace(target, fields={"key": _FIELDS["key"], "updated": _FIELDS["updated"],
-                                     "closed": ticket_archive.CLOSED_AT})
+    key_column, updated_column = _FIELDS["key"], _FIELDS["updated"]
+    ticket_fields.require(target, (updated_column, ticket_archive.CLOSED_AT))
+    writable = ticket_fields.select(target, {
+        name: name for fields in desired.values() for name in fields if name != key_column
+    })
+    columns = {name: name for name in (updated_column, ticket_archive.CLOSED_AT)}
+    columns.update(writable)
+    lookup = replace(target, fields={"key": key_column, **columns})
     existing = sync._existing(lookup, desired)
     selected = {}
     for key, fields in desired.items():
@@ -755,6 +772,12 @@ def _drain_details(cfg, target, queue, state_dir, lane, batch, now, *, review_la
         ticket_fields.require(target, (_FIELDS["updated"], ticket_archive.CLOSED_AT))
         lookup = replace(target, fields={**target.fields, "closed": ticket_archive.CLOSED_AT})
         existing = sync._existing(lookup, batch)
+        missing = batch.keys() - existing.keys()
+        if missing and review_lane is not None:
+            ticket_work.enqueue(queue, review_lane, {key: batch[key] for key in missing},
+                                now_ms=now + _RETRY_MS, replace_existing=False)
+        elif missing:
+            details["failed"] = len(missing)
         desired = {}
         minimum_updates = {}
         for key, row in existing.items():
@@ -784,7 +807,7 @@ def _drain_details(cfg, target, queue, state_dir, lane, batch, now, *, review_la
                 _, details["updated"] = _upsert(target, writes, existing=existing,
                                                 required=(_FIELDS["updated"], ticket_archive.CLOSED_AT))
                 confirmed = {key: batch[key] for key in ready}
-        details["deferred"] = max(details["deferred"], len(postponed))
+        details["deferred"] = max(details["deferred"], len(postponed)) + (len(missing) if review_lane else 0)
         if review_lane is not None:
             # Schedule one fresh check after the first confirmed write. Repeat discoveries
             # leave that check's original due time in place, even if a new reply arrives.
@@ -834,24 +857,28 @@ def _drain_exports(cfg, target, queue, state_dir, lane, detail_lane, review_lane
     return inserted, updated, details, submitters
 
 
-def _archive_inactive(cfg, target, state, now):
+def _archive_inactive(cfg, target, state, now, *, queue, lanes):
     client = TicketClient(cfg.qiyu)
     cutoff = ticket_archive.six_month_cutoff(now)
     inputs = _feedback_input_columns(target)
 
     def eligible(key, fields):
         identifier = _id(key)
-        if identifier is None or not _source_matches(cfg, key, fields.get(_FIELDS["source"])):
+        if (identifier is None or not _source_matches(cfg, key, fields.get(_FIELDS["source"]))
+                or ticket_work.has_pending(queue, key, lanes)):
             return False
-        total, found = client.search(offset=0, limit=2, bounds={"ticketId": identifier})
-        if total != 1 or len(found) != 1 or _id(found[0].get("id")) != identifier:
-            return False
-        source = found[0]
-        created = _time(source.get("createTime"))
-        updated = _time(source.get("modifyTime"))
-        if created is None or ("modifyTime" not in source):
-            return False
-        return max(created, updated or created) < cutoff
+        try:
+            source = client.detail(identifier)
+            created = _time(source.get("createTime"))
+            updated = ticket_updated_at(source, [])
+            if created is None or max(created, updated or created) >= cutoff:
+                return False
+            latest = ticket_updated_at(source, client.history(identifier))
+        except TicketError as exc:
+            if exc.http_status == 404:
+                return False
+            raise
+        return max(created, latest or created) < cutoff
 
     def pending(fields):
         if sync._value(fields.get(_OUTPUT["status"])) in ("待回传", "回传失败", "待核对七鱼回复"):
@@ -895,6 +922,7 @@ def run(state_dir, *, incremental=False):
         now = int(time() * 1000)
         setup_path = state_dir / "ticket-table-setup.json"
         target, setup = _configured_table(report, state_dir, incremental=incremental)
+        closed_bound = bool(ticket_fields.select(target, {ticket_archive.CLOSED_AT: None}))
         state_path = state_dir / "ticket-incremental.json"
         state = support._read_state(state_path) if incremental and state_path.exists() else {}
         if not isinstance(state, dict):
@@ -935,7 +963,7 @@ def run(state_dir, *, incremental=False):
                 feedback = _drain_feedback(cfg, target, queue, inbound, now, (feedback_start, feedback_end),
                                            baseline=baseline)
             else:
-                feedback = _import_feedback(cfg, target, baseline=baseline)
+                feedback = _import_feedback(cfg, target, baseline=baseline, exclude_closed=closed_bound)
         except _SYNC_ERRORS as exc:
             message = str(exc) if type(exc) is ValueError or isinstance(exc, sync.SyncError) else "飞书技术回复暂无法核对。"
             feedback = {"status": "failed", "message": message}
@@ -943,16 +971,27 @@ def run(state_dir, *, incremental=False):
             setup["feedback_header_baseline"] = baseline
             support._write_state(setup_path, setup)
         previous_qiyu = state.get("qiyu_until", 0)
+        next_replay = None
         source_error = ""
         try:
             if incremental:
                 start = _recent_checkpoint(state, "qiyu_until", now, _MINUTE,
                                            _RECONCILE * 2 if reconcile else None)
+                replay_start = state.get("qiyu_replay_from")
+                has_frontier = type(previous_qiyu) is int and 0 < previous_qiyu <= now
+                if has_frontier and type(replay_start) is int and 0 <= replay_start <= previous_qiyu:
+                    start = replay_start
                 upper = min(now, start + _DAY)
                 desired, coverage, staff_ids = _incremental_projection(cfg, start, upper)
                 end = coverage["created_period"][1]
-                if type(previous_qiyu) is int and end < upper and end <= previous_qiyu < upper:
-                    desired, coverage, staff_ids = _incremental_projection(cfg, previous_qiyu + 1, upper)
+                if has_frontier and end < previous_qiyu:
+                    next_replay = end + 1
+                if has_frontier and end <= previous_qiyu < now:
+                    # Keep the completed overlap slice while continuing recent changes.
+                    live_start = previous_qiyu + 1
+                    live, coverage, live_staff = _incremental_projection(cfg, live_start, min(now, live_start + _DAY))
+                    desired.update(live)
+                    staff_ids.update(live_staff)
                     end = coverage["created_period"][1]
             else:
                 end = now
@@ -972,19 +1011,36 @@ def run(state_dir, *, incremental=False):
                                                  for key, fields in desired.items()}, now_ms=now)
             if not source_error:
                 state["qiyu_until"] = max(end, previous_qiyu) if type(previous_qiyu) is int else end
-                if reconcile:
+                if next_replay is None:
+                    state.pop("qiyu_replay_from", None)
+                else:
+                    state["qiyu_replay_from"] = next_replay
+                if reconcile and next_replay is None:
                     state["reconciled_at"] = now
                 support._write_state(state_path, state)
             inserted, changed, details, submitters = _drain_exports(
                 cfg, target, queue, state_dir, outbound, details_lane, review_lane, now,
             )
         else:
-            submitters = _submitters(cfg, desired, staff_ids, state_dir)
-            details = _enrich(cfg, desired, state_dir)
-            for offset in range(0, len(desired), MATCH_SIZE):
-                keys = list(desired)[offset:offset + MATCH_SIZE]
-                group = {key: desired[key] for key in keys}
-                added, adjusted = _upsert(target, group)
+            exporting = desired
+            if closed_bound:
+                exporting = {}
+                keys = list(desired)
+                for offset in range(0, len(keys), MATCH_SIZE):
+                    group = {key: desired[key] for key in keys[offset:offset + MATCH_SIZE]}
+                    selected, _ = _current_export(target, group)
+                    exporting.update(selected)
+            submitters = _submitters(cfg, exporting, staff_ids, state_dir)
+            details = _enrich(cfg, exporting, state_dir)
+            keys = list(exporting)
+            for offset in range(0, len(keys), MATCH_SIZE):
+                group = {key: exporting[key] for key in keys[offset:offset + MATCH_SIZE]}
+                if closed_bound:
+                    group, existing = _current_export(target, group)
+                    added, adjusted = _upsert(target, group, existing=existing,
+                                              required=(_FIELDS["updated"], ticket_archive.CLOSED_AT))
+                else:
+                    added, adjusted = _upsert(target, group)
                 inserted += added
                 changed += adjusted
         migrated = 0
@@ -1017,7 +1073,9 @@ def run(state_dir, *, incremental=False):
                 and monotonic() - started < _ARCHIVE_START_BUDGET
                 and feedback.get("status") != "failed"):
             try:
-                archive = _archive_inactive(cfg, target, state, now)
+                archive = _archive_inactive(
+                    cfg, target, state, now, queue=queue, lanes=(inbound, outbound, details_lane, review_lane),
+                )
                 state["archive_cursor"] = archive.get("next_cursor")
                 state["archive_pending"] = archive["more_work"]
                 state["daily_at"] = now
@@ -1041,7 +1099,7 @@ def run(state_dir, *, incremental=False):
         **({"protected_columns_skipped": list(target.skipped)}
            if isinstance(target, ticket_fields.Target) and target.skipped else {}),
             **({"source_error": source_error} if source_error else {}),
-            **({"incremental": True, "reconciled": reconcile and not source_error, "daily": daily,
+            **({"incremental": True, "reconciled": reconcile and not source_error and next_replay is None, "daily": daily,
                 "archive": {key: value for key, value in archive.items() if key != "next_cursor"},
                 "queued": {name: ticket_work.count(queue, lane) for name, lane in
                            (("feedback", inbound), ("records", outbound), ("details", details_lane),
