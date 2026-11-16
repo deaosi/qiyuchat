@@ -325,9 +325,10 @@ def project_ticket(cfg: Settings | None, row: dict, media_links, *, submitter=""
 
 
 def forwarded_reply_parts(content: object) -> tuple[str, str] | None:
-    """Extract the body and the source marker from a complete writeback reply."""
+    """Extract the visible body and source marker from a complete writeback reply."""
     if isinstance(content, str) and (match := _FORWARDED_REPLY.fullmatch(content.replace("\r\n", "\n").strip())):
-        return _SYNC_MARKER.sub("", match[1]).strip(), match[2]
+        body = _SYNC_MARKER.sub("", match[1]).strip()
+        return ("" if body == ticket_feedback.ATTACHMENT_ONLY_REPLY else body), match[2]
     return None
 
 

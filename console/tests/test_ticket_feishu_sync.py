@@ -529,7 +529,7 @@ class TestTicketFeishuSync(unittest.TestCase):
             self.assertEqual(tickets.ticket_work.next_due(queue, "check"), now + 90_000)
             self.assertEqual(row["点击查看跟进回复"]["text"], "查看跟进回复")
             self.assertIn("第一轮回复", row["跟进回复上下文"])
-            self.assertIn("附件 1 个", row["跟进回复上下文"])
+            self.assertNotIn("附件 1 个", row["跟进回复上下文"])
             _, _, result, _ = tickets._drain_exports(self.cfg, self.target, queue, state, "records", "details",
                                                      "check", now + 90_000)
             self.assertEqual(result["updated"], 0)

@@ -56,6 +56,8 @@ def _reply_content(fields, attachments):
         attachments.extend(media)
         if not echo and (echo := _FEISHU_ECHO.fullmatch(value)):
             value, reply_token = echo.groups()
+        if echo and value == ticket_feedback.ATTACHMENT_ONLY_REPLY:
+            continue
         visible = ticket_guest._guest_text(clean_visible_text(value), None)
         if visible:
             parts.append(visible)
@@ -109,8 +111,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
     context_length = 0
     context_omitted = False
     latest = ""
-    has_attachments = False
-    has_reply = False
+    has_followup = False
     history_length = 0
     omitted = False
     for entry in ordered:
@@ -144,20 +145,20 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
                 sender = f"七鱼署名 {sender}"
         header = " · ".join(part for part in (when, direction, sender) if part)
         marker = f"附件 {count} 个" if count else ""
-        if from_feishu:
-            forwarded = ticket_guest.forwarded_followup(entry)
-            if forwarded is not None:
-                text, media = forwarded
-                has_reply |= bool(text)
-                has_attachments |= bool(_attached_count(media))
-        else:
-            has_attachments |= bool(_attached_count(ticket_guest.followup_media(entry)))
-            if not has_reply and message:
-                has_reply = bool(ticket_guest.native_followup_text(entry))
+        if not has_followup:
+            if from_feishu:
+                forwarded = ticket_guest.forwarded_followup(entry)
+                if forwarded is not None:
+                    text, media = forwarded
+                    has_followup = bool(text or _attached_count(media))
+            else:
+                has_followup = bool(ticket_guest.native_followup_text(entry)
+                                    or _attached_count(ticket_guest.followup_media(entry)))
+        if not from_feishu:
             if not latest:
                 latest = "\n".join(part for part in (header, _shorten(message, _MAX_LATEST), marker) if part)
         if not context_omitted:
-            full_entry = "\n".join(part for part in (header, message, marker) if part)
+            full_entry = "\n".join(part for part in (header, message) if part)
             units = len(full_entry.encode("utf-16-le")) // 2
             combined_length = context_length + units + (2 if context else 0)
             if not context or combined_length <= _MAX_CONTEXT:
@@ -167,7 +168,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
         summary = "\n".join(part for part in (header, _shorten(message, _MAX_REPLY), marker) if part)
         if omitted or len(entries) >= _MAX_REPLIES or history_length + len(summary) + 2 > _MAX_HISTORY:
             omitted = True
-            if context_omitted and latest and has_attachments and has_reply:
+            if context_omitted and latest and has_followup:
                 break
             continue
         entries.append(summary)
@@ -177,10 +178,8 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
     if omitted:
         history.insert(0, f"以下为最近 {len(entries)} 条回复")
     reply_link = None
-    if has_reply:
+    if has_followup:
         reply_link = {"text": "查看跟进回复", "link": ticket_guest.reply_url_for(cfg, ticket_id)}
-    elif has_attachments:
-        reply_link = {"text": "查看跟进回复", "link": ticket_guest.followup_url_for(cfg, ticket_id)}
     return {
         COLUMNS["latest"]: latest,
         COLUMNS["history"]: "\n\n".join(history),

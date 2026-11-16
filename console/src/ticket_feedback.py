@@ -59,6 +59,7 @@ _STATES = {
     "failed": "回传失败",
     "uncertain": "待核对七鱼回复",
 }
+ATTACHMENT_ONLY_REPLY = "请查看随回复提交的附件。"
 
 
 class AttachmentDownloadError(Exception):
@@ -120,7 +121,7 @@ def _reply_text(values: dict, token: str) -> str:
         if values.get(key):
             parts.append(f"{label}：{values[key]}")
     if len(parts) == 1 and values.get("attachments"):
-        parts.append("请查看随回复提交的附件。")
+        parts.append(ATTACHMENT_ONLY_REPLY)
     parts.append(f"〔语海同步 {token}〕")
     return "\n".join(parts)
 

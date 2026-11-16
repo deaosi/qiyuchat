@@ -316,16 +316,16 @@ def followup_media(entry: dict) -> list[dict]:
     return attachments
 
 
-def forwarded_followup(entry: dict, names: re.Pattern[str] | None = None) -> tuple[str, list[dict]] | None:
+def forwarded_followup(entry: dict) -> tuple[str, list[dict]] | None:
     """Read a Feishu feedback reply recorded by Qiyu, without sharing its sync marker."""
-    matched = _forwarded_followup(entry, names)
+    matched = _forwarded_followup(entry)
     if matched is None:
         return None
     text, attachments, _ = matched
     return text, attachments
 
 
-def _forwarded_followup(entry: dict, names: re.Pattern[str] | None) -> tuple[str, list[dict], str] | None:
+def _forwarded_followup(entry: dict) -> tuple[str, list[dict], str] | None:
     if (_id(entry.get("actionType")) not in (20, 101)
             or entry.get("customerSee") not in (False, 0, "0", "false", "False")):
         return None
@@ -335,7 +335,7 @@ def _forwarded_followup(entry: dict, names: re.Pattern[str] | None) -> tuple[str
             continue
         if parts := tickets.forwarded_reply_parts(field.get("content")):
             body, token = parts
-            text = _guest_text(clean_visible_text(body), names)
+            text = _guest_text(clean_visible_text(body), None)
             if len(text) > _MAX_FORWARDED_REPLY_TEXT:
                 text = text[:_MAX_FORWARDED_REPLY_TEXT - 1].rstrip() + "…"
             return text, tickets._attachments(entry.get("attachments")), token
@@ -365,15 +365,15 @@ def _read_reply_authors(cfg: Settings, identifier: int) -> dict[str, str]:
         return {}
 
 
-def _shared_feedback(feedback: dict | None, names) -> dict | None:
+def _shared_feedback(feedback: dict | None) -> dict | None:
     if not feedback:
         return None
     state = feedback.get("writeback_status")
     return {
-        "status": _guest_text(feedback.get("status"), names),
-        "reply": _guest_text(feedback.get("reply"), names),
-        "resolved_version": _guest_text(feedback.get("resolved_version"), names),
-        "investigation": _guest_text(feedback.get("investigation"), names),
+        "status": _guest_text(feedback.get("status"), None),
+        "reply": _guest_text(feedback.get("reply"), None),
+        "resolved_version": _guest_text(feedback.get("resolved_version"), None),
+        "investigation": _guest_text(feedback.get("investigation"), None),
         "received_at": tickets._millis(feedback.get("received_at")),
         "writeback_status": state if state in ticket_feedback._STATES else "",
         "written_at": tickets._millis(feedback.get("written_at")),
@@ -424,8 +424,9 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
     records = []
     media: dict[str, tuple[str, str, bool]] = {}
 
-    def scoped_links(items: list[dict]) -> tuple[list[dict], list[dict]]:
+    def scoped_links(items: list[dict], *, followup=False) -> tuple[list[dict], list[dict]]:
         images, attachments = [], []
+        seen_ids = set()
         for upstream, original_name, is_image in ticket_media.source_items(items):
             parts = urlsplit(upstream)
             # The provider can rotate a signed query without changing the underlying attachment.
@@ -434,12 +435,15 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
             else:
                 identity = f"{token}/attachment/{parts.netloc.lower()}{parts.path}"
             file_id = sha256(identity.encode()).hexdigest()
+            if file_id in seen_ids:
+                continue
+            seen_ids.add(file_id)
             if file_id not in media:
                 if len(media) >= _MAX_MEDIA:
                     continue
                 suffix = PurePosixPath(original_name).suffix.lower()
                 suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
-                safe_stem = _guest_text(PurePosixPath(original_name).stem, names)
+                safe_stem = _guest_text(PurePosixPath(original_name).stem, None if followup else names)
                 name = (safe_stem or ("工单截图" if is_image else "工单附件")) + suffix
                 media[file_id] = upstream, name, is_image
             kind = "images" if is_image else "attachments"
@@ -473,11 +477,13 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
     source_logs = logs or []
     followups = []
     replies_truncated = False
-    seen = set()
-    ordered_logs = sorted(source_logs, key=lambda entry: tickets._millis(entry.get("time")) or 0, reverse=True)
+    attachment_only_seen = set()
+    ordered_logs = sorted(source_logs,
+                          key=lambda entry: (tickets._millis(entry.get("time")) or 0, _id(entry.get("id")) or 0),
+                          reverse=True)
     reply_authors = reply_authors or {}
     for entry in ordered_logs:
-        forwarded = _forwarded_followup(entry, names)
+        forwarded = _forwarded_followup(entry)
         if forwarded is not None:
             text, sources, reply_token = forwarded
         elif scope == "detail":
@@ -492,15 +498,13 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
                 replies_truncated = True
                 break
             continue
-        images, attachments = scoped_links(sources)
-        fresh_images, fresh_attachments = [], []
-        for items, fresh in ((images, fresh_images), (attachments, fresh_attachments)):
-            for item in items:
-                if item["url"] not in seen:
-                    seen.add(item["url"])
-                    fresh.append(item)
-        if text or fresh_images or fresh_attachments:
-            item = {"time": tickets._millis(entry.get("time")), "images": fresh_images, "attachments": fresh_attachments}
+        images, attachments = scoped_links(sources, followup=True)
+        if scope == "attachments":
+            images = [image for image in images if image["url"] not in attachment_only_seen]
+            attachments = [file for file in attachments if file["url"] not in attachment_only_seen]
+            attachment_only_seen.update(item["url"] for item in [*images, *attachments])
+        if text or images or attachments:
+            item = {"time": tickets._millis(entry.get("time")), "images": images, "attachments": attachments}
             if forwarded is not None:
                 item["source"] = "feishu"
                 if scope != "attachments" and (author := _guest_text(reply_authors.get(reply_token), None)):
@@ -546,7 +550,7 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
     if cfg is not None and (identifier := _id(raw.get("id"))) is not None:
         payload["sessions"] = _shared_sessions(cfg, identifier, names, scoped_links)
         feedback = _read_feedback(cfg, identifier) if feedback is _UNREAD_FEEDBACK else feedback
-        payload["technical_feedback"] = _shared_feedback(feedback, names)
+        payload["technical_feedback"] = _shared_feedback(feedback)
     return payload, media
 
 

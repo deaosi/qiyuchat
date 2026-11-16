@@ -469,7 +469,8 @@ class TicketModuleTests(LocalFixture):
 
     def test_guest_ticket_refreshes_forwarded_feedback_with_scoped_attachments(self):
         ticket_id = "581030"
-        detail = {"id": int(ticket_id), "title": "打印异常", "holderName": "受理客服"}
+        detail = {"id": int(ticket_id), "title": "打印异常", "holderName": "受理客服",
+                  "creatorName": "排查店铺"}
         paths = [urlsplit(link_for(self.cfg, ticket_id)).path for link_for in (
             ticket_guest.url_for, ticket_guest.reply_url_for, ticket_guest.followup_url_for,
         )]
@@ -508,11 +509,11 @@ class TicketModuleTests(LocalFixture):
                 event(4, echoed("截短标记", "0123abcd"), shared=False),
                 event(5, echoed("复测完成\n1. 日志已补充\n电话 13812345678 https://example.org/private"), shared=False,
                       attachment={"url": shot, "name": "复测结果.png"}),
-                event(6, "语海 Voc · 飞书技术反馈\n技术支持排查结果：补充诊断日志\n〔语海同步 1123456789abcdef〕", shared=False,
-                      attachment={"url": document, "name": "诊断日志.log"}),
+                event(6, "语海 Voc · 飞书技术反馈\n技术支持排查结果：排查店铺补充诊断日志\n〔语海同步 1123456789abcdef〕", shared=False,
+                      attachment={"url": document, "name": "排查店铺诊断日志.log"}),
             ))
             feedback.update(writeback_status="succeeded", written_at=1794537200007,
-                            investigation="复现故障，密钥：secretKey")
+                            investigation="排查店铺复现故障，密钥：secretKey")
             detail_view = ticket_guest.resolve_payload(self.cfg, detail_token)
             self.assertEqual(history.call_count, 2)
             first, second = detail_view["followup_replies"]
@@ -522,9 +523,9 @@ class TicketModuleTests(LocalFixture):
             self.assertEqual(first["time"], 1794537200005)
             self.assertIn("复测完成\n1. 日志已补充", first["text"])
             self.assertEqual(second["author"], "飞书排查同事")
-            self.assertEqual(second["text"], "技术支持排查结果：补充诊断日志")
-            self.assertEqual(second["attachments"][0]["name"], "诊断日志.log")
-            self.assertIn("复现故障", detail_view["technical_feedback"]["investigation"])
+            self.assertEqual(second["text"], "技术支持排查结果：排查店铺补充诊断日志")
+            self.assertEqual(second["attachments"][0]["name"], "排查店铺诊断日志.log")
+            self.assertIn("排查店铺复现故障", detail_view["technical_feedback"]["investigation"])
             reply_authors["0123456789abcdef"] = "飞书回复同事"
             detail_view = ticket_guest.resolve_payload(self.cfg, detail_token)
             self.assertEqual(history.call_count, 3)
@@ -550,6 +551,31 @@ class TicketModuleTests(LocalFixture):
             for private in ("语海同步", "没有确认可供访客阅读", "校验中有可见冲突", "截短标记", "source-secret",
                             "https://example.org/private", "13812345678", "secretKey", unrelated):
                 self.assertNotIn(private, public)
+
+    def test_followup_files_render_in_each_round_that_includes_them(self):
+        detail = {"id": 581001, "title": "工单标题"}
+        token = "a" * 43
+        origin = "https://shop.qiyukf.net/"
+        screenshot = {"url": origin + "1" * 32 + ".png?signature=first", "name": "截图.png"}
+        renewed = {**screenshot, "url": screenshot["url"].replace("first", "second")}
+        archive = {"url": origin + "2" * 32 + ".zip", "name": "排查日志.zip"}
+        logs = [
+            {"id": 2, "time": 1794537200000, "action": "回复", "actionType": 20, "customerSee": False,
+             "operator": "技术同事", "attachments": [screenshot, renewed, archive],
+             "info": [{"title": "回复", "content": "语海 Voc · 飞书技术反馈\n请查看随回复提交的附件。\n〔语海同步 0123456789abcdef〕"}]},
+            {"id": 1, "time": 1794537200000, "action": "回复", "actionType": 20,
+             "operator": "提报人", "attachments": [screenshot],
+             "info": [{"title": "回复", "content": "首次提交截图"}]},
+        ]
+        payload, media = ticket_guest._project(detail, token, logs=logs, scope="replies")
+        first, second = payload["followup_replies"]
+        self.assertEqual(first["text"], "首次提交截图")
+        self.assertNotIn("text", second)
+        self.assertEqual(first["images"], second["images"])
+        self.assertEqual(len(second["images"]), 1)
+        self.assertEqual(first["attachments"], [])
+        self.assertEqual(second["attachments"][0]["name"], "排查日志.zip")
+        self.assertEqual(len(media), 2)
 
     def test_reply_guest_view_keeps_latest_hundred_and_flags_earlier_replies(self):
         detail = {"id": 581001, "title": "工单标题"}
