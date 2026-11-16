@@ -59,6 +59,10 @@ class AttachmentDownloadError(Exception):
     pass
 
 
+class FeedbackChanged(Exception):
+    """The source was edited while its attachments were downloading."""
+
+
 def _path(cfg: Settings) -> Path:
     source = Path(cfg.runtime.db_path).resolve()
     path = source.with_name(source.stem + ".ticket-feedback.db")
@@ -113,12 +117,11 @@ def _reply_text(values: dict, token: str) -> str:
 
 
 def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool, attachments=(),
-               attachment_names=()) -> tuple[str, int | None, str]:
+               attachment_manifest=()) -> tuple[str, int | None, str]:
     try:
         client = TicketClient(cfg.qiyu)
         if reconcile:
-            options = {"attachment_names": attachment_names} if attachment_names else {}
-            if not client.has_feedback(int(ticket_id), text, **options):
+            if not client.has_feedback(int(ticket_id), text, attachment_manifest=attachment_manifest):
                 return "uncertain", None, "等待七鱼回复记录确认。"
         else:
             options = {"attachments": attachments} if attachments else {}
@@ -225,7 +228,7 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
                 previous_token = same_ticket["reply_token"]
                 state, written_at, error = _writeback(
                     cfg, ticket_id, _reply_text({**previous_text, "attachments": planned}, previous_token),
-                    reconcile=True, attachment_names=tuple(item["name"] for item in planned),
+                    reconcile=True, attachment_manifest=tuple((item["name"], item["size"]) for item in planned),
                 )
                 _finish(conn, ticket_id, previous_token, previous_text, planned, state, written_at, error)
                 if state != "succeeded":
@@ -263,15 +266,17 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
             reconcile = reconcile and not changed
         if planned is None:
             raise ValueError("七鱼技术回复的待回传附件无法核对。")
-        names = tuple(item["name"] for item in planned)
+        manifest = tuple((item["name"], item["size"]) for item in planned)
         attachments = ()
         try:
             if planned and not reconcile:
                 if download is None:
                     raise AttachmentDownloadError("飞书技术回复附件暂时无法下载。")
                 attachments = download(planned)
-                if tuple(name for name, _ in attachments) != names:
+                if tuple((name, len(data)) for name, data in attachments) != manifest:
                     raise AttachmentDownloadError("飞书下载的附件与本次技术回复不一致。")
+        except FeedbackChanged:
+            return _result("pending", None, "", changed=False)
         except AttachmentDownloadError as exc:
             state, written_at, error = "failed", None, str(exc)
         else:
@@ -279,7 +284,8 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
             conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ? AND reply_token = ?",
                          (ticket_id, token))
             state, written_at, error = _writeback(cfg, ticket_id, _reply_text({**text, "attachments": planned}, token),
-                                                  reconcile=reconcile, attachments=attachments, attachment_names=names)
+                                                  reconcile=reconcile, attachments=attachments,
+                                                  attachment_manifest=manifest)
         _finish(conn, ticket_id, token, text, planned, state, written_at, error)
     return _result(state, written_at, error, changed=changed)
 

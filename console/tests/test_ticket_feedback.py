@@ -104,6 +104,7 @@ class TestTicketFeedback(unittest.TestCase):
         write.assert_called_once()
         self.assertEqual(verify.call_count, 3)
         self.assertEqual(verify.call_args.args, write.call_args.args)
+        self.assertEqual(verify.call_args.kwargs, {"attachment_manifest": ()})
         self.assertEqual(ticket_feedback.get(self.cfg, "9007199254740993")["writeback_status"], "succeeded")
 
     def test_attachment_only_feedback_retries_download_then_confirms_without_resending(self):
@@ -125,7 +126,7 @@ class TestTicketFeedback(unittest.TestCase):
         write.assert_called_once()
         self.assertEqual(write.call_args.kwargs["attachments"], [("复现.png", b"png")])
         self.assertIn("请查看随回复提交的附件。", write.call_args.args[1])
-        verify.assert_called_once_with(*write.call_args.args, attachment_names=("复现.png",))
+        verify.assert_called_once_with(*write.call_args.args, attachment_manifest=(("复现.png", 3),))
         self.assertTrue(ticket_feedback.confirmed(self.cfg, "42", feedback))
 
     def test_only_new_attachment_tokens_are_sent_after_earlier_replies(self):
@@ -180,7 +181,7 @@ class TestTicketFeedback(unittest.TestCase):
             write.assert_called_once()
             download.assert_called_once_with([first_image])
             self.assertEqual(self.ingest(feedback=edit, download=download)["status"], "已回传")
-        prior = call(*write.call_args_list[0].args, attachment_names=("旧截图.png",))
+        prior = call(*write.call_args_list[0].args, attachment_manifest=(("旧截图.png", first_image["size"]),))
         self.assertEqual(verify.call_args_list, [prior, prior])
         self.assertEqual(download.call_args_list, [call([first_image]), call([added_image])])
         self.assertIn("技术回复：已验证新截图", write.call_args.args[1])

@@ -211,6 +211,51 @@ class TestTicketFeishuSync(unittest.TestCase):
         ingest.assert_not_called()
         self.assertEqual(self.writes, [])
 
+    def test_imports_multiline_technical_reply_with_mentions_and_links(self):
+        url = "https://docs.example.com/steps?case=42#retest"
+        fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
+        fields[tickets._INPUT["reply"]] = [
+            {"type": "mention", "text": "@值班工程师", "token": "ou_fixture"},
+            {"type": "text", "text": " 请回归验证\n1. 复现问题\n2. 查看"},
+            {"type": "url", "text": "回归步骤", "link": url},
+            {"type": "text", "text": "\n\n完成后更新结果。"},
+        ]
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        result = {"status": "已回传", "returned_at": 1_794_600_000_000, "changed": True, "error": ""}
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(tickets.ticket_feedback, "ingest", return_value=result) as ingest):
+            self.assertEqual(tickets._import_feedback(self.cfg, self.target)["imported"], 1)
+        rendered = f"@值班工程师 请回归验证\n1. 复现问题\n2. 查看回归步骤（{url}）\n\n完成后更新结果。"
+        self.assertEqual(ingest.call_args.kwargs["feedback"]["reply"], rendered)
+        self.assertEqual(fields["回传状态"], "已回传")
+
+    def test_accepts_a_reply_with_only_one_link_and_preserves_plain_text(self):
+        reply = tickets._INPUT["reply"]
+        url = "http://docs.example.com/steps"
+        part = {"type": "url", "text": "一份说明", "link": url}
+        for cell in (part, [part]):
+            self.assertEqual(tickets._feedback({reply: cell})["reply"], f"一份说明（{url}）")
+        plain = "复现步骤\n\n1. 打开记录\n2. 核对状态"
+        self.assertEqual(tickets._feedback({reply: plain}),
+                         tickets._feedback({reply: [{"type": "text", "text": plain[:4]}, {"text": plain[4:]}]}))
+
+    def test_reports_an_unsupported_reply_element_without_writing_to_qiyu(self):
+        fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        samples = (
+            ({"type": "image", "text": "截图"}, "图片和文件请放入回复附件列"),
+            ({"type": "url", "text": "打开", "link": "javascript:alert(1)"}, "无效链接"),
+        )
+        with (patch.object(sync, "_call", side_effect=self.fake_api),
+              patch.object(tickets.ticket_feedback, "ingest") as ingest):
+            for element, reason in samples:
+                with self.subTest(element=element["type"]):
+                    fields[tickets._INPUT["reply"]] = [{"type": "text", "text": "请核对"}, element]
+                    self.assertEqual(tickets._import_feedback(self.cfg, self.target)["failed"], 1)
+                    self.assertEqual(fields["回传状态"], "回传失败")
+                    self.assertIn(reason, fields["回传失败原因"])
+        ingest.assert_not_called()
+
     def test_migrates_historical_link_without_overwriting_technical_feedback(self):
         fields = {tickets._FIELDS["key"]: "42", tickets._FIELDS["source"]: {"text": "查看工单", "link": tickets._legacy_source_link("42")},
                   tickets._INPUT["reply"]: "需要复核"}
@@ -328,10 +373,38 @@ class TestTicketFeishuSync(unittest.TestCase):
             with self.assertRaisesRegex(sync.SyncError, "只读"):
                 tickets.ticket_fields.batch(renamed_target, "update",
                                            [{"record_id": "recFixture42", "fields": {renamed: None}}])
-        download.assert_called_once_with(target, "recFixture42", field_id, [file])
-        send.assert_called_once()
-        self.assertEqual(send.call_args.kwargs["attachments"], [(file["name"], b"png")])
-        self.assertEqual(self.rows["42"]["fields"][renamed], [file])
+            download.assert_called_once_with(target, "recFixture42", field_id, [file])
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs["attachments"], [(file["name"], b"png")])
+            self.assertEqual(self.rows["42"]["fields"][renamed], [file])
+
+            new_file = {"name": "诊断.log", "size": 3, "file_token": "boxExampleToken2"}
+            fields[renamed] = [file, new_file]
+            fields["回复内容"] = "草稿"
+
+            def edit_while_downloading(*_args):
+                fields["回复内容"] = [
+                    {"type": "text", "text": "复测结果\n1. 日志已补充\n2. 复现步骤见 "},
+                    {"type": "url", "text": "文档", "link": "https://example.com/report"},
+                ]
+                return [("诊断.log", b"log")]
+
+            download.reset_mock()
+            send.reset_mock()
+            download.side_effect = edit_while_downloading
+            self.assertEqual(tickets._import_feedback(self.cfg, renamed_target)["imported"], 0)
+            self.assertEqual(fields["回传状态"], "待回传")
+            send.assert_not_called()
+            download.assert_called_once_with(renamed_target, "recFixture42", field_id, [new_file])
+
+            download.side_effect = None
+            download.return_value = [("诊断.log", b"log")]
+            self.assertEqual(tickets._import_feedback(self.cfg, renamed_target)["imported"], 1)
+            self.assertEqual(tickets._import_feedback(self.cfg, renamed_target)["imported"], 0)
+            send.assert_called_once()
+            self.assertIn("复测结果\n1. 日志已补充\n2. 复现步骤见 文档（https://example.com/report）", send.call_args.args[1])
+            self.assertEqual(send.call_args.kwargs["attachments"], [("诊断.log", b"log")])
+        self.assertEqual(self.rows["42"]["fields"][renamed], [file, new_file])
         self.assertEqual(self.rows["42"]["fields"]["回传状态"], "已回传")
 
     def test_existing_feedback_is_not_sent_when_only_the_link_changes(self):

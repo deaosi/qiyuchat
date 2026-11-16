@@ -161,12 +161,13 @@ class TicketClient:
         if accepted is not True:
             raise TicketModifyUnconfirmed("七鱼工单修改结果暂未确认，请刷新工单核对。", http_status=503)
 
-    def has_feedback(self, ticket_id: int, text: str, *, attachment_names: Sequence[str] = ()) -> bool:
+    def has_feedback(self, ticket_id: int, text: str, *, attachment_names: Sequence[str] = (),
+                     attachment_manifest: Sequence[tuple[str, int]] | None = None) -> bool:
         """Look for the exact tagged reply in the native ticket history."""
         identifier = _id(ticket_id)
         if identifier is None or not isinstance(text, str) or not text.strip():
             raise ValueError("七鱼工单回复参数无效")
-        return _has_reply(self.history(identifier), text, attachment_names)
+        return _has_reply(self.history(identifier), text, attachment_names, attachment_manifest=attachment_manifest)
 
     def post_feedback(self, ticket_id: int, text: str, *, attachments: Sequence[tuple[str, bytes]] = ()) -> bool:
         """Append one native reply and confirm it in the ticket history."""
@@ -174,8 +175,8 @@ class TicketClient:
         if identifier is None:
             raise ValueError("七鱼工单回复参数无效")
         _validate_reply_attachments(attachments)
-        names = tuple(name for name, _ in attachments)
-        if self.has_feedback(identifier, text, attachment_names=names):
+        manifest = tuple((name, len(data)) for name, data in attachments)
+        if self.has_feedback(identifier, text, attachment_manifest=manifest):
             return False
         detail = self.detail(identifier)
         holder = _id(detail.get("holderId"))
@@ -194,7 +195,7 @@ class TicketClient:
                 raise
         # An accepted reply may be written before the response or log becomes available.
         try:
-            if self.has_feedback(identifier, text, attachment_names=names):
+            if self.has_feedback(identifier, text, attachment_manifest=manifest):
                 return True
         except TicketReplyUnconfirmed:
             raise
@@ -217,20 +218,30 @@ def _validate_reply_attachments(attachments: Sequence[tuple[str, bytes]]) -> Non
         raise TicketError("七鱼单次回复的附件总大小上限为 5 MB", http_status=422)
 
 
-def _recorded_reply_attachments(event: dict) -> Counter[str]:
+def _attachments_match(event: dict, names: Counter[str], manifest: Counter[tuple[str, int]] | None) -> bool:
+    if manifest is None and not names:
+        return True
     attachments = event.get("attachments")
+    if attachments is None:
+        attachments = []
     if not isinstance(attachments, list):
-        return Counter()
-    return Counter(
-        item["name"].strip() for item in attachments
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-        and isinstance(item.get("url"), str) and item["url"].startswith("https://")
-    )
+        return False
+    recorded = [item for item in attachments if isinstance(item, dict) and isinstance(item.get("name"), str)
+                and isinstance(item.get("url"), str) and item["url"].startswith("https://")]
+    if manifest is None:
+        return names <= Counter(item["name"].strip() for item in recorded)
+    if len(recorded) != len(attachments) or any(type(item.get("size")) is not int or item["size"] <= 0
+                                                  for item in recorded):
+        return False
+    return manifest == Counter((item["name"].strip(), item["size"]) for item in recorded)
 
 
-def _has_reply(history: list[dict], text: str, attachment_names: Sequence[str] = ()) -> bool:
+def _has_reply(history: list[dict], text: str, attachment_names: Sequence[str] = (), *,
+               attachment_manifest: Sequence[tuple[str, int]] | None = None) -> bool:
     expected = text.replace("\r\n", "\n").strip()
-    expected_attachments = Counter(name.strip() for name in attachment_names)
+    expected_names = Counter(name.strip() for name in attachment_names)
+    expected_manifest = (Counter((name.strip(), size) for name, size in attachment_manifest)
+                         if attachment_manifest is not None else None)
     matched = False
     complete = False
     for event in history:
@@ -243,7 +254,7 @@ def _has_reply(history: list[dict], text: str, attachment_names: Sequence[str] =
                 if event.get("customerSee") in (True, 1, "1", "true", "True"):
                     raise TicketReplyVisible("七鱼将该回复记录为客户可见，请核对工单", http_status=409)
                 matched = True
-                if not expected_attachments or expected_attachments <= _recorded_reply_attachments(event):
+                if _attachments_match(event, expected_names, expected_manifest):
                     complete = True
                 break
     if matched and not complete:

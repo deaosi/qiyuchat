@@ -46,7 +46,8 @@ class TicketFeedbackTests(unittest.TestCase):
                      "info": [{"title": "", "titleLang": "", "content": payload["comment"]}]}
             if self.record_attachments and payload["attachments"]:
                 event["attachments"] = [
-                    {"name": item["fileName"], "url": f"https://qiyukf.net/{index:032x}"}
+                    {"name": item["fileName"], "url": f"https://qiyukf.net/{index:032x}",
+                     "size": len(b64decode(item["payload"]))}
                     for index, item in enumerate(payload["attachments"])
                 ]
             self.history.append(event)
@@ -104,18 +105,25 @@ class TicketFeedbackTests(unittest.TestCase):
         self.assertEqual([item["type"] for item in posted[0]], [1, 1])
         self.assertEqual([(item["fileName"], b64decode(item["payload"])) for item in posted[0]], files)
 
-    def test_tagged_text_does_not_confirm_missing_or_partial_attachment_delivery(self):
+    def test_tagged_text_requires_exact_attachment_names_and_sizes(self):
         name = "同名截图.png"
         files = [(name, b"first image"), (name, b"second image")]
+        manifest = [(filename, len(data)) for filename, data in files]
         self.record_attachments = False
         with patch("src.qiyu.ticket.request", side_effect=self.respond):
             with self.assertRaisesRegex(ticket.TicketReplyUnconfirmed, "附件仍待日志确认"):
                 self.client.post_feedback(12, self.reply_text, attachments=files)
-            self.history[-1]["attachments"] = [{"name": name, "url": "https://qiyukf.net/first"}]
+            self.history[-1]["attachments"] = [{"name": name, "url": "https://qiyukf.net/first", "size": manifest[0][1]}]
             with self.assertRaises(ticket.TicketReplyUnconfirmed):
                 self.client.post_feedback(12, self.reply_text, attachments=files)
-            self.history[-1]["attachments"].append({"name": name, "url": "https://qiyukf.net/second"})
+            self.history[-1]["attachments"].append({"name": name, "url": "https://qiyukf.net/second", "size": manifest[0][1]})
             self.assertTrue(self.client.has_feedback(12, self.reply_text, attachment_names=[name, name]))
+            with self.assertRaises(ticket.TicketReplyUnconfirmed):
+                self.client.has_feedback(12, self.reply_text, attachment_manifest=manifest)
+            self.history[-1]["attachments"][1]["size"] = manifest[1][1]
+            self.assertTrue(self.client.has_feedback(12, self.reply_text, attachment_manifest=manifest))
+            with self.assertRaises(ticket.TicketReplyUnconfirmed):
+                self.client.has_feedback(12, self.reply_text, attachment_manifest=())
         self.assertEqual(sum(path == ticket.REPLY for path, _ in self.calls), 1)
 
     def test_rejects_too_many_or_oversize_attachments_before_the_reply(self):

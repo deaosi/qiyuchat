@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import re
 from time import monotonic, time
+from urllib.parse import urlsplit
 
 from deploy.feishu_sync import (
     support, ticket_archive, ticket_delta, ticket_feedback_media, ticket_fields, ticket_history, ticket_reply_delta,
@@ -460,8 +461,50 @@ def _record_pages(target, data):
         params = {"page_size": 100, "page_token": cursor}
 
 
+def _reply_cell(cell):
+    """Render Feishu rich-text fragments for Qiyu's text-only reply body."""
+    if cell is None or isinstance(cell, str):
+        return cell or ""
+    fragments = [cell] if isinstance(cell, dict) else cell
+    unsupported = "飞书回复内容包含无法回传的格式。图片和文件请放入回复附件列。"
+    if not isinstance(fragments, list):
+        raise sync.SyncError(unsupported, 409)
+    parts = []
+    for fragment in fragments:
+        if not isinstance(fragment, dict) or fragment.get("type") not in (None, "text", "url", "mention"):
+            raise sync.SyncError(unsupported, 409)
+        kind = fragment.get("type")
+        label = fragment.get("text", "")
+        if not isinstance(label, str):
+            raise sync.SyncError(unsupported, 409)
+        if kind == "mention" and not label.strip():
+            name = fragment.get("name")
+            if isinstance(name, str) and name.strip():
+                label = "@" + name.strip().lstrip("@")
+        link = fragment.get("link")
+        if kind == "url" or link is not None:
+            try:
+                parsed = urlsplit(link) if isinstance(link, str) else None
+                valid = (parsed is not None and parsed.scheme in ("http", "https") and parsed.hostname
+                         and parsed.username is None and parsed.password is None
+                         and "\\" not in link and not any(char.isspace() or ord(char) < 32 for char in link))
+            except ValueError:
+                valid = False
+            if not valid:
+                raise sync.SyncError("飞书回复内容包含无效链接，请使用标准的 HTTP 或 HTTPS 链接。", 409)
+            if not label.strip():
+                label = link
+            elif label.strip() != link:
+                label = f"{label}（{link}）"
+        elif ("text" not in fragment and not label) or (kind == "mention" and not label.strip()):
+            raise sync.SyncError(unsupported, 409)
+        parts.append(label)
+    return "".join(parts)
+
+
 def _feedback(fields, attachment_column=None):
-    cells = {role: sync._value(fields.get(name)) for role, name in _INPUT.items()}
+    cells = {role: _reply_cell(fields.get(name)) if role == "reply" else sync._value(fields.get(name))
+             for role, name in _INPUT.items()}
     if any(not isinstance(value, str) for value in cells.values()):
         raise sync.SyncError("飞书技术回复字段格式不匹配。", 409)
     values = {role: value.strip() for role, value in cells.items()}
@@ -580,7 +623,15 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
                 if feedback.get("attachments"):
                     def download(files):
                         try:
-                            return ticket_feedback_media.download(target, record_id, target.attachment_id, files)
+                            attachments = ticket_feedback_media.download(target, record_id, target.attachment_id, files)
+                            fresh = sync._existing(lookup, {key: {}}).get(key)
+                            current = fresh["fields"] if fresh else {}
+                            if (not fresh or fresh["record_id"] != record_id
+                                    or sync._value(current.get(ticket_archive.CLOSED_AT))
+                                    or not _source_matches(cfg, key, current.get(_FIELDS["source"]))
+                                    or _feedback(current, attachment_column) != feedback):
+                                raise ticket_feedback.FeedbackChanged()
+                            return attachments
                         except sync.SyncError as exc:
                             raise ticket_feedback.AttachmentDownloadError(str(exc)) from None
                     kwargs["download"] = download
@@ -589,8 +640,11 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             imported += int(result.get("changed") is True)
             uncertain += int(result["status"] == "待核对七鱼回复")
             failed += int(result["status"] == "回传失败")
-            if pending is not None and result["status"] in ("回传失败", "待核对七鱼回复"):
-                waiting[key] = window[1] + _FEEDBACK_QUIET_MS + _RECONCILE
+            if pending is not None:
+                if result["status"] == "待回传":
+                    waiting[key] = int(time() * 1000) + _FEEDBACK_QUIET_MS
+                elif result["status"] in ("回传失败", "待核对七鱼回复"):
+                    waiting[key] = window[1] + _FEEDBACK_QUIET_MS + _RECONCILE
             error = result.get("error") or ""
             values = {_OUTPUT["status"]: result["status"], _OUTPUT["returned_at"]: result["returned_at"],
                       _OUTPUT["error"]: error[:300]}
