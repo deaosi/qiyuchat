@@ -54,7 +54,7 @@ class TicketHistoryTests(unittest.TestCase):
 
     def test_attachment_only_followup_links_to_the_full_reply_view(self):
         event = _event(901, 0, "", attachments=[{"name": "现场.png", "url": _FILE}])
-        forwarded = _event(902, 1_000, "语海 Voc · 飞书技术反馈\n请查看随回复提交的附件。\n〔语海同步 1234567890abcdef〕",
+        forwarded = _event(902, 1_000, "飞书技术反馈\n请查看随回复提交的附件。\n〔语海同步 1234567890abcdef〕",
                            attachments=[{"name": "现象.png", "url": _FILE}])
         value = ticket_history.project(self.cfg, "56", [event, forwarded])
         self.assertEqual(value[_C["attachments"]]["text"], "查看跟进回复")

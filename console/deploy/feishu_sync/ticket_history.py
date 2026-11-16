@@ -17,7 +17,7 @@ _ZONE = timezone(timedelta(hours=8))
 _REPLY_ACTION = re.compile(r"(?:(?:工单|追加|补充)?回复(?:了?工单)?|repl(?:y|ied)(?: to (?:the )?ticket)?)", re.I)
 _REPLY_FIELD = re.compile(r"(?:(?:工单)?回复(?:内容|工单)?|comment|reply)", re.I)
 _RICH = re.compile(r"</?(?:p|div|br|li|ol|ul|span|strong|em|b|a|img|script|style)(?:\s|/?>)", re.I)
-_FEISHU_ECHO = re.compile(r"语海 Voc · 飞书技术反馈\s*\n(.*?)\n\s*〔语海同步 ([0-9a-f]{16})〕", re.S)
+_FEISHU_ECHO = re.compile(rf"{tickets._FORWARDED_REPLY_HEADER}\s*\n(.*?)\n\s*〔语海同步 ([0-9a-f]{{16}})〕", re.S)
 _MAX_REPLIES = 12
 _MAX_HISTORY = 8_000
 _MAX_REPLY = 4_000

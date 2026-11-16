@@ -126,6 +126,20 @@ class TicketFeedbackTests(unittest.TestCase):
                 self.client.has_feedback(12, self.reply_text, attachment_manifest=())
         self.assertEqual(sum(path == ticket.REPLY for path, _ in self.calls), 1)
 
+    def test_previous_title_confirms_pending_reply_without_posting_it_again(self):
+        body = "技术回复：已完成复测\n〔语海同步 0123456789abcdef〕"
+        current = "飞书技术反馈\n" + body
+        previous = "语海 Voc · 飞书技术反馈\n" + body
+        self.history.append({"actionType": 20, "customerSee": False, "info": [{"content": previous}],
+                             "attachments": [{"name": "截图.png", "url": "https://qiyukf.net/first", "size": 5}]})
+        with patch("src.qiyu.ticket.request", side_effect=self.respond):
+            self.assertFalse(self.client.post_feedback(12, current, attachments=[("截图.png", b"image")]))
+            self.assertFalse(self.client.has_feedback(12, current.replace("0123456789abcdef", "1234567890abcdef")))
+            with self.assertRaises(ticket.TicketReplyUnconfirmed):
+                self.client.has_feedback(12, current, attachment_manifest=(("截图.png", 6),))
+        self.assertTrue(self.calls)
+        self.assertTrue(all(path == ticket.HISTORY for path, _ in self.calls))
+
     def test_rejects_too_many_or_oversize_attachments_before_the_reply(self):
         for files in (
             [("附件.txt", b"x")] * (ticket.MAX_REPLY_ATTACHMENTS + 1),

@@ -11,7 +11,9 @@ import time
 from urllib.parse import urlsplit
 
 from .config import Settings
-from .qiyu.ticket import MAX_REPLY_ATTACHMENTS, TicketClient, TicketError, TicketReplyUnconfirmed, TicketReplyVisible
+from .qiyu.ticket import (
+    FEEDBACK_REPLY_TITLE, MAX_REPLY_ATTACHMENTS, TicketClient, TicketError, TicketReplyUnconfirmed, TicketReplyVisible,
+)
 from .voc_assets import connection, digest, transaction
 
 
@@ -121,7 +123,7 @@ def _origin_link(value: str) -> str:
 
 
 def _reply_text(values: dict, token: str) -> str:
-    parts = ["语海 Voc · 飞书技术反馈"]
+    parts = [FEEDBACK_REPLY_TITLE]
     for key, label in (("status", "处理状态"), ("version", "解决版本"), ("reply", "技术回复"),
                        ("investigation", "技术支持排查结果")):
         if values.get(key):

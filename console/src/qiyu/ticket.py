@@ -6,6 +6,7 @@ from base64 import b64encode
 from collections import Counter
 from collections.abc import Callable, Sequence
 import json
+import re
 import threading
 import time
 from typing import Any
@@ -24,6 +25,9 @@ TEMPLATE_FIELDS = "/openapi/v2/ticket/template/fields"
 PAGE_SIZE = 50
 MAX_REPLY_ATTACHMENTS = 5
 MAX_REPLY_ATTACHMENT_BYTES = 5 * 1024 * 1024
+FEEDBACK_REPLY_TITLE = "飞书技术反馈"
+LEGACY_FEEDBACK_REPLY_TITLE = "语海 Voc · 飞书技术反馈"
+_FEEDBACK_MARKER = re.compile(r"\n〔语海同步 [0-9a-f]{16}〕\Z")
 _request_lock = threading.Lock()
 _next_request = 0.0
 _REPLY_REJECTED = frozenset((14001, 14002, 14003, 14004, 14009, 14100, 14103, 14104, 14106, 14107))
@@ -243,6 +247,13 @@ def _attachments_match(event: dict, names: Counter[str], manifest: Counter[tuple
 def _has_reply(history: list[dict], text: str, attachment_names: Sequence[str] = (), *,
                attachment_manifest: Sequence[tuple[str, int]] | None = None) -> bool:
     expected = text.replace("\r\n", "\n").strip()
+    accepted_texts = {expected}
+    title, separator, body = expected.partition("\n")
+    if separator and _FEEDBACK_MARKER.search(expected):
+        if title == FEEDBACK_REPLY_TITLE:
+            accepted_texts.add(LEGACY_FEEDBACK_REPLY_TITLE + separator + body)
+        elif title == LEGACY_FEEDBACK_REPLY_TITLE:
+            accepted_texts.add(FEEDBACK_REPLY_TITLE + separator + body)
     expected_names = Counter(name.strip() for name in attachment_names)
     expected_manifest = (Counter((name.strip(), size) for name, size in attachment_manifest)
                          if attachment_manifest is not None else None)
@@ -254,7 +265,7 @@ def _has_reply(history: list[dict], text: str, attachment_names: Sequence[str] =
             continue
         for field in fields:
             content = field.get("content") if isinstance(field, dict) else None
-            if isinstance(content, str) and content.replace("\r\n", "\n").strip() == expected:
+            if isinstance(content, str) and content.replace("\r\n", "\n").strip() in accepted_texts:
                 if event.get("customerSee") in (True, 1, "1", "true", "True"):
                     raise TicketReplyVisible("七鱼将该回复记录为客户可见，请核对工单", http_status=409)
                 matched = True

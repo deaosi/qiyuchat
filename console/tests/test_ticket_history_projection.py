@@ -4,6 +4,15 @@ from src.web import tickets
 
 
 class TicketHistoryProjectionTests(TestCase):
+    def test_forwarded_reply_requires_a_complete_title_and_marker(self):
+        body = "技术回复：检查完成"
+        token = "0123456789abcdef"
+        for title in ("飞书技术反馈", "语海 Voc · 飞书技术反馈"):
+            with self.subTest(title=title):
+                self.assertEqual(tickets.forwarded_reply_parts(f"{title}\n{body}\n〔语海同步 {token}〕"), (body, token))
+                self.assertIsNone(tickets.forwarded_reply_parts(f"{title}\n{body}"))
+                self.assertIsNone(tickets.forwarded_reply_parts(f"回复：{title}\n{body}\n〔语海同步 {token}〕"))
+
     def test_distinguishes_feishu_author_from_qiyu_reply_operator(self):
         technical_body = "技术支持排查结果：已定位旧版本\n技术回复：已验证新版本"
         feishu_reply = {

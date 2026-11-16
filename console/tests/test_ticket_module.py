@@ -509,7 +509,7 @@ class TicketModuleTests(LocalFixture):
                 event(4, echoed("截短标记", "0123abcd"), shared=False),
                 event(5, echoed("复测完成\n1. 日志已补充\n电话 13812345678 https://example.org/private"), shared=False,
                       attachment={"url": shot, "name": "复测结果.png"}),
-                event(6, "语海 Voc · 飞书技术反馈\n技术支持排查结果：排查店铺补充诊断日志\n〔语海同步 1123456789abcdef〕", shared=False,
+                event(6, "飞书技术反馈\n技术支持排查结果：排查店铺补充诊断日志\n〔语海同步 1123456789abcdef〕", shared=False,
                       attachment={"url": document, "name": "排查店铺诊断日志.log"}),
             ))
             feedback.update(writeback_status="succeeded", written_at=1794537200007,

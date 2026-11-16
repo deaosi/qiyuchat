@@ -19,7 +19,7 @@ from typing import Any
 from .. import ticket_feedback
 from ..clean.rules import mask_pii
 from ..config import Settings
-from ..qiyu.ticket import PAGE_SIZE, TicketClient, TicketError, _id
+from ..qiyu.ticket import FEEDBACK_REPLY_TITLE, LEGACY_FEEDBACK_REPLY_TITLE, PAGE_SIZE, TicketClient, TicketError, _id
 from . import ticket_media
 
 
@@ -32,8 +32,9 @@ _FILTER_SCAN_LIMIT = 2000
 _EDIT_LOCKS = tuple(Lock() for _ in range(64))
 _CREATE_ACTIONS = frozenset((1, 2, 127, 128, 129, 130))
 _SYNC_MARKER = re.compile(r"〔语海同步\s+[0-9a-f]+〕", re.I)
+_FORWARDED_REPLY_HEADER = f"(?:{re.escape(FEEDBACK_REPLY_TITLE)}|{re.escape(LEGACY_FEEDBACK_REPLY_TITLE)})"
 _FORWARDED_REPLY = re.compile(
-    r"语海 Voc · 飞书技术反馈\n((?:(?:处理状态|解决版本|技术回复|技术支持排查结果)：.+|请查看随回复提交的附件。))"
+    rf"{_FORWARDED_REPLY_HEADER}\n((?:(?:处理状态|解决版本|技术回复|技术支持排查结果)：.+|请查看随回复提交的附件。))"
     r"\n〔语海同步 ([0-9a-f]{16})〕",
     re.S,
 )

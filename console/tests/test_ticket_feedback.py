@@ -45,7 +45,7 @@ class TestTicketFeedback(unittest.TestCase):
         written_ticket, text = write.call_args.args
         self.assertEqual(written_ticket, int(ticket_id))
         self.assertTrue(text.startswith(
-            "语海 Voc · 飞书技术反馈\n处理状态：已修复\n解决版本：3.4.0\n技术回复：检查订单\n已验证\n"
+            "飞书技术反馈\n处理状态：已修复\n解决版本：3.4.0\n技术回复：检查订单\n已验证\n"
         ))
         self.assertRegex(text.splitlines()[-1], r"^〔语海同步 [0-9a-f]{16}〕$")
         self.assertTrue(first["changed"])
