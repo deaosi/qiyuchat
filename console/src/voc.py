@@ -125,13 +125,15 @@ def startup(cfg: Settings) -> None:
         conn = _open(cfg)
         try:
             conn.executescript(SCHEMA)
-            with _tx(conn):
-                for row in conn.execute("SELECT id,owner FROM voc_job WHERE status IN ('queued','running')").fetchall():
-                    if not _owner_alive(row["owner"]):
-                        job_id = row["id"]
-                        conn.execute("UPDATE voc_job_item SET status='failed',error='服务重启中断，请重试' WHERE job_id=? AND status IN ('queued','running')", (job_id,))
-                        failures = conn.execute("SELECT COUNT(*) FROM voc_job_item WHERE job_id=? AND status='failed'", (job_id,)).fetchone()[0]
-                        conn.execute("UPDATE voc_job SET status='failed',failed=?,error='服务重启中断，请重试',updated_at=? WHERE id=?", (failures, time.time(), job_id))
+            active_jobs = "SELECT id,owner FROM voc_job WHERE status IN ('queued','running')"
+            if any(not _owner_alive(row["owner"]) for row in conn.execute(active_jobs).fetchall()):
+                with _tx(conn):
+                    for row in conn.execute(active_jobs).fetchall():
+                        if not _owner_alive(row["owner"]):
+                            job_id = row["id"]
+                            conn.execute("UPDATE voc_job_item SET status='failed',error='服务重启中断，请重试' WHERE job_id=? AND status IN ('queued','running')", (job_id,))
+                            failures = conn.execute("SELECT COUNT(*) FROM voc_job_item WHERE job_id=? AND status='failed'", (job_id,)).fetchone()[0]
+                            conn.execute("UPDATE voc_job SET status='failed',failed=?,error='服务重启中断，请重试',updated_at=? WHERE id=?", (failures, time.time(), job_id))
             _INITIALIZED.add(path)
         finally:
             conn.close()

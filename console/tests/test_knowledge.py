@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -223,6 +224,29 @@ class TestKnowledge(LocalFixture):
         knowledge.startup(self.cfg)
         self.assertEqual(knowledge.jobs(self.cfg)["items"][0]["status"], "failed")
         self.assertEqual(knowledge.list_knowledge(self.cfg)["total"], 1)
+
+    def test_startup_with_existing_schema_can_share_database_with_a_writer(self):
+        knowledge.startup(self.cfg)
+        path = voc._path(self.cfg)
+        voc._INITIALIZED.discard(path)
+        knowledge._INITIALIZED.discard(path)
+        open_db = voc._open
+
+        def open_with_short_timeout(cfg):
+            conn = open_db(cfg)
+            conn.execute("PRAGMA busy_timeout=100")
+            return conn
+
+        with closing(sqlite3.connect(path)) as writer:
+            self.assertEqual(writer.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            writer.execute("BEGIN IMMEDIATE")
+            with patch.object(voc, "_open", side_effect=open_with_short_timeout):
+                knowledge.startup(self.cfg)
+            self.assertTrue(writer.in_transaction)
+            writer.rollback()
+
+        self.assertIn(path, voc._INITIALIZED)
+        self.assertIn(path, knowledge._INITIALIZED)
 
     def test_export_defaults_to_confirmed_and_escapes_formulas(self):
         job = self.run_job()

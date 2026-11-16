@@ -49,10 +49,12 @@ def startup(cfg: Settings) -> None:
         conn = voc._open(cfg)
         try:
             conn.executescript(SCHEMA)
-            with voc._tx(conn):
-                for job in conn.execute("SELECT id,owner,total,processed FROM knowledge_job WHERE status IN ('queued','running')").fetchall():
-                    if not voc._owner_alive(job["owner"]):
-                        conn.execute("UPDATE knowledge_job SET status='failed',failed=total-processed,error='服务重启中断，请重试',updated_at=? WHERE id=?", (time.time(), job["id"]))
+            active_jobs = "SELECT id,owner FROM knowledge_job WHERE status IN ('queued','running')"
+            if any(not voc._owner_alive(row["owner"]) for row in conn.execute(active_jobs).fetchall()):
+                with voc._tx(conn):
+                    for job in conn.execute(active_jobs).fetchall():
+                        if not voc._owner_alive(job["owner"]):
+                            conn.execute("UPDATE knowledge_job SET status='failed',failed=total-processed,error='服务重启中断，请重试',updated_at=? WHERE id=?", (time.time(), job["id"]))
             _INITIALIZED.add(path)
         finally:
             conn.close()
