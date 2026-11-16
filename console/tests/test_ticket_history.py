@@ -33,7 +33,7 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertIn("修改回复 · 工单经办人\n补充信息写明版本号", value[_C["latest"]])
         self.assertNotIn("已复现", value[_C["latest"]])
         timeline = value[_C["history"]]
-        self.assertIn("飞书 → 七鱼 · 技术反馈\n处理状态：已复现", timeline)
+        self.assertIn("飞书 → 七鱼 · 技术反馈 · 七鱼署名 工单经办人\n处理状态：已复现", timeline)
         self.assertIn("七鱼 → 飞书 · 修改回复", timeline)
         self.assertIn("提报人补充 · 工单经办人\n补充信息\n具体操作如下。\n附件 1 个", timeline)
         self.assertEqual(timeline.count("具体操作如下。"), 1)
@@ -42,7 +42,8 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertNotIn("普通工单更新", timeline)
         self.assertNotIn("1234567890abcdef", timeline)
         self.assertNotIn(_FILE, repr(value))
-        self.assertIn("2026-11-14 17:32:01 · 飞书 → 七鱼 · 技术反馈\n处理状态：已复现", value[_C["context"]])
+        self.assertIn("2026-11-14 17:32:01 · 飞书 → 七鱼 · 技术反馈 · 七鱼署名 工单经办人\n处理状态：已复现",
+                      value[_C["context"]])
         self.assertIn("2026-11-14 17:32:02 · 七鱼 → 飞书 · 提报人补充 · 工单经办人\n补充信息\n具体操作如下。\n附件 1 个",
                       value[_C["context"]])
         self.assertEqual(value[_C["context"]].count("具体操作如下。"), 1)
@@ -87,13 +88,13 @@ class TicketHistoryTests(unittest.TestCase):
                          {_C["latest"]: "", _C["history"]: "", _C["attachments"]: None, _C["context"]: ""})
 
     def test_long_feishu_feedback_keeps_its_direction(self):
-        body = "语海 Voc · 飞书技术反馈\n" + "很长" * 5000 + "\n〔语海同步 1234567890abcdef〕"
+        body = "语海 Voc · 飞书技术反馈\n技术回复：" + "很长" * 5000 + "\n〔语海同步 1234567890abcdef〕"
         value = ticket_history.project(self.cfg, "56", [_event(901, 0, body)])
         self.assertEqual(value[_C["latest"]], "")
         self.assertIn("飞书 → 七鱼 · 技术反馈", value[_C["history"]])
         self.assertNotIn("1234567890abcdef", value[_C["history"]])
         self.assertEqual(value[_C["context"]].count("很长"), 5000)
-        self.assertIsNone(value[_C["attachments"]])
+        self.assertTrue(ticket_guest.matches_reply(self.cfg, "56", value[_C["attachments"]]["link"]))
 
     def test_same_second_context_uses_event_id_and_does_not_deduplicate_text(self):
         second = _event(902, 0, "现场已复现")

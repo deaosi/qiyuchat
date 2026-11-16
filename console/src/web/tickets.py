@@ -16,6 +16,7 @@ from threading import Lock
 from time import sleep
 from typing import Any
 
+from .. import ticket_feedback
 from ..clean.rules import mask_pii
 from ..config import Settings
 from ..qiyu.ticket import PAGE_SIZE, TicketClient, TicketError, _id
@@ -30,6 +31,12 @@ _PRIVATE_LABELS = frozenset(("用户姓名", "访客姓名", "用户手机", "�
 _FILTER_SCAN_LIMIT = 2000
 _EDIT_LOCKS = tuple(Lock() for _ in range(64))
 _CREATE_ACTIONS = frozenset((1, 2, 127, 128, 129, 130))
+_SYNC_MARKER = re.compile(r"〔语海同步\s+[0-9a-f]+〕", re.I)
+_FORWARDED_REPLY = re.compile(
+    r"语海 Voc · 飞书技术反馈\n((?:(?:处理状态|解决版本|技术回复|技术支持排查结果)：.+|请查看随回复提交的附件。))"
+    r"\n〔语海同步 ([0-9a-f]{16})〕",
+    re.S,
+)
 _SUBMITTER_CACHE = "/var/lib/qiyu-feishu-sync/ticket-submitters.json"
 _SUBMITTER_CACHE_LIMIT = 8_000_000
 TICKET_STATUSES = {1: "已提交", 5: "待申领", 10: "处理中", 20: "已完结"}
@@ -317,19 +324,44 @@ def project_ticket(cfg: Settings | None, row: dict, media_links, *, submitter=""
     return result
 
 
-def project_history(logs: list[dict], media_links) -> list[dict]:
+def forwarded_reply_parts(content: object) -> tuple[str, str] | None:
+    """Extract the body and the source marker from a complete writeback reply."""
+    if isinstance(content, str) and (match := _FORWARDED_REPLY.fullmatch(content.replace("\r\n", "\n").strip())):
+        return _SYNC_MARKER.sub("", match[1]).strip(), match[2]
+    return None
+
+
+def project_history(logs: list[dict], media_links, *, reply_authors: dict[str, str] | None = None) -> list[dict]:
     history = []
     for index, entry in enumerate(logs):
         event_images, event_attachments = media_links(_attachments(entry.get("attachments")))
+        reply_token = None
+        details = []
+        is_reply = _id(entry.get("actionType")) in (20, 101)
+        for field in _attachments(entry.get("info")):
+            label = _text(field.get("title") or field.get("titleLang"), 100)
+            if label.casefold() in _PRIVATE_LABELS:
+                continue
+            forwarded = forwarded_reply_parts(field.get("content")) if is_reply else None
+            if forwarded is None:
+                details.extend(_project_fields([field], history=True, media_links=media_links))
+                continue
+            body, reply_token = forwarded
+            if body:
+                details.append({"label": label, "value": mask_pii(body)})
         history.append({
             "id": str(_id(entry.get("id")) or f"log-{index + 1}"),
             "action": _text(entry.get("action") or entry.get("actionLang"), 200) or "工单变更",
             "operator": _text(entry.get("operator"), 120),
             "time": _millis(entry.get("time")),
-            "details": _project_fields(entry.get("info"), history=True, media_links=media_links),
+            "details": details,
             "images": event_images,
             "attachments": event_attachments,
         })
+        if reply_token:
+            history[-1]["reply_source"] = "feishu"
+            if author := _text((reply_authors or {}).get(reply_token), 120):
+                history[-1]["reply_author"] = author
     history.sort(key=lambda entry: entry["time"] or 0, reverse=True)
     return history
 
@@ -354,7 +386,8 @@ def _detail_response(cfg, row, client):
 
     result = project_ticket(cfg, row, media_links, submitter=ticket_submitter(row, logs), linked_session_count=len(sessions))
     result["updated_at"] = ticket_updated_at(row, logs)
-    response = {"ticket": result, "history": project_history(logs, media_links),
+    authors = ticket_feedback.reply_authors(cfg, str(identifier))
+    response = {"ticket": result, "history": project_history(logs, media_links, reply_authors=authors),
                 "history_available": history_available, "sessions": sessions}
     edit = _edit_form(row, client)
     if edit:

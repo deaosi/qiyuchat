@@ -17,7 +17,7 @@ from .. import ticket_feedback
 from ..config import Settings
 from ..extract.text import clean_visible_text
 from ..qiyu.ticket import TicketClient, TicketError, _id
-from ..voc_assets import connection, transaction
+from ..voc_assets import connection, digest, transaction
 from . import case_media, case_senders, guest_evidence, ticket_media, tickets
 
 
@@ -57,6 +57,7 @@ _REDACTION = re.compile(r"\[(?:名称|链接|标识)已隐藏\]|\[(?:详细地�
 _MAX_MEDIA = 40
 _MAX_REPLY_COUNT = 100
 _MAX_REPLY_TEXT = 1200
+_MAX_FORWARDED_REPLY_TEXT = 12_000
 _MAX_LINKED_SESSIONS = 20
 _TICKET_TIMELINE_ACTIONS = frozenset({1, 2, 5, 6, 10, 15, 25, 40, 45, 50, 55, 60, 61, 65, 100})
 _CACHE_SECONDS = 30
@@ -64,6 +65,7 @@ _CACHE_LIMIT = 128
 _CACHE_LOCK = Lock()
 _cache = OrderedDict()
 _cache_generation = 0
+_UNREAD_FEEDBACK = object()
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticket_guest_link (
     ticket_id TEXT PRIMARY KEY,
@@ -314,6 +316,32 @@ def followup_media(entry: dict) -> list[dict]:
     return attachments
 
 
+def forwarded_followup(entry: dict, names: re.Pattern[str] | None = None) -> tuple[str, list[dict]] | None:
+    """Read a Feishu feedback reply recorded by Qiyu, without sharing its sync marker."""
+    matched = _forwarded_followup(entry, names)
+    if matched is None:
+        return None
+    text, attachments, _ = matched
+    return text, attachments
+
+
+def _forwarded_followup(entry: dict, names: re.Pattern[str] | None) -> tuple[str, list[dict], str] | None:
+    if (_id(entry.get("actionType")) not in (20, 101)
+            or entry.get("customerSee") not in (False, 0, "0", "false", "False")):
+        return None
+    for field in _public_raw_fields(entry.get("info"), history=True):
+        label = tickets._text(field.get("title") or field.get("titleLang"), 100)
+        if label and not (_REPLY_FIELD.fullmatch(label) or _REPLY_TEXT_FIELD.fullmatch(label)):
+            continue
+        if parts := tickets.forwarded_reply_parts(field.get("content")):
+            body, token = parts
+            text = _guest_text(clean_visible_text(body), names)
+            if len(text) > _MAX_FORWARDED_REPLY_TEXT:
+                text = text[:_MAX_FORWARDED_REPLY_TEXT - 1].rstrip() + "…"
+            return text, tickets._attachments(entry.get("attachments")), token
+    return None
+
+
 def _public_raw_fields(value, *, history=False):
     fields = []
     for field in tickets._attachments(value):
@@ -323,11 +351,21 @@ def _public_raw_fields(value, *, history=False):
     return fields
 
 
-def _shared_feedback(cfg: Settings, identifier: int, names) -> dict | None:
+def _read_feedback(cfg: Settings, identifier: int) -> dict | None:
     try:
-        feedback = ticket_feedback.get(cfg, str(identifier))
+        return ticket_feedback.get(cfg, str(identifier))
     except (OSError, ValueError, sqlite3.Error):
         return None
+
+
+def _read_reply_authors(cfg: Settings, identifier: int) -> dict[str, str]:
+    try:
+        return ticket_feedback.reply_authors(cfg, str(identifier))
+    except (OSError, ValueError, sqlite3.Error):
+        return {}
+
+
+def _shared_feedback(feedback: dict | None, names) -> dict | None:
     if not feedback:
         return None
     state = feedback.get("writeback_status")
@@ -335,6 +373,7 @@ def _shared_feedback(cfg: Settings, identifier: int, names) -> dict | None:
         "status": _guest_text(feedback.get("status"), names),
         "reply": _guest_text(feedback.get("reply"), names),
         "resolved_version": _guest_text(feedback.get("resolved_version"), names),
+        "investigation": _guest_text(feedback.get("investigation"), names),
         "received_at": tickets._millis(feedback.get("received_at")),
         "writeback_status": state if state in ticket_feedback._STATES else "",
         "written_at": tickets._millis(feedback.get("written_at")),
@@ -378,7 +417,8 @@ def _shared_sessions(cfg: Settings, identifier: int, names, scoped_links) -> lis
 
 
 def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[dict] | None = None,
-             scope: str = "detail") -> tuple[dict, dict[str, tuple[str, str, bool]]]:
+             scope: str = "detail", feedback=_UNREAD_FEEDBACK,
+             reply_authors: dict[str, str] | None = None) -> tuple[dict, dict[str, tuple[str, str, bool]]]:
     custom = tickets._attachments(raw.get("custom"))
     names, display_fields = _identities(raw, custom)
     records = []
@@ -433,33 +473,45 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
     source_logs = logs or []
     followups = []
     replies_truncated = False
-    if scope in _SCOPE_FRAGMENTS:
-        seen = set()
-        ordered_logs = sorted(source_logs, key=lambda entry: tickets._millis(entry.get("time")) or 0, reverse=True)
-        for entry in ordered_logs:
-            text = native_followup_text(entry) if scope == "replies" else ""
+    seen = set()
+    ordered_logs = sorted(source_logs, key=lambda entry: tickets._millis(entry.get("time")) or 0, reverse=True)
+    reply_authors = reply_authors or {}
+    for entry in ordered_logs:
+        forwarded = _forwarded_followup(entry, names)
+        if forwarded is not None:
+            text, sources, reply_token = forwarded
+        elif scope == "detail":
+            continue
+        else:
+            text = native_followup_text(entry)
             sources = followup_media(entry)
-            if scope == "replies" and len(followups) >= _MAX_REPLY_COUNT:
-                if text or next(ticket_media.source_items(sources), None) is not None:
-                    replies_truncated = True
-                    break
-                continue
-            images, attachments = scoped_links(sources)
-            fresh_images, fresh_attachments = [], []
-            for items, fresh in ((images, fresh_images), (attachments, fresh_attachments)):
-                for item in items:
-                    if item["url"] not in seen:
-                        seen.add(item["url"])
-                        fresh.append(item)
-            if text or fresh_images or fresh_attachments:
-                item = {
-                    "time": tickets._millis(entry.get("time")), "images": fresh_images, "attachments": fresh_attachments,
-                }
-                if text:
-                    item["text"] = text
-                followups.append(item)
-            if scope == "attachments" and len(media) >= _MAX_MEDIA:
+        if scope == "attachments":
+            text = ""
+        if scope != "attachments" and len(followups) >= _MAX_REPLY_COUNT:
+            if text or next(ticket_media.source_items(sources), None) is not None:
+                replies_truncated = True
                 break
+            continue
+        images, attachments = scoped_links(sources)
+        fresh_images, fresh_attachments = [], []
+        for items, fresh in ((images, fresh_images), (attachments, fresh_attachments)):
+            for item in items:
+                if item["url"] not in seen:
+                    seen.add(item["url"])
+                    fresh.append(item)
+        if text or fresh_images or fresh_attachments:
+            item = {"time": tickets._millis(entry.get("time")), "images": fresh_images, "attachments": fresh_attachments}
+            if forwarded is not None:
+                item["source"] = "feishu"
+                if scope != "attachments" and (author := _guest_text(reply_authors.get(reply_token), None)):
+                    item["author"] = author
+            if text:
+                item["text"] = text
+            if scope != "attachments" and (operator := _guest_text(entry.get("operator"), None)):
+                item["operator"] = operator
+            followups.append(item)
+        if scope == "attachments" and len(media) >= _MAX_MEDIA:
+            break
     history = [{**entry, "info": _public_raw_fields(entry.get("info"), history=True)}
                for entry in _visible_history(source_logs)]
     submitter = tickets.ticket_submitter(raw, source_logs)
@@ -487,29 +539,40 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
                "sessions": [], "technical_feedback": None}
     if scope == "attachments":
         payload["followup_attachments"] = followups
-    elif scope == "replies":
+    elif scope == "replies" or followups:
         payload["followup_replies"] = list(reversed(followups))
         if replies_truncated:
             payload["followup_replies_truncated"] = True
     if cfg is not None and (identifier := _id(raw.get("id"))) is not None:
         payload["sessions"] = _shared_sessions(cfg, identifier, names, scoped_links)
-        payload["technical_feedback"] = _shared_feedback(cfg, identifier, names)
+        feedback = _read_feedback(cfg, identifier) if feedback is _UNREAD_FEEDBACK else feedback
+        payload["technical_feedback"] = _shared_feedback(feedback, names)
     return payload, media
 
 
-def _snapshot(cfg: Settings, token: str) -> tuple[dict, dict[str, tuple[str, str, bool]]] | None:
+def _snapshot(cfg: Settings, token: str, *, media_id: str | None = None) -> tuple[dict, dict[str, tuple[str, str, bool]]] | None:
     bound = _ticket_scope(cfg, token)
     if bound is None:
         return None
     identifier, scope = bound
     key = (_registry(cfg), token, identifier)
     now = monotonic()
+    if media_id is not None:
+        # A bound asset already in cache does not need the reply authors reloaded.
+        with _CACHE_LOCK:
+            hit = _cache.get(key)
+            if hit and hit[0] > now and media_id in hit[2][1]:
+                _cache.move_to_end(key)
+                return hit[2]
+    feedback = _read_feedback(cfg, identifier)
+    reply_authors = _read_reply_authors(cfg, identifier) if scope != "attachments" else {}
+    feedback_version = digest([feedback, reply_authors])
     with _CACHE_LOCK:
         generation = _cache_generation
         hit = _cache.get(key)
-        if hit and hit[0] > now:
+        if hit and hit[0] > now and hit[1] == feedback_version:
             _cache.move_to_end(key)
-            return hit[1]
+            return hit[2]
     try:
         client = TicketClient(cfg.qiyu)
         detail = client.detail(identifier)
@@ -519,10 +582,10 @@ def _snapshot(cfg: Settings, token: str) -> tuple[dict, dict[str, tuple[str, str
         logs = client.history(identifier)
     except TicketError:
         logs = None
-    result = _project(detail, token, cfg=cfg, logs=logs, scope=scope)
+    result = _project(detail, token, cfg=cfg, logs=logs, scope=scope, feedback=feedback, reply_authors=reply_authors)
     with _CACHE_LOCK:
         if generation == _cache_generation:
-            _cache[key] = (now + _CACHE_SECONDS, result)
+            _cache[key] = (now + _CACHE_SECONDS, feedback_version, result)
             _cache.move_to_end(key)
             while len(_cache) > _CACHE_LIMIT:
                 _cache.popitem(last=False)
@@ -547,7 +610,7 @@ def fetch_image(cfg: Settings, token: str, image_id: str) -> tuple[bytes, str, s
 
 
 def _guest_media(cfg: Settings, token: str, media_id: str) -> tuple[str, str, bool] | None:
-    snapshot = _snapshot(cfg, token) if _IMAGE.fullmatch(media_id) else None
+    snapshot = _snapshot(cfg, token, media_id=media_id) if _IMAGE.fullmatch(media_id) else None
     return snapshot[1].get(media_id) if snapshot else None
 
 

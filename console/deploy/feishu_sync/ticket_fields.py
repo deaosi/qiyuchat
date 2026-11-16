@@ -16,6 +16,8 @@ class Target(sync.Target):
     skipped: tuple[str, ...]
     feedback_attachment: str | None = None
     attachment_id: str | None = None
+    investigation_field: str | None = None
+    investigation_id: str | None = None
 
 
 def schema(target):
@@ -47,6 +49,8 @@ def require(target, names, *, refresh=False):
     readable = target.approved
     if target.feedback_attachment and target.attachment_id:
         readable = {**readable, target.feedback_attachment: (target.attachment_id, 17)}
+    if target.investigation_field and target.investigation_id:
+        readable = {**readable, target.investigation_field: (target.investigation_id, 1)}
     missing = sorted(names - readable.keys())
     if missing:
         raise sync.SyncError(f"原有工单列已变更，暂不能使用：{'、'.join(missing)}。", 409)

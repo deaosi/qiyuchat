@@ -215,7 +215,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         url = "https://docs.example.com/steps?case=42#retest"
         fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
         fields[tickets._INPUT["reply"]] = [
-            {"type": "mention", "text": "@值班工程师", "token": "ou_fixture"},
+            {"type": "mention", "text": "@值班工程师", "token": "ou_fixture", "link": "https://example.com/mention"},
             {"type": "text", "text": " 请回归验证\n1. 复现问题\n2. 查看"},
             {"type": "url", "text": "回归步骤", "link": url},
             {"type": "text", "text": "\n\n完成后更新结果。"},

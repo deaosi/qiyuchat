@@ -5,6 +5,7 @@ import re
 from sys import maxsize
 from urllib.parse import urlsplit
 
+from src import ticket_feedback
 from src.extract.text import clean_visible_text
 from src.qiyu.ticket import _id
 from src.web import ticket_guest, ticket_media, tickets
@@ -16,7 +17,7 @@ _ZONE = timezone(timedelta(hours=8))
 _REPLY_ACTION = re.compile(r"(?:(?:工单|追加|补充)?回复(?:了?工单)?|repl(?:y|ied)(?: to (?:the )?ticket)?)", re.I)
 _REPLY_FIELD = re.compile(r"(?:(?:工单)?回复(?:内容|工单)?|comment|reply)", re.I)
 _RICH = re.compile(r"</?(?:p|div|br|li|ol|ul|span|strong|em|b|a|img|script|style)(?:\s|/?>)", re.I)
-_FEISHU_ECHO = re.compile(r"语海 Voc · 飞书技术反馈\s*\n(.*?)\n\s*〔语海同步 [0-9a-f]{16}〕", re.S)
+_FEISHU_ECHO = re.compile(r"语海 Voc · 飞书技术反馈\s*\n(.*?)\n\s*〔语海同步 ([0-9a-f]{16})〕", re.S)
 _MAX_REPLIES = 12
 _MAX_HISTORY = 8_000
 _MAX_REPLY = 4_000
@@ -39,7 +40,7 @@ def _is_reply(entry, fields):
 
 def _reply_content(fields, attachments):
     parts = []
-    from_feishu = False
+    reply_token = None
     for field in fields:
         label = field.get("title") or field.get("titleLang") or ""
         if isinstance(label, str) and (label.strip().casefold() in tickets._PRIVATE_LABELS
@@ -50,18 +51,16 @@ def _reply_content(fields, attachments):
             continue
         echo = _FEISHU_ECHO.fullmatch(content.strip())
         if echo:
-            from_feishu = True
-            content = echo[1]
+            content, reply_token = echo.groups()
         value, media = tickets._field_value(content, maxsize, rich=bool(_RICH.search(content)))
         attachments.extend(media)
         if not echo and (echo := _FEISHU_ECHO.fullmatch(value)):
-            from_feishu = True
-            value = echo[1]
+            value, reply_token = echo.groups()
         visible = ticket_guest._guest_text(clean_visible_text(value), None)
         if visible:
             parts.append(visible)
     message = "\n".join(parts)
-    return message, from_feishu
+    return message, reply_token
 
 
 def _shorten(text, limit):
@@ -95,6 +94,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
     identifier = _id(ticket_id)
     if identifier is None or str(identifier) != ticket_id:
         raise ValueError("工单往来记录的工单 ID 无效。")
+    authors = ticket_feedback.reply_authors(cfg, ticket_id)
     creator_ids = {_id(entry.get("operatorId")) for entry in logs
                    if _id(entry.get("actionType")) in tickets._CREATE_ACTIONS}
     creator_ids.discard(None)
@@ -110,7 +110,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
     context_omitted = False
     latest = ""
     has_attachments = False
-    has_native_reply = False
+    has_reply = False
     history_length = 0
     omitted = False
     for entry in ordered:
@@ -121,7 +121,8 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
         if event_id is not None:
             seen.add(event_id)
         attachments = tickets._attachments(entry.get("attachments"))
-        message, from_feishu = _reply_content(fields, attachments)
+        message, reply_token = _reply_content(fields, attachments)
+        from_feishu = reply_token is not None
         count = _attached_count(attachments)
         if not message and not count:
             continue
@@ -134,13 +135,25 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
         else:
             role = "提报人补充" if len(creator_ids) == 1 and actor in creator_ids else "工单回复"
         direction = "飞书 → 七鱼 · 技术反馈" if from_feishu else f"七鱼 → 飞书 · {role}"
-        sender = "" if from_feishu else ticket_guest._guest_text(entry.get("operator"), None)
-        header = " · ".join(part for part in (when, direction, _shorten(sender, 120)) if part)
+        sender = _shorten(ticket_guest._guest_text(entry.get("operator"), None), 120)
+        if from_feishu:
+            author = _shorten(ticket_guest._guest_text(authors.get(reply_token), None), 120)
+            if author:
+                sender = f"飞书更新人 {author}"
+            elif sender:
+                sender = f"七鱼署名 {sender}"
+        header = " · ".join(part for part in (when, direction, sender) if part)
         marker = f"附件 {count} 个" if count else ""
-        if not from_feishu:
+        if from_feishu:
+            forwarded = ticket_guest.forwarded_followup(entry)
+            if forwarded is not None:
+                text, media = forwarded
+                has_reply |= bool(text)
+                has_attachments |= bool(_attached_count(media))
+        else:
             has_attachments |= bool(_attached_count(ticket_guest.followup_media(entry)))
-            if not has_native_reply and message:
-                has_native_reply = bool(ticket_guest.native_followup_text(entry))
+            if not has_reply and message:
+                has_reply = bool(ticket_guest.native_followup_text(entry))
             if not latest:
                 latest = "\n".join(part for part in (header, _shorten(message, _MAX_LATEST), marker) if part)
         if not context_omitted:
@@ -154,7 +167,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
         summary = "\n".join(part for part in (header, _shorten(message, _MAX_REPLY), marker) if part)
         if omitted or len(entries) >= _MAX_REPLIES or history_length + len(summary) + 2 > _MAX_HISTORY:
             omitted = True
-            if context_omitted and latest and has_attachments and has_native_reply:
+            if context_omitted and latest and has_attachments and has_reply:
                 break
             continue
         entries.append(summary)
@@ -164,7 +177,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
     if omitted:
         history.insert(0, f"以下为最近 {len(entries)} 条回复")
     reply_link = None
-    if has_native_reply:
+    if has_reply:
         reply_link = {"text": "查看跟进回复", "link": ticket_guest.reply_url_for(cfg, ticket_id)}
     elif has_attachments:
         reply_link = {"text": "查看跟进回复", "link": ticket_guest.followup_url_for(cfg, ticket_id)}

@@ -107,13 +107,16 @@ it('opens the dated reply and allows touch zoom and pan on the guest screenshot'
       title: '打印故障', status: '处理中', priority: '一般', description: '',
       created_at: null, updated_at: null,
     }} followup_replies={[{
-      time: 1794537200000, text: '已重新检查打印机',
+      time: 1794537200000, text: '技术支持排查结果：已重新检查打印机', source: 'feishu',
+      author: '值班工程师', operator: '工单受理人',
       images: [{ name: '复测截图', url: imageUrl }], attachments: [],
     }]} />)
     const heading = screen.getByRole('heading', { name: '工单跟进' })
     expect(document.activeElement).toBe(heading)
     const section = screen.getByRole('region', { name: '工单跟进' })
-    expect(within(section).getByText('已重新检查打印机')).toBeTruthy()
+    expect(within(section).getByText('技术支持排查结果：已重新检查打印机')).toBeTruthy()
+    expect(within(section).getByText('值班工程师')).toBeTruthy()
+    expect(within(section).getByText('七鱼署名 工单受理人')).toBeTruthy()
     expect(within(section).queryByRole('link')).toBeNull()
 
     fireEvent.click(within(section).getByRole('button', { name: '查看图片：复测截图' }))

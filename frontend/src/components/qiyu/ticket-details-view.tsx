@@ -9,6 +9,8 @@ export type TicketEvent = {
   operator: string
   time: number | null
   details: TicketField[]
+  reply_source?: 'feishu'
+  reply_author?: string
   images?: TicketAttachment[]
   attachments?: TicketAttachment[]
 }
@@ -45,12 +47,13 @@ export function TicketHistory({ history, available, reload }: { history: TicketE
   </div>
   if (!history.length) return <p className="text-sm text-muted-foreground">暂无工单处理记录。</p>
   return <ol className="divide-y rounded-lg border">
-    {history.map((event, index) => <li key={`${event.id}-${index}`} className="space-y-2 p-4">
+    {history.map(event => <li key={event.id} className="space-y-2 p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <p className="break-words text-sm font-medium">{event.action || '工单操作'}</p>
+        <p className="break-words text-sm font-medium">{event.reply_source === 'feishu' ? '飞书技术反馈' : event.action || '工单操作'}</p>
         <p className="shrink-0 text-xs tabular-nums text-muted-foreground">{ticketTime(event.time)}</p>
       </div>
-      {event.operator && <p className="text-xs text-muted-foreground">{event.operator}</p>}
+      {event.reply_author && <p className="text-xs text-muted-foreground">飞书更新人 {event.reply_author}</p>}
+      {event.operator && <p className="text-xs text-muted-foreground">{event.reply_source === 'feishu' && '七鱼署名 '}{event.operator}</p>}
       {event.details.length > 0 && <dl className="space-y-2 text-sm leading-6">
         {event.details.map((field, i) => <div key={`${field.label}-${i}`}>
           {field.label && <dt className="text-xs text-muted-foreground">{field.label}</dt>}
@@ -70,6 +73,7 @@ export function TicketHistory({ history, available, reload }: { history: TicketE
 export type TechnicalFeedback = {
   status: string
   reply: string
+  investigation?: string
   resolved_version: string
   received_at: number | null
   writeback_status: 'pending' | 'succeeded' | 'failed' | 'uncertain' | ''
@@ -111,10 +115,13 @@ export function TicketTechnicalFeedback({ feedback }: { feedback: TechnicalFeedb
           <dt className="mb-1 text-xs text-muted-foreground">{label}</dt>
           <dd className="tabular-nums [overflow-wrap:anywhere]">{value || '—'}</dd>
         </div>)}
-        {feedback.reply && <div className="col-span-full min-w-0">
-          <dt className="mb-1 text-xs text-muted-foreground">技术回复</dt>
-          <dd className="whitespace-pre-wrap rounded-md border bg-background p-3 text-sm leading-relaxed [overflow-wrap:anywhere]">{feedback.reply}</dd>
-        </div>}
+        {[
+          ['技术支持排查结果', feedback.investigation],
+          ['技术回复', feedback.reply],
+        ].map(([label, value]) => value && <div key={label} className="col-span-full min-w-0">
+          <dt className="mb-1 text-xs text-muted-foreground">{label}</dt>
+          <dd className="whitespace-pre-wrap rounded-md border bg-background p-3 text-sm leading-relaxed [overflow-wrap:anywhere]">{value}</dd>
+        </div>)}
       </dl>
       {feedback.error && <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{feedback.error}</p>}
     </div>

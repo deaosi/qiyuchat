@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { ChevronLeft, ChevronRight, Search } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -149,6 +149,18 @@ function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus, onUpdated }:
   const data = saved?.previous === details.data ? saved.detail : details.data
   useEffect(() => () => saveRequest.current?.abort(), [])
 
+  const canRefresh = !details.loading && !details.refreshing && edit === null && !saving
+  const refreshDetails = useCallback(() => {
+    if (canRefresh) details.retry()
+  }, [canRefresh, details.retry])
+  useEffect(() => {
+    function onVisibilityChange() {
+      if (document.visibilityState === 'visible') refreshDetails()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange)
+  }, [refreshDetails])
+
   function cancelEdit() {
     setEdit(null)
     dialogTitle.current?.focus({ preventScroll: true })
@@ -214,8 +226,12 @@ function TicketDetails({ id, refreshKey, onClose, onCloseAutoFocus, onUpdated }:
             <TicketInfo ticket={data.ticket} />
             {data.technical_feedback && <TicketTechnicalFeedback feedback={data.technical_feedback} />}
             <section aria-label="处理记录" className="space-y-2">
-              <h3 className="text-sm font-semibold">处理记录</h3>
-              <TicketHistory history={data.history} available={data.history_available} reload={details.retry} />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold">处理记录</h3>
+                <Button type="button" size="sm" variant="outline" onClick={refreshDetails} disabled={!canRefresh}
+                  aria-busy={details.refreshing}>刷新跟进</Button>
+              </div>
+              <TicketHistory history={data.history} available={data.history_available} reload={canRefresh ? refreshDetails : undefined} />
             </section>
             <section aria-label="关联会话" className="space-y-2">
               <h3 className="text-sm font-semibold">关联会话</h3>

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { TicketEvent } from '@/components/qiyu/ticket-details-view'
 import QiyuApp from './QiyuApp'
 
 const id = '9007199254740993'
@@ -9,6 +10,7 @@ const ticket = { id, title: '订单复核', status: '处理中', priority: '高'
 const edit = { revision: 'ticket-revision', title: ticket.title, priority: 8,
   fields: [{ id: '11', label: '平台&版本', value: '抖音 · Windows', multiline: false },
     { id: '12', label: '问题需求', value: '核对订单明细。', multiline: true }] }
+let followup: TicketEvent | undefined
 const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
   const url = new URL(path, location.origin)
   if (url.pathname === '/api/tickets') {
@@ -21,11 +23,15 @@ const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
       { label: '问题需求', value: '核对订单明细。' },
       { label: '附件/截图', value: '', images: [{ url: '/api/tickets/media?token=example', name: '订单截图' }] },
     ], attachments: [{ url: '/api/tickets/media?token=document', name: '订单明细.pdf' }] },
-    history: [{ id: '783', action: '回复工单', operator: '测试客服', time: ticket.updated_at, details: [{ label: '回复', value: '处理已记录。' }] }],
+    history: [
+      ...(followup ? [followup] : []),
+      { id: '783', action: '回复工单', operator: '测试客服', time: ticket.updated_at, details: [{ label: '回复', value: '处理已记录。' }] },
+    ],
     history_available: true,
     sessions: [{ session_id: 'linked-session', started_at: ticket.created_at, qa_id: 24 }],
     technical_feedback: {
       status: '已解决', reply: '已经修复订单核对异常。', resolved_version: '3.9.1',
+      investigation: '复核发现订单状态未同步。',
       received_at: ticket.created_at, writeback_status: 'succeeded', written_at: ticket.updated_at,
       error: '', feishu_url: feishuUrl,
     },
@@ -44,6 +50,7 @@ const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
 })
 
 beforeEach(() => {
+  followup = undefined
   vi.stubGlobal('matchMedia', vi.fn(() => ({ addEventListener: vi.fn(), removeEventListener: vi.fn(), matches: false })))
   vi.stubGlobal('fetch', fetchApi)
 })
@@ -93,6 +100,7 @@ describe('七鱼工单', () => {
     expect(detail.getByText('处理已记录。')).toBeTruthy()
     const feedback = within(detail.getByRole('region', { name: '飞书技术处理' }))
     expect(feedback.getByText('已经修复订单核对异常。')).toBeTruthy()
+    expect(feedback.getByText('复核发现订单状态未同步。')).toBeTruthy()
     expect(feedback.getByText('3.9.1')).toBeTruthy()
     expect(feedback.getByText('已回传七鱼')).toBeTruthy()
     expect(feedback.getByRole('link', { name: '在飞书查看工单' }).getAttribute('href')).toBe(feishuUrl)
@@ -139,6 +147,33 @@ describe('七鱼工单', () => {
     expect(within(preview).getByRole('slider', { name: '缩放比例' })).toBeTruthy()
     fireEvent.keyDown(preview, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: '工单图片预览' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: ticket.title })).toBe(popup)
+    expect(location.hash).toBe(`#tickets?id=${id}`)
+  })
+
+  it('refreshes the open ticket and keeps its technical reply, author, and attachments together', async () => {
+    history.replaceState(null, '', `#tickets?id=${id}`)
+    render(<QiyuApp />)
+    const popup = await screen.findByRole('dialog', { name: ticket.title })
+    const records = within(within(popup).getByRole('region', { name: '处理记录' }))
+    expect(records.queryByText('补充复核结果。')).toBeNull()
+
+    followup = {
+      id: '784', action: '回复工单', operator: '七鱼受理客服', time: Date.UTC(2026, 0, 1, 4),
+      reply_source: 'feishu', reply_author: '飞书技术同事',
+      details: [{ label: '回复', value: '补充复核结果。' }],
+      images: [{ url: '/api/tickets/media?token=followup-image', name: '跟进截图' }],
+      attachments: [{ url: '/api/tickets/media?token=followup-file', name: '跟进日志.zip' }],
+    }
+    fireEvent.click(records.getByRole('button', { name: '刷新跟进' }))
+
+    const reply = within((await records.findByText('补充复核结果。')).closest('li')!)
+    expect(reply.getByText('飞书技术反馈')).toBeTruthy()
+    expect(reply.getByText('飞书更新人 飞书技术同事')).toBeTruthy()
+    expect(reply.getByText('七鱼署名 七鱼受理客服')).toBeTruthy()
+    expect(reply.getByRole('link', { name: '跟进日志.zip' }).hasAttribute('download')).toBe(true)
+    expect(reply.getByRole('button', { name: '查看图片：跟进截图' })).toBeTruthy()
+    expect(records.getByText('处理已记录。')).toBeTruthy()
     expect(screen.getByRole('dialog', { name: ticket.title })).toBe(popup)
     expect(location.hash).toBe(`#tickets?id=${id}`)
   })

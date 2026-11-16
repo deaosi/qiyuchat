@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS ticket_feedback (
     status TEXT NOT NULL,
     reply TEXT NOT NULL,
     resolved_version TEXT NOT NULL,
+    investigation TEXT NOT NULL DEFAULT '',
     feishu_url TEXT NOT NULL,
     received_at INTEGER NOT NULL,
     writeback_status TEXT NOT NULL,
@@ -43,10 +44,15 @@ CREATE TABLE IF NOT EXISTS ticket_feedback_sent_file (
     file_token_hash TEXT NOT NULL,
     PRIMARY KEY (ticket_id, file_token_hash)
 );
+CREATE TABLE IF NOT EXISTS ticket_feedback_reply_author (
+    ticket_id TEXT NOT NULL,
+    reply_token TEXT NOT NULL,
+    author TEXT NOT NULL,
+    PRIMARY KEY (ticket_id, reply_token)
+);
 """
-_PUBLIC = """SELECT status, reply, resolved_version, feishu_url, received_at,
-                   writeback_status, written_at, error
-            FROM ticket_feedback WHERE ticket_id = ?"""
+_PUBLIC_FIELDS = ("status", "reply", "resolved_version", "investigation", "feishu_url", "received_at",
+                  "writeback_status", "written_at", "error")
 _STATES = {
     "pending": "待回传",
     "succeeded": "已回传",
@@ -73,11 +79,13 @@ def _path(cfg: Settings) -> Path:
 
 def _normalized(feedback: dict) -> dict:
     values = {}
-    for key in ("status", "reply", "version"):
+    for key in ("status", "reply", "version", "investigation"):
         value = feedback.get(key, "")
         if not isinstance(value, str):
             raise ValueError("飞书技术反馈字段格式无效。")
-        values[key] = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if normalized or key != "investigation":
+            values[key] = normalized
     files = feedback.get("attachments") or []
     if not isinstance(files, list) or any(
         not isinstance(item, dict) or set(item) != {"file_token", "name", "size"}
@@ -107,8 +115,9 @@ def _origin_link(value: str) -> str:
 
 def _reply_text(values: dict, token: str) -> str:
     parts = ["语海 Voc · 飞书技术反馈"]
-    for key, label in (("status", "处理状态"), ("version", "解决版本"), ("reply", "技术回复")):
-        if values[key]:
+    for key, label in (("status", "处理状态"), ("version", "解决版本"), ("reply", "技术回复"),
+                       ("investigation", "技术支持排查结果")):
+        if values.get(key):
             parts.append(f"{label}：{values[key]}")
     if len(parts) == 1 and values.get("attachments"):
         parts.append("请查看随回复提交的附件。")
@@ -136,7 +145,10 @@ def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool, att
 
 
 def _stored_text(row):
-    return {"status": row["status"], "reply": row["reply"], "version": row["resolved_version"]}
+    text = {"status": row["status"], "reply": row["reply"], "version": row["resolved_version"]}
+    if "investigation" in row.keys() and row["investigation"]:
+        text["investigation"] = row["investigation"]
+    return text
 
 
 def _legacy_files(row, files):
@@ -188,7 +200,16 @@ def _result(state, written_at, error, *, changed):
     return {"status": _STATES[state], "returned_at": written_at, "changed": changed, "error": error}
 
 
-def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, feishu_url: str = "", download=None) -> dict:
+def _prepare(conn):
+    conn.executescript(_SCHEMA)
+    if "investigation" not in {row[1] for row in conn.execute("PRAGMA table_info(ticket_feedback)")}:
+        with transaction(conn):
+            if "investigation" not in {row[1] for row in conn.execute("PRAGMA table_info(ticket_feedback)")}:
+                conn.execute("ALTER TABLE ticket_feedback ADD COLUMN investigation TEXT NOT NULL DEFAULT ''")
+
+
+def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, feishu_url: str = "", download=None,
+           resolve_author=None) -> dict:
     """Run under the Feishu table's write lock and keep inbox data before external writes."""
     if (not re.fullmatch(r"[1-9][0-9]{0,18}", ticket_id) or int(ticket_id) > 2 ** 63 - 1
             or not re.fullmatch(r"rec[A-Za-z0-9]{4,60}", record_id)):
@@ -198,10 +219,10 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
         return {"status": "", "returned_at": None, "changed": False, "error": ""}
     revision = digest(values)
     files = values.get("attachments", [])
-    text = {key: values[key] for key in ("status", "reply", "version")}
+    text = {key: value for key, value in values.items() if key != "attachments"}
     path = _path(cfg)
     with connection(path, write=True) as conn:
-        conn.executescript(_SCHEMA)
+        _prepare(conn)
         with transaction(conn):
             same_ticket = conn.execute("SELECT * FROM ticket_feedback WHERE ticket_id = ?", (ticket_id,)).fetchone()
             bound_ticket = conn.execute("SELECT ticket_id FROM ticket_feedback WHERE record_id = ?", (record_id,)).fetchone()
@@ -243,21 +264,23 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
                 unchanged_text = delivery["last_text_revision"] == digest(text)
                 if not planned and (unchanged_text or not any(text.values())):
                     written_at = delivery["last_written_at"]
-                    conn.execute("""UPDATE ticket_feedback SET revision=?, status=?, reply=?, resolved_version=?,
+                    conn.execute("""UPDATE ticket_feedback SET revision=?, status=?, reply=?, resolved_version=?, investigation=?,
                                     writeback_status='succeeded', written_at=?, error='' WHERE ticket_id=?""",
-                                 (revision, text["status"], text["reply"], text["version"], written_at, ticket_id))
+                                 (revision, text["status"], text["reply"], text["version"], text.get("investigation", ""),
+                                  written_at, ticket_id))
                     return _result("succeeded", written_at, "", changed=False)
                 token = token_hex(8)
                 conn.execute("""
                     INSERT INTO ticket_feedback
-                        (ticket_id, record_id, revision, reply_token, status, reply, resolved_version, feishu_url,
+                        (ticket_id, record_id, revision, reply_token, status, reply, resolved_version, investigation, feishu_url,
                          received_at, writeback_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
                     ON CONFLICT(ticket_id) DO UPDATE SET revision = excluded.revision, reply_token = excluded.reply_token,
-                        status = excluded.status,
+                        status = excluded.status, investigation = excluded.investigation,
                         reply = excluded.reply, resolved_version = excluded.resolved_version, feishu_url = excluded.feishu_url,
                         received_at = excluded.received_at, writeback_status = 'pending', written_at = NULL, error = ''
-                """, (ticket_id, record_id, revision, token, values["status"], values["reply"], values["version"],
+                """, (ticket_id, record_id, revision, token, text["status"], text["reply"], text["version"],
+                      text.get("investigation", ""),
                       _origin_link(feishu_url), int(time.time() * 1000)))
                 conn.execute("UPDATE ticket_feedback_delivery SET planned_files = ? WHERE ticket_id = ?",
                              (json.dumps(planned), ticket_id))
@@ -266,6 +289,13 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
             reconcile = reconcile and not changed
         if planned is None:
             raise ValueError("七鱼技术回复的待回传附件无法核对。")
+        if resolve_author is not None and changed:
+            previous = _stored_text(same_ticket) if same_ticket is not None else {}
+            changed_text = {role: item for role, item in text.items() if item and item != previous.get(role)}
+            author = resolve_author(changed_text, planned)
+            if author:
+                conn.execute("INSERT OR IGNORE INTO ticket_feedback_reply_author VALUES (?, ?, ?)",
+                             (ticket_id, token, author))
         manifest = tuple((item["name"], item["size"]) for item in planned)
         attachments = ()
         try:
@@ -297,8 +327,21 @@ def get(cfg: Settings, ticket_id: str) -> dict | None:
     with connection(path) as conn:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ticket_feedback'").fetchone():
             return None
-        row = conn.execute(_PUBLIC, (ticket_id,)).fetchone()
-    return dict(row) if row is not None else None
+        row = conn.execute("SELECT * FROM ticket_feedback WHERE ticket_id = ?", (ticket_id,)).fetchone()
+    if row is None:
+        return None
+    values = dict(row)
+    return {field: values.get(field, "") for field in _PUBLIC_FIELDS}
+
+
+def reply_authors(cfg: Settings, ticket_id: str) -> dict[str, str]:
+    path = _path(cfg)
+    if not path.is_file():
+        return {}
+    with connection(path) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ticket_feedback_reply_author'").fetchone():
+            return {}
+        return dict(conn.execute("SELECT reply_token,author FROM ticket_feedback_reply_author WHERE ticket_id=?", (ticket_id,)))
 
 
 def confirmed(cfg: Settings, ticket_id: str, feedback: dict) -> bool:

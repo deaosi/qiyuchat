@@ -33,6 +33,9 @@ type GuestFollowup = {
   images: TicketAttachment[]
   attachments: TicketAttachment[]
   text?: string
+  source?: 'feishu'
+  operator?: string
+  author?: string
 }
 
 export type GuestTicketPayload = {
@@ -81,10 +84,11 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
     ...event, details: scopedFields(event.details) ?? [],
     images: scopedMedia(event.images, 'images'), attachments: scopedMedia(event.attachments, 'attachments'),
   })) ?? []
-  const followups = (followup_replies ?? followup_attachments)?.map(({ time, text, images, attachments }) => ({
-    time, text: followup_replies ? text : undefined,
+  const followups = (followup_replies ?? followup_attachments)?.map(({ time, text, source, author, operator, images, attachments }) => ({
+    time, text: followup_replies ? text : undefined, source, author, operator,
     images: scopedMedia(images, 'images'), attachments: scopedMedia(attachments, 'attachments'),
   })).filter(item => item.text || item.images.length || item.attachments.length)
+  const hasForwardedReply = followups?.some(item => item.source === 'feishu')
 
   return <div className="min-h-screen bg-linear-to-b from-muted/50 via-background to-background">
     <header className="border-b bg-background">
@@ -112,8 +116,9 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
         </section>
         <div className="space-y-6 px-5 pb-6 sm:px-8">
           <TicketInfo ticket={ticket} />
-          {technical_feedback && <TicketTechnicalFeedback feedback={{
+          {technical_feedback && !hasForwardedReply && <TicketTechnicalFeedback feedback={{
             status: technical_feedback.status, reply: technical_feedback.reply,
+            investigation: technical_feedback.investigation,
             resolved_version: technical_feedback.resolved_version, received_at: technical_feedback.received_at,
             writeback_status: technical_feedback.writeback_status, written_at: technical_feedback.written_at,
           }} />}
@@ -122,7 +127,15 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
             {followup_replies && followup_replies_truncated && <p className="text-sm text-muted-foreground">仅展示最近 {followups.length} 条跟进。</p>}
             {followups.length ? <ul className="divide-y rounded-lg border">
               {followups.map((item, index) => <li className="space-y-2 p-4" key={`${item.time}-${index}`}>
-                <p className="text-xs tabular-nums text-muted-foreground">{ticketTime(item.time)}</p>
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
+                  {followup_replies && <span className="font-medium">
+                    {item.source === 'feishu' ? item.author || '飞书技术反馈' : item.operator || '七鱼回复'}
+                  </span>}
+                  {item.source === 'feishu' && item.author && <span className="text-muted-foreground">飞书技术反馈</span>}
+                  {item.source === 'feishu' && item.operator && item.operator !== item.author &&
+                    <span className="text-muted-foreground">七鱼署名 {item.operator}</span>}
+                  <span className="tabular-nums text-muted-foreground">{ticketTime(item.time)}</span>
+                </div>
                 {item.text && <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{item.text}</p>}
                 {!!(item.images.length || item.attachments.length) && <TicketAttachments images={item.images} attachments={item.attachments} />}
               </li>)}

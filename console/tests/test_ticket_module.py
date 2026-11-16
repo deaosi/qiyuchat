@@ -467,6 +467,90 @@ class TicketModuleTests(LocalFixture):
             for hidden in ("此备注不可见", "testSecret", "私密内容.pdf", "语海同步", "source-token"):
                 self.assertNotIn(hidden, str(reply_payload))
 
+    def test_guest_ticket_refreshes_forwarded_feedback_with_scoped_attachments(self):
+        ticket_id = "581030"
+        detail = {"id": int(ticket_id), "title": "打印异常", "holderName": "受理客服"}
+        paths = [urlsplit(link_for(self.cfg, ticket_id)).path for link_for in (
+            ticket_guest.url_for, ticket_guest.reply_url_for, ticket_guest.followup_url_for,
+        )]
+        detail_token, reply_token, old_attachment_token = (path.rsplit("/", 1)[1] for path in paths)
+        other_token = urlsplit(ticket_guest.url_for(self.cfg, "581031")).path.rsplit("/", 1)[1]
+        origin = "https://shop.qiyukf.net/"
+        shot = origin + "0123456789abcdef0123456789abcdef.png?signature=source-secret"
+        document = origin + "1123456789abcdef0123456789abcdef.log"
+        unrelated = origin + "2123456789abcdef0123456789abcdef.png"
+        logs = []
+        feedback = {"received_at": 1794537100000, "writeback_status": "pending"}
+        reply_authors = {"1123456789abcdef": "飞书排查同事"}
+
+        def event(number, content, *, shared=None, attachment=None):
+            return {"id": number, "actionType": 20, "action": "回复", "customerSee": shared,
+                    "operator": "受理客服", "time": 1794537200000 + number,
+                    "info": [{"title": "备注", "content": content}],
+                    "attachments": [attachment] if attachment else []}
+
+        def echoed(body, marker="0123456789abcdef"):
+            return f"语海 Voc · 飞书技术反馈\n技术回复：{body}\n〔语海同步 {marker}〕"
+
+        png = b"\x89PNG\r\n\x1a\ncontent"
+        with (patch.object(ticket_guest.TicketClient, "detail", return_value=detail),
+              patch.object(ticket_guest.TicketClient, "history", return_value=logs) as history,
+              patch.object(ticket_guest.ticket_feedback, "get", side_effect=lambda *_: dict(feedback)),
+              patch.object(ticket_guest.ticket_feedback, "reply_authors", side_effect=lambda *_: dict(reply_authors)) as authors,
+              patch.object(case_media, "fetch_bytes", return_value=(png, "image/png")) as fetch):
+            self.assertNotIn("followup_replies", ticket_guest.resolve_payload(self.cfg, detail_token))
+            self.assertNotIn("followup_replies", ticket_guest.resolve_payload(self.cfg, detail_token))
+            history.assert_called_once()
+            logs.extend((
+                event(1, "普通内部回复", shared=False),
+                event(2, echoed("没有确认可供访客阅读"), attachment={"url": unrelated, "name": "其他.png"}),
+                event(3, echoed("校验中有可见冲突"), shared=True, attachment={"url": unrelated, "name": "其他.png"}),
+                event(4, echoed("截短标记", "0123abcd"), shared=False),
+                event(5, echoed("复测完成\n1. 日志已补充\n电话 13812345678 https://example.org/private"), shared=False,
+                      attachment={"url": shot, "name": "复测结果.png"}),
+                event(6, "语海 Voc · 飞书技术反馈\n技术支持排查结果：补充诊断日志\n〔语海同步 1123456789abcdef〕", shared=False,
+                      attachment={"url": document, "name": "诊断日志.log"}),
+            ))
+            feedback.update(writeback_status="succeeded", written_at=1794537200007,
+                            investigation="复现故障，密钥：secretKey")
+            detail_view = ticket_guest.resolve_payload(self.cfg, detail_token)
+            self.assertEqual(history.call_count, 2)
+            first, second = detail_view["followup_replies"]
+            self.assertEqual(first["source"], "feishu")
+            self.assertEqual(first["operator"], "受理客服")
+            self.assertNotIn("author", first)
+            self.assertEqual(first["time"], 1794537200005)
+            self.assertIn("复测完成\n1. 日志已补充", first["text"])
+            self.assertEqual(second["author"], "飞书排查同事")
+            self.assertEqual(second["text"], "技术支持排查结果：补充诊断日志")
+            self.assertEqual(second["attachments"][0]["name"], "诊断日志.log")
+            self.assertIn("复现故障", detail_view["technical_feedback"]["investigation"])
+            reply_authors["0123456789abcdef"] = "飞书回复同事"
+            detail_view = ticket_guest.resolve_payload(self.cfg, detail_token)
+            self.assertEqual(history.call_count, 3)
+            self.assertEqual(detail_view["followup_replies"][0]["author"], "飞书回复同事")
+            image_id = first["images"][0]["url"].rsplit("/", 1)[1]
+            author_reads = authors.call_count
+            self.assertEqual(ticket_guest.fetch_image(self.cfg, detail_token, image_id)[:2], (png, "image/png"))
+            self.assertEqual(authors.call_count, author_reads)
+            fetch.assert_called_once_with(shot, image_only=True, ticket_attachment=True)
+            with self.assertRaises(case_media.ImageFetchError):
+                ticket_guest.fetch_image(self.cfg, other_token, image_id)
+
+            reply_view = ticket_guest.resolve_payload(self.cfg, reply_token)
+            self.assertEqual([item["operator"] for item in reply_view["followup_replies"]], ["受理客服"] * 3)
+            self.assertEqual([item.get("source") for item in reply_view["followup_replies"]], [None, "feishu", "feishu"])
+            self.assertEqual([item.get("author") for item in reply_view["followup_replies"]],
+                             [None, "飞书回复同事", "飞书排查同事"])
+            old_attachment_view = ticket_guest.resolve_payload(self.cfg, old_attachment_token)
+            self.assertEqual(len(old_attachment_view["followup_attachments"]), 2)
+            self.assertTrue(all({"author", "text", "operator"}.isdisjoint(item) for item in
+                                old_attachment_view["followup_attachments"]))
+            public = json.dumps([detail_view, reply_view, old_attachment_view], ensure_ascii=False)
+            for private in ("语海同步", "没有确认可供访客阅读", "校验中有可见冲突", "截短标记", "source-secret",
+                            "https://example.org/private", "13812345678", "secretKey", unrelated):
+                self.assertNotIn(private, public)
+
     def test_reply_guest_view_keeps_latest_hundred_and_flags_earlier_replies(self):
         detail = {"id": 581001, "title": "工单标题"}
         base_time = 1794537200000

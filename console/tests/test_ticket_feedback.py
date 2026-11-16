@@ -86,6 +86,25 @@ class TestTicketFeedback(unittest.TestCase):
         self.assertEqual(ticket_feedback.get(self.cfg, "9007199254740993")["writeback_status"], "succeeded")
         self.assertEqual(ticket_feedback.retry_records(self.cfg), {})
 
+    def test_investigation_and_feishu_author_stay_with_their_exact_round(self):
+        key, record = "42", "recExample1"
+        author = Mock(return_value="技术工程师")
+        feedback = {"investigation": "复现结果\n确认配置冲突"}
+        with patch.object(ticket_feedback.TicketClient, "post_feedback") as send:
+            first = ticket_feedback.ingest(self.cfg, ticket_id=key, record_id=record, feedback=feedback,
+                                           resolve_author=author)
+            repeated = ticket_feedback.ingest(self.cfg, ticket_id=key, record_id=record, feedback=feedback,
+                                              resolve_author=author)
+        self.assertEqual(first["status"], "已回传")
+        self.assertFalse(repeated["changed"])
+        author.assert_called_once_with(feedback, [])
+        send.assert_called_once()
+        text = send.call_args.args[1]
+        self.assertIn("技术支持排查结果：复现结果\n确认配置冲突", text)
+        marker = text.splitlines()[-1].removeprefix("〔语海同步 ").removesuffix("〕")
+        self.assertEqual(ticket_feedback.get(self.cfg, key)["investigation"], feedback["investigation"])
+        self.assertEqual(ticket_feedback.reply_authors(self.cfg, key), {marker: "技术工程师"})
+
     def test_unconfirmed_native_reply_only_reconciles_sevenfish_log(self):
         with patch.object(ticket_feedback.TicketClient, "post_feedback",
                           side_effect=TicketReplyUnconfirmed("七鱼回复尚未核对")) as write, \
