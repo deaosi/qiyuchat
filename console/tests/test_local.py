@@ -340,6 +340,40 @@ class TestLocalWorkflow(LocalFixture):
         rows = list(csv.reader(io.StringIO(api.export_pairs(self.cfg, **filters).decode("utf-8-sig"))))
         self.assertEqual(len(rows) - 1, p["total"])
 
+    def test_overview_dimensions_keep_date_visibility_and_masked_name_filters(self):
+        db = app.get_db(self.cfg)
+        start = end = "2026-11-01"
+        low, high = api._bounds(start=start, end=end)
+        group = "售前13800001234"
+        staff = "客服13900005678"
+        db.upsert_qa_pairs([
+            dict(session_id=f"local-{index}", asked_at=stamp, question=question,
+                 answer=answer, group_name=group if stamp else "", staff_name=staff if stamp else "")
+            for index, (stamp, question, answer) in enumerate([
+                (low - 1, "范围前咨询", ""),
+                (low, "范围内咨询", "有明确回答"),
+                (high - 1, "当天最后咨询", ""),
+                (high, "次日咨询", ""),
+                (0, "无日期咨询", ""),
+                (low, "[非文本消息 mType=2]", ""),
+            ])
+        ])
+        scope = {"start": start, "end": end, "group": mask_pii(group), "staff": mask_pii(staff)}
+        summary = api.build_summary(self.cfg, **scope)
+        self.assertEqual((summary["qa_pair"], summary["unanswered"]), (2, 1))
+        self.assertEqual(summary["recent"], api.pairs(self.cfg, **scope)["items"])
+        self.assertEqual(api.pairs(self.cfg, end=end)["total"], 3)
+        self.assertEqual(sum(day["questions"] for day in api.trend(self.cfg, q="明确回答", **scope)["series"]), 1)
+        with patch.object(api.E, "normalize", side_effect=AssertionError("details are not needed")):
+            trend = api.trend(self.cfg, **scope)
+            unbounded = api.trend(self.cfg, days=0)
+            metadata = api.meta(self.cfg)
+        self.assertEqual(trend["series"], [{"date": start, "questions": 2}])
+        self.assertEqual(unbounded["unknown_time"], 1)
+        self.assertEqual((metadata["total"], metadata["unknown_time"]), (5, 1))
+        self.assertEqual(set(metadata["groups"]), {mask_pii(group), "未分组"})
+        self.assertEqual(set(metadata["staff"]), {mask_pii(staff), "未记录客服"})
+
     def test_detail_and_missing(self):
         self.seed()
         r = api.pairs(self.cfg)["items"][0]

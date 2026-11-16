@@ -24,9 +24,8 @@ log = get("db")
 
 EXTRACT_VERSION = "local-rules-v2"
 
-SOURCE_ARCHIVE_TRIGGERS = """
-DROP TRIGGER IF EXISTS push_sync_forget_message_source;
-DROP TRIGGER IF EXISTS push_sync_forget_session_source;
+_SOURCE_ARCHIVE_DEFINITIONS = {
+    "push_sync_forget_message_source": """\
 CREATE TRIGGER push_sync_forget_message_source AFTER DELETE ON raw_message
 WHEN NOT EXISTS(SELECT 1 FROM source_write_guard WHERE session_id=OLD.session_id) BEGIN
  UPDATE push_sync_state SET source_json='',source_version='',
@@ -34,15 +33,20 @@ WHEN NOT EXISTS(SELECT 1 FROM source_write_guard WHERE session_id=OLD.session_id
  archive_reason=CASE WHEN archive_reason='retention' THEN archive_reason ELSE 'raw_message_deleted' END,
  archived_at=CAST(strftime('%s','now') AS REAL),updated_at=CAST(strftime('%s','now') AS REAL)
  WHERE session_id=OLD.session_id;
-END;
+END""",
+    "push_sync_forget_session_source": """\
 CREATE TRIGGER push_sync_forget_session_source AFTER DELETE ON raw_session BEGIN
  UPDATE push_sync_state SET source_json='',source_version='',
  status=CASE WHEN status IN ('completed','failed') THEN 'archived' ELSE status END,
  archive_reason=CASE WHEN archive_reason='retention' THEN archive_reason ELSE 'raw_session_deleted' END,
  archived_at=CAST(strftime('%s','now') AS REAL),updated_at=CAST(strftime('%s','now') AS REAL)
  WHERE session_id=OLD.session_id;
-END;
-"""
+END""",
+}
+SOURCE_ARCHIVE_TRIGGERS = "\n" + "\n".join(
+    f"DROP TRIGGER IF EXISTS {name};\n{definition};"
+    for name, definition in _SOURCE_ARCHIVE_DEFINITIONS.items()
+) + "\n"
 
 # 滑动窗口裁剪时「这条消息该删了」的判定。
 # 两条路：自己有可信时间戳且过期；或者所属会话已经过期（连带清理，覆盖 ts 缺失的旧数据）。
@@ -230,7 +234,14 @@ class DB:
             for name, definition in (("archive_reason", "TEXT NOT NULL DEFAULT ''"), ("archived_at", "REAL NOT NULL DEFAULT 0")):
                 if name not in columns:
                     self._conn.execute(f"ALTER TABLE push_sync_state ADD COLUMN {name} {definition}")
-            self._conn.executescript(SOURCE_ARCHIVE_TRIGGERS)
+            definitions = dict(self._conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?)",
+                tuple(_SOURCE_ARCHIVE_DEFINITIONS),
+            ))
+            # Opening an existing WAL database must not acquire a write lock just
+            # to recreate archive triggers while the message receiver is writing.
+            if definitions != _SOURCE_ARCHIVE_DEFINITIONS:
+                self._conn.executescript("BEGIN IMMEDIATE;\n" + SOURCE_ARCHIVE_TRIGGERS + "COMMIT;")
         self._conn.commit()
 
     # ---------- 基础 ----------
@@ -571,14 +582,27 @@ class DB:
                 n += 1
         return n
 
-    def iter_qa_pairs(self, session_ids: list[str] | None = None,
-                      limit: int = 0) -> list[sqlite3.Row]:
-        sql = "SELECT * FROM qa_pair"
+    def iter_qa_pairs(self, session_ids: list[str] | None = None, limit: int = 0, *,
+                      asked_from: int = 0, asked_before: int = 0,
+                      dimensions_only: bool = False) -> list[sqlite3.Row]:
+        columns = "asked_at, question, group_name, staff_name" if dimensions_only else "*"
+        sql = f"SELECT {columns} FROM qa_pair"
+        conditions = []
         args: list[Any] = []
         if session_ids:
             marks = ",".join("?" * len(session_ids))
-            sql += f" WHERE session_id IN ({marks})"
+            conditions.append(f"session_id IN ({marks})")
             args.extend(session_ids)
+        if asked_from:
+            conditions.append("asked_at >= ?")
+            args.append(asked_from)
+        if asked_before:
+            conditions.append("asked_at < ?")
+            args.append(asked_before)
+        if asked_from or asked_before:
+            conditions.append("asked_at != 0")
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY asked_at"
         if limit:
             sql += f" LIMIT {int(limit)}"

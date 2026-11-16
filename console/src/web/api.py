@@ -52,6 +52,11 @@ def _bounds(days: int = 0, start: str = "", end: str = "") -> tuple[int, int]:
     return low, high
 
 
+def _public_dimensions(group: object, staff: object) -> tuple[str, str]:
+    return (mask_pii(str(group or "")) or "未分组",
+            mask_pii(str(staff or "")) or "未记录客服")
+
+
 def _public(row: dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     sid = str(item.get("session_id") or "")
@@ -63,10 +68,9 @@ def _public(row: dict[str, Any]) -> dict[str, Any]:
     item["question"] = question
     item["answer"] = clean_visible_text(str(item.get("answer") or ""))
     item["q_norm"] = E.normalize(question)
-    for key in ("question", "answer", "q_norm", "customer_name", "group_name", "staff_name", "session_id"):
+    for key in ("question", "answer", "q_norm", "customer_name", "session_id"):
         item[key] = mask_pii(str(item.get(key) or ""))
-    item["group_name"] = item["group_name"] or "未分组"
-    item["staff_name"] = item["staff_name"] or "未记录客服"
+    item["group_name"], item["staff_name"] = _public_dimensions(item.get("group_name"), item.get("staff_name"))
     item["customer_name"] = item["customer_name"] or "匿名客户"
     item["asked_at_text"] = _time(int(item.get("asked_at") or 0))
     item["replied"] = bool(item.get("answer", "").strip())
@@ -78,11 +82,9 @@ def _rows(cfg: Settings, days: int = 0, group: str = "", staff: str = "",
           start: str = "", end: str = "", q: str = "", replied: str = "",
           cluster: int = 0, customer: str = "") -> list[dict[str, Any]]:
     low, high = _bounds(days, start, end)
+    needle = q.casefold() if q else ""
     rows = []
-    for raw in get_db(cfg).iter_qa_pairs():
-        stamp = int(raw["asked_at"] or 0)
-        if (low or high) and (not stamp or (low and stamp < low) or (high and stamp >= high)):
-            continue
+    for raw in get_db(cfg).iter_qa_pairs(asked_from=low, asked_before=high):
         r = _public(dict(raw))
         if not r["question"].strip():
             continue
@@ -98,11 +100,16 @@ def _rows(cfg: Settings, days: int = 0, group: str = "", staff: str = "",
             continue
         if replied == "answered" and not r["replied"]:
             continue
-        if q and q.casefold() not in " ".join(str(r.get(k) or "") for k in
+        if needle and needle not in " ".join(str(r.get(k) or "") for k in
                                                ("question", "answer", "customer_name", "session_id")).casefold():
             continue
         rows.append(r)
     return rows
+
+
+def _dimension_rows(cfg: Settings, low: int = 0, high: int = 0):
+    rows = get_db(cfg).iter_qa_pairs(asked_from=low, asked_before=high, dimensions_only=True)
+    return (row for row in rows if clean_visible_text(str(row["question"] or "")))
 
 
 def _cluster_buckets(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
@@ -160,15 +167,24 @@ def build_summary(cfg: Settings | None = None, **filters: Any) -> dict[str, Any]
 
 def trend(cfg: Settings | None = None, days: int = 30, **filters: Any) -> dict[str, Any]:
     cfg = cfg or settings()
-    rows = _rows(cfg, days=days, **filters)
     low, high = _bounds(days, filters.get("start", ""), filters.get("end", ""))
-    valid_days = [_day(int(r["asked_at"])) for r in rows if r.get("asked_at")]
-    first = datetime.fromtimestamp(low / 1000).date() if low else (date.fromisoformat(min(valid_days)) if valid_days else date.today() - timedelta(days=29))
-    last = datetime.fromtimestamp(high / 1000).date() - timedelta(days=1) if high else max(date.today(), first, date.fromisoformat(max(valid_days)) if valid_days else date.today())
+    if any(filters.get(name) for name in ("q", "replied", "cluster", "customer")):
+        stamps = [row["asked_at"] for row in _rows(cfg, days=days, **filters)]
+    else:
+        group, staff = filters.get("group"), filters.get("staff")
+        stamps = []
+        for row in _dimension_rows(cfg, low, high):
+            if group or staff:
+                public_group, public_staff = _public_dimensions(row["group_name"], row["staff_name"])
+                if (group and group != public_group) or (staff and staff != public_staff):
+                    continue
+            stamps.append(row["asked_at"])
+    daily = Counter(_day(int(stamp)) for stamp in stamps if stamp)
+    first = datetime.fromtimestamp(low / 1000).date() if low else (date.fromisoformat(min(daily)) if daily else date.today() - timedelta(days=29))
+    last = datetime.fromtimestamp(high / 1000).date() - timedelta(days=1) if high else max(date.today(), first, date.fromisoformat(max(daily)) if daily else date.today())
     truncated = (last - first).days >= 366
     if truncated:
         first = last - timedelta(days=365)
-    daily = Counter(_day(int(r["asked_at"])) for r in rows if r.get("asked_at"))
     series = []
     cursor = first
     while cursor <= last:
@@ -176,7 +192,7 @@ def trend(cfg: Settings | None = None, days: int = 30, **filters: Any) -> dict[s
         series.append({"date": key, "questions": daily.get(key, 0)})
         cursor += timedelta(days=1)
     return {"days": len(series), "series": series, "truncated": truncated,
-            "unknown_time": sum(not r.get("asked_at") for r in rows)}
+            "unknown_time": sum(not stamp for stamp in stamps)}
 
 
 def questions(cfg: Settings | None = None, top: int = 20, **filters: Any) -> dict[str, Any]:
@@ -542,11 +558,17 @@ def _case_detail(cfg: Settings, db: Any, qa_id: int, *, full_session: bool) -> d
 
 def meta(cfg: Settings | None = None) -> dict[str, Any]:
     cfg = cfg or settings()
-    rows = _rows(cfg)
-    return {"groups": sorted({r["group_name"] for r in rows}),
-            "staff": sorted({r["staff_name"] for r in rows}),
+    groups, staff = set(), set()
+    total = unknown = 0
+    for row in _dimension_rows(cfg):
+        group, name = _public_dimensions(row["group_name"], row["staff_name"])
+        groups.add(group)
+        staff.add(name)
+        total += 1
+        unknown += not row["asked_at"]
+    return {"groups": sorted(groups), "staff": sorted(staff),
             "mock": cfg.runtime.mock, "db_name": get_db(cfg).path.replace("\\", "/").rsplit("/", 1)[-1],
-            "total": len(rows), "unknown_time": sum(not r.get("asked_at") for r in rows),
+            "total": total, "unknown_time": unknown,
             "qiyu": "reserved"}
 
 

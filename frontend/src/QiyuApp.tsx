@@ -32,6 +32,7 @@ import { ImportDialog } from '@/components/qiyu/import-dialog'
 import { GatewaySettings } from '@/components/qiyu/gateway-settings'
 import { LoadingState, PageActivity, RefreshDataButton } from '@/components/qiyu/loading-state'
 import { useApi } from '@/hooks/use-api'
+import { useSidebarPreload } from '@/hooks/use-sidebar-preload'
 import { apiPost, downloadExport, downloadTemplate, normalizePair, type ApiFilters, type LocalStatus, type MetaData, type SummaryData, type TrendData } from '@/lib/api'
 import type { QAPair } from '@/lib/demo-data'
 import { customerLabel } from '@/lib/utils'
@@ -59,12 +60,35 @@ const readView = (): View => { const id = location.hash.slice(1).split('?')[0]; 
 const readCustomerGroup = (): string => readView() === 'customers' && typeof history.state?.customerGroup === 'string' ? history.state.customerGroup : ''
 const numberText = (value: unknown) => typeof value === 'number' ? value.toLocaleString('zh-CN') : '—'
 
-const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport, showFeishuRobot }: { view: View; total?: number; navigate: (view: View) => void; onImport: () => void; showFeishuRobot: boolean }) {
+type AppSidebarProps = {
+  view: View
+  total?: number
+  navigate: (view: View) => void
+  onImport: () => void
+  showFeishuRobot: boolean
+  filters: ApiFilters
+  refreshKey: number
+  pausePreload: boolean
+}
+
+const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport, showFeishuRobot, filters, refreshKey, pausePreload }: AppSidebarProps) {
   const { setOpenMobile } = useSidebar()
+  const preload = useSidebarPreload(view, filters, refreshKey, pausePreload)
   const activePage = view === 'clusters' ? 'cleaning' : view
   return <Sidebar collapsible="offcanvas" variant="inset">
     <SidebarHeader className="border-b px-4 py-4"><div className="flex h-7 items-center justify-between gap-2"><span className="text-base font-semibold tracking-tight">语海Voc</span><Badge variant="outline" className="text-[10px] font-normal">工作台</Badge></div></SidebarHeader>
-    <SidebarContent className="gap-1 pt-2">{sidebarGroups.map(group => <SidebarGroup key={group}><SidebarGroupLabel>{group}</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{sidebarPages.filter(item => item.group === group).map(item => <SidebarMenuItem key={item.id}><SidebarMenuButton isActive={activePage === item.id} onClick={() => { navigate(item.id); setOpenMobile(false) }} tooltip={item.title}><item.icon /><span>{item.title}</span>{item.id === 'pairs' && total !== undefined && <span className="ml-auto text-xs tabular-nums text-muted-foreground">{total.toLocaleString('zh-CN')}</span>}</SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup>)}
+    <SidebarContent className="gap-1 pt-2">{sidebarGroups.map(group => <SidebarGroup key={group}>
+      <SidebarGroupLabel>{group}</SidebarGroupLabel>
+      <SidebarGroupContent><SidebarMenu>{sidebarPages.filter(item => item.group === group).map(item => <SidebarMenuItem key={item.id}>
+        <SidebarMenuButton isActive={activePage === item.id} tooltip={item.title}
+          onMouseEnter={() => preload.prepare(item.id)} onMouseLeave={() => preload.cancel(item.id)}
+          onFocus={() => preload.prepare(item.id)} onBlur={() => preload.cancel(item.id)}
+          onClick={() => { preload.cancel(item.id); navigate(item.id); setOpenMobile(false) }}>
+          <item.icon /><span>{item.title}</span>
+          {item.id === 'pairs' && total !== undefined && <span className="ml-auto text-xs tabular-nums text-muted-foreground">{total.toLocaleString('zh-CN')}</span>}
+        </SidebarMenuButton>
+      </SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent>
+    </SidebarGroup>)}
       <SidebarGroup className="mt-auto">
         <SidebarGroupLabel>系统设置</SidebarGroupLabel>
         <SidebarGroupContent><SidebarMenu>
@@ -135,8 +159,8 @@ function Workspace() {
   const captureTableFilters = useCallback((filters: ApiFilters) => setTableExport({ key: tableExportKey, filters }), [tableExportKey])
   const meta = useApi<MetaData>('meta', { source }, refreshKey, view !== 'tickets')
   const feishuAccess = useApi<{ allowed: boolean }>('feishu-robot/access', { source }, refreshKey)
-  const summary = useApi<SummaryData>('summary', sharedScope, refreshKey, view === 'overview')
-  const trend = useApi<TrendData>('trend', sharedScope, refreshKey, view === 'overview')
+  const summary = useApi<SummaryData>('summary', sharedScope, refreshKey, view === 'overview', true)
+  const trend = useApi<TrendData>('trend', sharedScope, refreshKey, view === 'overview', true)
   const status = useApi<LocalStatus>('status', { source }, refreshKey, view === 'cleaning')
   const recent = useMemo(() => summary.data?.recent?.map(normalizePair) ?? [], [summary.data])
   const page = navigation.find(item => item.id === view)!
@@ -236,7 +260,8 @@ function Workspace() {
   const exportTemplate = async () => { if (downloadingTemplate) return; setDownloadingTemplate(true); try { await downloadTemplate(); toast.success('已下载会话导入模板') } catch (error) { toast.error(error instanceof Error ? error.message : '模板下载失败，请重试。') } finally { setDownloadingTemplate(false) } }
 
   return <SidebarProvider style={{ '--sidebar-width': 'calc(var(--spacing) * 64)', '--header-height': 'calc(var(--spacing) * 14)' } as CSSProperties}>
-    <AppSidebar view={view} total={meta.data?.total} navigate={sideNavigate} onImport={openImport} showFeishuRobot={feishuAccess.data?.allowed === true} />
+    <AppSidebar view={view} total={meta.data?.total} navigate={sideNavigate} onImport={openImport} showFeishuRobot={feishuAccess.data?.allowed === true}
+      filters={sharedScope} refreshKey={refreshKey} pausePreload={busy || importOpen || cleanOpen || Boolean(selected)} />
     <SidebarInset data-density={compact ? 'compact' : 'normal'} data-motion={motion ? 'on' : 'off'}>
       <header className="relative flex h-(--header-height) shrink-0 items-center gap-2 border-b"><PageActivity /><div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6"><SidebarTrigger className="-ml-1" /><Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" /><h1 key={view} className="qiyu-page-title text-base font-medium">{page.title}</h1><div className="ml-auto flex items-center gap-2">
         <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="显示设置"><Settings2 className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-48"><DropdownMenuLabel>显示设置</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuCheckboxItem checked={motion} onCheckedChange={setMotion}>切换动画</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={compact} onCheckedChange={setCompact}>紧凑表格</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun /> : <Moon />}切换{theme === 'dark' ? '浅色' : '深色'}外观</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
