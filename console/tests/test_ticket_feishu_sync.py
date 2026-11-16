@@ -244,6 +244,49 @@ class TestTicketFeishuSync(unittest.TestCase):
                 tickets._table(self.target, incremental=True)
         mutate.assert_not_called()
 
+    def test_only_writes_to_original_columns_after_rename_or_replacement(self):
+        key, source = tickets._FIELDS["key"], tickets._FIELDS["source"]
+        status, title, priority = (tickets._FIELDS[role] for role in ("status", "title", "priority"))
+        context = tickets.ticket_history.COLUMNS["context"]
+        header = {
+            key: ("fldTicket", 1), source: ("fldSource", 15), title: ("fldTitle", 1),
+            status: ("fldStatus", 1), priority: ("fldPriority", 1), context: ("fldContext", 1),
+        }
+        setup = {}
+        manual = "人工处理意见"
+        attachment = "新的技术附件"
+        desired = {"42": {key: "42", title: "同步标题", status: "已完结", context: "同步上下文",
+                          priority: "一般", attachment: None}}
+        protected = {status: "自定义状态", priority: "手工优先级", manual: "人工原文",
+                     attachment: [{"file_token": "test"}]}
+        projected = {}
+        self.rows["42"] = {"record_id": "recFixture42", "fields": {key: "42", **protected}}
+
+        def api(target, method, resource, *, params=None, data=None):
+            if resource == "/fields":
+                return {"items": [{"field_id": field_id, "type": kind, "field_name": name, "is_primary": name == key}
+                                  for name, (field_id, kind) in header.items()], "has_more": False}
+            if resource == "/records/batch_update":
+                projected.update(data["records"][0]["fields"])
+            return self.fake_api(target, method, resource, params=params, data=data)
+
+        with (patch.object(tickets.top, "_find_table", return_value=self.target.table_id),
+              patch.object(sync, "_call", side_effect=api)):
+            before = tickets._table(self.target, setup=setup)
+            header[manual] = header.pop(context)
+            header[status] = ("fldReplacement", 1)
+            header[priority] = ("fldPriority", 2)
+            header[attachment] = ("fldAttachment", 17)
+            with self.assertRaisesRegex(sync.SyncError, "同步期间"):
+                tickets._upsert(before, desired)
+            self.assertEqual(self.writes, [])
+            current = tickets._table(self.target, setup=setup)
+            self.assertEqual(tickets._upsert(current, desired), (0, 1))
+            self.assertEqual(set(current.skipped) & {status, priority, context}, {status, priority, context})
+            self.assertEqual(setup["field_bindings"][status], ["fldStatus", 1])
+        self.assertEqual(projected, {title: "同步标题"})
+        self.assertEqual(self.rows["42"]["fields"], {key: "42", title: "同步标题", **protected})
+
     def test_existing_feedback_is_not_sent_when_only_the_link_changes(self):
         fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
         fields.update({"回复内容": "历史内容", "解决版本": "1.0"})
@@ -277,8 +320,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         support._write_state(setup_path, {"table_id": self.target.table_id, "positioned_field_id": "fldSubmitter",
                                          "guest_links_migrated": True})
         before = now * 1000 - 60_000
-        original = {"table_id": self.target.table_id, "schema_at": before, "qiyu_until": before,
-                    "schema_version": tickets._SCHEMA_VERSION,
+        original = {"table_id": self.target.table_id, "qiyu_until": before,
                     "feishu_until": before - 15_000, "reconciled_at": before, "daily_at": before,
                     "feedback_retry_at": before, "daily_feedback_at": before}
         support._write_state(cursor_path, original)
@@ -286,7 +328,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         with (patch.object(tickets, "settings", return_value=self.cfg),
               patch.object(tickets.support, "target_table", return_value=self.target),
               patch.object(tickets, "time", return_value=now),
-              patch.object(tickets, "_table") as table,
+              patch.object(tickets, "_table", return_value=self.target) as table,
               patch.object(tickets, "_feedback_work", side_effect=sync.SyncError("network issue")) as receive,
               patch.object(tickets, "_incremental_projection", return_value=({}, coverage, {})) as project):
             result = tickets.run(state, incremental=True)
@@ -296,7 +338,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         project.assert_called_once_with(self.cfg, before - 60_000, now * 1000)
         self.assertEqual(support._read_state(cursor_path),
                          {**original, "qiyu_until": now * 1000})
-        table.assert_not_called()
+        table.assert_called_once()
 
     def test_feedback_waits_if_record_is_edited_during_scan(self):
         source = {"id": "42", "title": "工单"}

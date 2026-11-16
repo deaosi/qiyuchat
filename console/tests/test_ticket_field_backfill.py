@@ -11,6 +11,12 @@ from src.config import RuntimeConfig, Settings
 from src.qiyu.ticket import TicketError
 
 
+def ticket_schema(*columns):
+    fields = [("网易七鱼工单ID", 1), ("点击查看详情", 15), (tickets.ticket_archive.CLOSED_AT, 5), *columns]
+    return {"items": [{"field_id": f"fldFixture{index}", "type": kind, "field_name": name, "is_primary": index == 0}
+                      for index, (name, kind) in enumerate(fields)], "has_more": False}
+
+
 class TicketFieldBackfillTests(TestCase):
     def test_backfill_checks_source_and_archive_then_updates_existing_detail_cells(self):
         with TemporaryDirectory() as directory:
@@ -35,6 +41,8 @@ class TicketFieldBackfillTests(TestCase):
 
             def feishu(target, method, resource, *, params=None, data=None):
                 self.assertEqual(target.table_id, "tblTickets")
+                if resource == "/fields":
+                    return ticket_schema((summary, 1))
                 self.assertEqual(method, "POST")
                 if resource == "/records/search":
                     conditions = data["filter"]["conditions"]
@@ -103,6 +111,8 @@ class TicketFieldBackfillTests(TestCase):
 
             def feishu(target, method, resource, *, params=None, data=None):
                 self.assertEqual(target.table_id, "tblTickets")
+                if resource == "/fields":
+                    return ticket_schema(("点击查看跟进回复", 15))
                 if resource == "/records/search":
                     conditions = data["filter"]["conditions"]
                     if conditions[0]["operator"] == "isEmpty":

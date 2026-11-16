@@ -8,7 +8,7 @@ import json
 import re
 from time import monotonic, time
 
-from deploy.feishu_sync import support, ticket_archive, ticket_delta, ticket_history, ticket_reply_delta, ticket_work, top
+from deploy.feishu_sync import support, ticket_archive, ticket_delta, ticket_fields, ticket_history, ticket_reply_delta, ticket_work, top
 from src import ticket_feedback
 from src import voc_feishu_sync as sync
 from src.config import settings
@@ -36,7 +36,6 @@ _MINUTE = 60_000
 _RECONCILE = 10 * _MINUTE
 _DAY = 24 * 60 * _MINUTE
 _FEEDBACK_QUIET_MS = 15_000
-_SCHEMA_VERSION = 7
 _ARCHIVE_START_BUDGET = 12
 _ZONE = timezone(timedelta(hours=8))
 _ID = re.compile(r"[1-9][0-9]{0,18}")
@@ -51,26 +50,53 @@ _OUTPUT = {"status": "回传状态", "returned_at": "回传时间", "error": "�
 _SYNC_ERRORS = (ValueError, TypeError, KeyError, OSError, sync.SyncError)
 
 
-def _table(report: sync.Target, *, incremental=False) -> sync.Target:
-    table_id = top._find_table(report, TABLE_NAME)
+def _table(report: sync.Target, *, incremental=False, setup=None) -> ticket_fields.Target:
+    setup = setup if setup is not None else {}
+    bindings = setup.get("field_bindings")
+    table_id = setup.get("table_id")
+    if bindings is None:
+        table_id = top._find_table(report, TABLE_NAME)
+    elif not isinstance(table_id, str) or not top._TABLE_ID.fullmatch(table_id):
+        raise sync.SyncError("飞书工单表的原有列绑定无效。", 409)
     if table_id is None:
         raise sync.SyncError("找不到配置中的七鱼工单表。", 409)
     target = replace(report, table_id=table_id, fields={**_FIELDS, **_DETAIL}, destination=top._destination(report, table_id))
-    fields = {row.get("field_name"): row for row in sync._paginated(target, "GET", "/fields")
-              if isinstance(row, dict)}
+    fields = ticket_fields.schema(target)
     expected = {_FIELDS[role]: (kind,) for role, kind in _TYPES.items()}
     expected.update({name: (1,) for name in (_FIELDS["submitter"], *_DETAIL.values(), *_INPUT.values(), *_OUTPUT.values())})
     expected.update({_FORM["attachment"]: (15,), ticket_history.COLUMNS["attachments"]: (15,),
-                     _OUTPUT["returned_at"]: (5,), _INPUT["status"]: (1, 3)})
-    if incremental:
-        expected.update({ticket_reply_delta.TIME_FIELD: (ticket_reply_delta.TIME_FIELD_TYPE,),
-                         ticket_archive.CLOSED_AT: (5,)})
-    for name, allowed in expected.items():
-        if fields.get(name, {}).get("type") not in allowed:
-            raise sync.SyncError(f"飞书七鱼工单表字段名称或类型不匹配：{name}。", 409)
-    if fields[_FIELDS["key"]].get("is_primary") is not True:
-        raise sync.SyncError("飞书七鱼工单表的主字段与固定表头不匹配。", 409)
-    return target
+                     _OUTPUT["returned_at"]: (5,), _INPUT["status"]: (1, 3),
+                     ticket_reply_delta.TIME_FIELD: (ticket_reply_delta.TIME_FIELD_TYPE,), ticket_archive.CLOSED_AT: (5,)})
+    primary = _FIELDS["key"]
+    matching = {name: identity for name, (identity, is_primary) in fields.items()
+                if identity[1] in expected.get(name, ()) and is_primary == (name == primary)}
+    if bindings is not None:
+        if not isinstance(bindings, dict):
+            raise sync.SyncError("飞书工单表的原有列绑定无效。", 409)
+        matching = {name: identity for name, identity in matching.items() if bindings.get(name) == list(identity)}
+    required = (primary, _FIELDS["source"], *((ticket_archive.CLOSED_AT,) if incremental else ()))
+    for name in required:
+        if name not in matching:
+            raise sync.SyncError(f"飞书七鱼工单表无法核对原有关键列：{name}。", 409)
+    if bindings is None:
+        if setup.get("table_id") != table_id:
+            setup.clear()
+        setup.update(table_id=table_id, field_bindings={name: list(identity) for name, identity in matching.items()})
+    target = replace(target, fields={role: name for role, name in target.fields.items() if name in matching})
+    return ticket_fields.Target(**vars(target), approved=matching, primary=primary,
+                                skipped=tuple(sorted(expected.keys() - matching.keys())))
+
+
+def _configured_table(report, state_dir, *, incremental=False):
+    path = state_dir / "ticket-table-setup.json"
+    setup = support._read_state(path) if path.exists() else {}
+    if not isinstance(setup, dict):
+        raise ValueError("工单表的设置记录无效。")
+    original = dict(setup)
+    target = _table(report, incremental=incremental, setup=setup)
+    if original != setup:
+        support._write_state(path, setup)
+    return target, setup
 
 
 def _pages(cfg, **filters):
@@ -156,9 +182,10 @@ def _recent(cfg, today):
     }, {key: item.get("submitter_id") for key, item in combined.items()}
 
 
-def _upsert(target, desired, *, existing=None):
+def _upsert(target, desired, *, existing=None, required=()):
     if not desired:
         return 0, 0
+    desired = {key: ticket_fields.select(target, fields) for key, fields in desired.items()}
     key_column = target.fields["key"]
     columns = dict.fromkeys(name for fields in desired.values() for name in fields if name != key_column)
     lookup = replace(target, fields={"key": key_column, **{name: name for name in columns}})
@@ -174,8 +201,9 @@ def _upsert(target, desired, *, existing=None):
                    if sync._value(row["fields"].get(name)) != sync._value(value)}
         if changes:
             updates.append({"record_id": row["record_id"], "fields": changes})
-    sync._batch(target, "update", updates)
-    sync._batch(target, "create", inserts)
+    required = (_FIELDS["source"], *required)
+    ticket_fields.batch(target, "update", updates, required=required)
+    ticket_fields.batch(target, "create", inserts, required=required)
     if inserts or updates:
         confirmed = sync._existing(lookup, desired)
         if set(confirmed) != set(desired) or any(
@@ -219,7 +247,7 @@ def _migrate_old_links(cfg, target, exporting):
             link = {"text": "查看工单", "link": ticket_guest.url_for(cfg, key)}
             links[key] = link
             updates.append({"record_id": expected[key], "fields": {_FIELDS["source"]: link}})
-        sync._batch(lookup, "update", updates)
+        ticket_fields.batch(lookup, "update", updates)
         if updates:
             confirmed = sync._existing(lookup, links)
             if any(sync._value(confirmed.get(key, {}).get("fields", {}).get(_FIELDS["source"])) != link
@@ -436,6 +464,7 @@ def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_sta
         query["filter"] = {"conjunction": "and", "conditions": [
             {"field_name": ticket_archive.CLOSED_AT, "operator": "isEmpty", "value": []}
         ]}
+    ticket_fields.require(target, [*columns, *((ticket_reply_delta.TIME_FIELD,) if window is not None else ())])
     if window is None:
         rows = (row for page in _record_pages(target, query) for row in page)
     elif batch_state is None:
@@ -478,11 +507,13 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             raise sync.SyncError("飞书技术回复的记录关联已变化。", 409)
         rows.setdefault(key, record)
     keys = list(rows)
-    lookup = replace(target, fields={"key": _FIELDS["key"], "source": _FIELDS["source"],
-                                    **{"input_" + key: name for key, name in _INPUT.items()},
-                                    **{"output_" + key: name for key, name in _OUTPUT.items()},
-                                    **({"closed": ticket_archive.CLOSED_AT} if exclude_closed else {}),
-                                    **({"modified": ticket_reply_delta.TIME_FIELD} if window else {})})
+    inputs = {"key": _FIELDS["key"], "source": _FIELDS["source"],
+              **{"input_" + key: name for key, name in _INPUT.items()},
+              **({"closed": ticket_archive.CLOSED_AT} if exclude_closed else {}),
+              **({"modified": ticket_reply_delta.TIME_FIELD} if window is not None else {})}
+    ticket_fields.require(target, inputs.values())
+    outputs = ticket_fields.select(target, dict.fromkeys(_OUTPUT.values()))
+    lookup = replace(target, fields={**inputs, **{name: name for name in outputs}})
     imported = uncertain = failed = 0
     waiting = {}
     handled = set()
@@ -492,6 +523,8 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
         if any((key not in verified and key not in retries and pending is None)
                or (key in verified and verified[key]["record_id"] != rows[key]) for key in group):
             raise sync.SyncError("飞书技术回复所在记录已变动，请重试。", 409)
+        if verified:
+            ticket_fields.require(target, inputs.values(), refresh=True)
         updates = []
         for key in group:
             if key not in verified:
@@ -526,11 +559,11 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             error = result.get("error") or ""
             values = {_OUTPUT["status"]: result["status"], _OUTPUT["returned_at"]: result["returned_at"],
                       _OUTPUT["error"]: error[:300]}
-            changes = {name: value for name, value in values.items()
-                       if sync._value(fields.get(name)) != sync._value(value)}
+            changes = {name: values[name] for name in outputs
+                       if sync._value(fields.get(name)) != sync._value(values[name])}
             if changes:
                 updates.append({"record_id": record_id, "fields": changes})
-        sync._batch(target, "update", updates)
+        ticket_fields.batch(target, "update", updates, required=inputs.values())
     if baseline is not None:
         for key in handled:
             baseline.pop(key, None)
@@ -545,7 +578,9 @@ def _incremental_projection(cfg, start, end):
 
 
 def _current_export(target, desired):
-    lookup = replace(target, fields={**_FIELDS, "closed": ticket_archive.CLOSED_AT})
+    ticket_fields.require(target, (_FIELDS["updated"], ticket_archive.CLOSED_AT))
+    lookup = replace(target, fields={"key": _FIELDS["key"], "updated": _FIELDS["updated"],
+                                     "closed": ticket_archive.CLOSED_AT})
     existing = sync._existing(lookup, desired)
     selected = {}
     for key, fields in desired.items():
@@ -593,6 +628,7 @@ def _drain_details(cfg, target, queue, state_dir, lane, batch, now, *, review_la
     pending_submitters = set()
     confirmed = {}
     try:
+        ticket_fields.require(target, (_FIELDS["updated"], ticket_archive.CLOSED_AT))
         lookup = replace(target, fields={**target.fields, "closed": ticket_archive.CLOSED_AT})
         existing = sync._existing(lookup, batch)
         desired = {}
@@ -621,7 +657,8 @@ def _drain_details(cfg, target, queue, state_dir, lane, batch, now, *, review_la
                 columns.update((_FIELDS["updated"], _FIELDS["submitter"]))
                 writes = {key: {name: value for name, value in fields.items() if name in columns}
                           for key, fields in ready.items()}
-                _, details["updated"] = _upsert(target, writes, existing=existing)
+                _, details["updated"] = _upsert(target, writes, existing=existing,
+                                                required=(_FIELDS["updated"], ticket_archive.CLOSED_AT))
                 confirmed = {key: batch[key] for key in ready}
         details["deferred"] = max(details["deferred"], len(postponed))
         if review_lane is not None:
@@ -648,7 +685,8 @@ def _drain_exports(cfg, target, queue, state_dir, lane, detail_lane, review_lane
         try:
             desired, existing = _current_export(target, {key: item["fields"] for key, item in batch.items()})
             if desired:
-                created, changed = _upsert(target, desired, existing=existing)
+                created, changed = _upsert(target, desired, existing=existing,
+                                           required=(_FIELDS["updated"], ticket_archive.CLOSED_AT))
                 inserted += created
                 updated += changed
             # Existing tickets still need a fresh log read when the search timestamp lags Feishu.
@@ -727,29 +765,13 @@ def run(state_dir, *, incremental=False):
         started = monotonic()
         now = int(time() * 1000)
         setup_path = state_dir / "ticket-table-setup.json"
-        setup = support._read_state(setup_path) if setup_path.exists() else {}
-        if not isinstance(setup, dict):
-            raise ValueError("工单表的设置记录无效。")
+        target, setup = _configured_table(report, state_dir, incremental=incremental)
         state_path = state_dir / "ticket-incremental.json"
         state = support._read_state(state_path) if incremental and state_path.exists() else {}
         if not isinstance(state, dict):
             raise ValueError("工单同步时间记录无效。")
-        schema_at = state.get("schema_at", 0)
-        table_id = state.get("table_id")
-        if (incremental and state.get("schema_version") == _SCHEMA_VERSION
-                and type(schema_at) is int and 0 <= now - schema_at < _RECONCILE
-                and isinstance(table_id, str) and top._TABLE_ID.fullmatch(table_id)
-                and setup.get("table_id") == table_id):
-            target = replace(report, table_id=table_id, destination=top._destination(report, table_id),
-                             fields={**_FIELDS, **_DETAIL})
-        else:
-            target = _table(report, incremental=incremental)
-            if state.get("table_id") != target.table_id:
-                state = {"table_id": target.table_id}
-            state["schema_at"] = now
-            state["schema_version"] = _SCHEMA_VERSION
-        if setup.get("table_id") != target.table_id:
-            setup = {"table_id": target.table_id}
+        if state.get("table_id") != target.table_id:
+            state = {"table_id": target.table_id}
         saved_baseline = setup.get("feedback_header_baseline", {})
         if not isinstance(saved_baseline, dict):
             raise ValueError("飞书工单反馈初始记录无效。")
@@ -887,6 +909,8 @@ def run(state_dir, *, incremental=False):
     return {"status": status, "tickets": len(desired), "created": inserted, "updated": changed,
             "url": target.destination, "historical_guest_links_updated": migrated,
             "details": details, "feedback": feedback, "submitters": submitters,
+        **({"protected_columns_skipped": list(target.skipped)}
+           if isinstance(target, ticket_fields.Target) and target.skipped else {}),
             **({"source_error": source_error} if source_error else {}),
             **({"incremental": True, "reconciled": reconcile and not source_error, "daily": daily,
                 "archive": {key: value for key, value in archive.items() if key != "next_cursor"},

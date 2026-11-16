@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from deploy.feishu_sync import support, ticket_archive, ticket_history, tickets, top
+from deploy.feishu_sync import support, ticket_archive, ticket_fields, ticket_history, tickets
 from src import voc_feishu_sync as sync
 from src.qiyu.ticket import TicketClient, TicketError, _id
 
@@ -48,14 +48,16 @@ def run(state_dir, *, limit=20, after=None, attachments_only=False):
         raise ValueError("生产侧工单数据未配置。")
     report = support.target_table(state_dir)
     with sync._write_lock(report.lock_path.with_name("ticket-table.lock")):
-        table_id = top._find_table(report, tickets.TABLE_NAME)
-        if table_id is None:
-            raise sync.SyncError("找不到配置中的七鱼工单表。", 409)
+        target, _ = tickets._configured_table(report, state_dir, incremental=True)
         key_column, source_column = tickets._FIELDS["key"], tickets._FIELDS["source"]
         attachment_column = ticket_history.COLUMNS["attachments"]
-        detail_fields = {"attachments": attachment_column} if attachments_only else tickets._DETAIL
+        if attachments_only:
+            ticket_fields.require(target, (attachment_column,))
+        detail_fields = {"attachments": attachment_column} if attachments_only else {
+            role: column for role, column in target.fields.items() if role in tickets._DETAIL
+        }
         fields = {"key": key_column, "source": source_column, "closed": ticket_archive.CLOSED_AT, **detail_fields}
-        target = replace(report, table_id=table_id, fields=fields, destination=top._destination(report, table_id))
+        target = replace(target, fields=fields)
         rows, cursor = _page(target, limit, after, attachments_only=attachments_only)
         candidates = {}
         legacy_links = {}
@@ -117,7 +119,7 @@ def run(state_dir, *, limit=20, after=None, attachments_only=False):
             if attachments_only and sync._value(cells.get(attachment_column)) != legacy_links[key]:
                 continue
             selected[key] = detail
-        _, updated = tickets._upsert(target, selected, existing=existing)
+        _, updated = tickets._upsert(target, selected, existing=existing, required=(ticket_archive.CLOSED_AT,))
         return {
             "status": "partial" if failed else "published", "inspected": len(rows), "updated": updated,
             "unchanged": len(selected) - updated, "skipped": len(rows) - len(selected) - missing - failed,

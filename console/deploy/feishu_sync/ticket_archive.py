@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import re
 
-from deploy.feishu_sync import ticket_reply_delta
+from deploy.feishu_sync import ticket_fields, ticket_reply_delta
 from src import voc_feishu_sync as sync
 
 
@@ -56,6 +56,7 @@ def archive(target, *, now_ms, key_field, status_field, created_field, updated_f
               "modified": modified_field, "source": source_field, "closed": CLOSED_AT,
               "writeback": writeback_field}
     fields.update({f"feedback_{index}": name for index, name in enumerate(feedback_fields)})
+    ticket_fields.require(target, fields.values())
     lookup = replace(target, fields=fields)
     projected = list(dict.fromkeys(fields.values()))
     # Feishu's date predicate rounds by day. Include the cutoff day and compare exact timestamps locally.
@@ -133,7 +134,7 @@ def archive(target, *, now_ms, key_field, status_field, created_field, updated_f
         changes.append({"record_id": fresh["record_id"], "fields": {status_field: CLOSED_STATUS, CLOSED_AT: now_ms}})
 
     if changes:
-        sync._batch(target, "update", changes)
+        ticket_fields.batch(target, "update", changes, required=projected)
         verified = sync._existing(lookup, expected)
         if any(key not in verified or verified[key]["record_id"] != record_id
                or sync._value(verified[key]["fields"].get(status_field)) != CLOSED_STATUS
