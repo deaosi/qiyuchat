@@ -287,6 +287,44 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertEqual(projected, {title: "同步标题"})
         self.assertEqual(self.rows["42"]["fields"], {key: "42", title: "同步标题", **protected})
 
+    def test_attachment_column_is_read_only_and_triggers_native_feedback_without_text(self):
+        column = "技术回复附件"
+        file = {"name": "工单复测.png", "size": 3, "file_token": "boxExampleToken1"}
+        fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
+        fields[column] = [file]
+        self.rows["42"] = {"record_id": "recFixture42", "fields": fields}
+        key, source = tickets._FIELDS["key"], tickets._FIELDS["source"]
+        columns = [(key, 1), (source, 15), *((name, 1) for name in tickets._INPUT.values()),
+                   *zip(tickets._OUTPUT.values(), (1, 5, 1)), (column, 17)]
+        schema = [{"field_id": f"fldFixture{i}", "type": kind, "field_name": name, "is_primary": name == key}
+                  for i, (name, kind) in enumerate(columns)]
+        field_id = schema[-1]["field_id"]
+        setup = {"table_id": self.target.table_id, "feedback_attachment_field": {"name": column, "id": field_id}}
+
+        def api(target, method, resource, *, params=None, data=None):
+            if resource == "/fields":
+                return {"items": schema, "has_more": False}
+            if resource == "/records/batch_update":
+                self.assertNotIn(column, data["records"][0]["fields"])
+            return self.fake_api(target, method, resource, params=params, data=data)
+
+        with (patch.object(tickets.top, "_find_table", return_value=self.target.table_id),
+              patch.object(sync, "_call", side_effect=api),
+              patch.object(tickets.ticket_feedback_media, "download",
+                           return_value=[(file["name"], b"png")]) as download,
+              patch.object(tickets.TicketClient, "post_feedback") as send):
+            target = tickets._table(self.target, setup=setup)
+            self.assertNotIn(column, target.approved)
+            self.assertEqual(tickets._import_feedback(self.cfg, target)["imported"], 1)
+            self.assertEqual(tickets._import_feedback(self.cfg, target)["imported"], 0)
+            with self.assertRaisesRegex(sync.SyncError, "只读"):
+                tickets.ticket_fields.batch(target, "update", [{"record_id": "recFixture42", "fields": {column: None}}])
+        download.assert_called_once_with(target, "recFixture42", field_id, [file])
+        send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["attachments"], [(file["name"], b"png")])
+        self.assertEqual(self.rows["42"]["fields"][column], [file])
+        self.assertEqual(self.rows["42"]["fields"]["回传状态"], "已回传")
+
     def test_existing_feedback_is_not_sent_when_only_the_link_changes(self):
         fields = tickets._projection(self.cfg, [{"id": "42"}])["42"]
         fields.update({"回复内容": "历史内容", "解决版本": "1.0"})

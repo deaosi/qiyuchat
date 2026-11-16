@@ -8,7 +8,10 @@ import json
 import re
 from time import monotonic, time
 
-from deploy.feishu_sync import support, ticket_archive, ticket_delta, ticket_fields, ticket_history, ticket_reply_delta, ticket_work, top
+from deploy.feishu_sync import (
+    support, ticket_archive, ticket_delta, ticket_feedback_media, ticket_fields, ticket_history, ticket_reply_delta,
+    ticket_work, top,
+)
 from src import ticket_feedback
 from src import voc_feishu_sync as sync
 from src.config import settings
@@ -82,9 +85,20 @@ def _table(report: sync.Target, *, incremental=False, setup=None) -> ticket_fiel
         if setup.get("table_id") != table_id:
             setup.clear()
         setup.update(table_id=table_id, field_bindings={name: list(identity) for name, identity in matching.items()})
+    attachment_name = attachment_id = None
+    attachment = setup.get("feedback_attachment_field")
+    if attachment is not None:
+        if (not isinstance(attachment, dict) or not isinstance(attachment.get("name"), str)
+                or not attachment["name"] or attachment["name"] in expected
+                or not isinstance(attachment.get("id"), str) or not ticket_fields._FIELD_ID.fullmatch(attachment["id"])):
+            raise sync.SyncError("飞书技术回复附件的字段绑定无效。", 409)
+        attachment_name = attachment["name"]
+        if fields.get(attachment_name) == ((attachment["id"], 17), False):
+            attachment_id = attachment["id"]
     target = replace(target, fields={role: name for role, name in target.fields.items() if name in matching})
     return ticket_fields.Target(**vars(target), approved=matching, primary=primary,
-                                skipped=tuple(sorted(expected.keys() - matching.keys())))
+                                skipped=tuple(sorted(expected.keys() - matching.keys())),
+                                feedback_attachment=attachment_name, attachment_id=attachment_id)
 
 
 def _configured_table(report, state_dir, *, incremental=False):
@@ -443,19 +457,24 @@ def _record_pages(target, data):
         params = {"page_size": 100, "page_token": cursor}
 
 
-def _feedback(fields):
+def _feedback(fields, attachment_column=None):
     cells = {role: sync._value(fields.get(name)) for role, name in _INPUT.items()}
     if any(not isinstance(value, str) for value in cells.values()):
         raise sync.SyncError("飞书技术回复字段格式不匹配。", 409)
-    return {role: value.strip() for role, value in cells.items()}
+    values = {role: value.strip() for role, value in cells.items()}
+    if attachment_column and (files := ticket_feedback_media.parse_cell(fields.get(attachment_column))):
+        values["attachments"] = files
+    return values
 
 
 def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_state=None):
     records = {}
     ids = set()
-    columns = [_FIELDS["key"], _FIELDS["source"], *_INPUT.values()]
+    attachment_column = getattr(target, "feedback_attachment", None)
+    input_columns = [*_INPUT.values(), *([attachment_column] if attachment_column else [])]
+    columns = [_FIELDS["key"], _FIELDS["source"], *input_columns]
     query = {"field_names": columns, "filter": {"conjunction": "or", "conditions": [
-        {"field_name": name, "operator": "isNotEmpty", "value": []} for name in _INPUT.values()
+        {"field_name": name, "operator": "isNotEmpty", "value": []} for name in input_columns
     ]}}
     if exclude_closed:
         columns.append(ticket_archive.CLOSED_AT)
@@ -483,8 +502,7 @@ def _technical_rows(cfg, target, *, window=None, exclude_closed=False, batch_sta
             raise sync.SyncError("飞书技术回复记录格式无法核对。")
         if exclude_closed and sync._value(fields.get(ticket_archive.CLOSED_AT)):
             continue
-        feedback = _feedback(fields)
-        if not any(feedback.values()):
+        if not any(fields.get(name) for name in input_columns):
             continue
         key = sync._value(fields.get(_FIELDS["key"]))
         if (not isinstance(key, str) or not _ID.fullmatch(key) or key in records or record_id in ids
@@ -507,8 +525,10 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
             raise sync.SyncError("飞书技术回复的记录关联已变化。", 409)
         rows.setdefault(key, record)
     keys = list(rows)
+    attachment_column = getattr(target, "feedback_attachment", None)
     inputs = {"key": _FIELDS["key"], "source": _FIELDS["source"],
               **{"input_" + key: name for key, name in _INPUT.items()},
+              **({"input_attachments": attachment_column} if attachment_column else {}),
               **({"closed": ticket_archive.CLOSED_AT} if exclude_closed else {}),
               **({"modified": ticket_reply_delta.TIME_FIELD} if window is not None else {})}
     ticket_fields.require(target, inputs.values())
@@ -541,16 +561,28 @@ def _import_feedback(cfg, target, *, window=None, retry=False, pending=None, exc
                     continue
             if not _source_matches(cfg, key, fields.get(_FIELDS["source"])):
                 raise sync.SyncError("飞书技术回复的语海详情已变动，请核对来源。", 409)
-            feedback = _feedback(fields)
             record_id = rows[key]
-            if baseline is not None and key in baseline:
-                if baseline[key] == [record_id, digest(ticket_feedback._normalized(feedback))]:
+            try:
+                feedback = _feedback(fields, attachment_column)
+            except sync.SyncError as exc:
+                result = {"status": "回传失败", "returned_at": None, "error": str(exc)}
+            else:
+                if baseline is not None and key in baseline:
+                    if baseline[key] == [record_id, digest(ticket_feedback._normalized(feedback))]:
+                        continue
+                    handled.add(key)
+                if not any(feedback.values()):
                     continue
-                handled.add(key)
-            if not any(feedback.values()):
-                continue
-            result = ticket_feedback.ingest(cfg, ticket_id=key, record_id=record_id,
-                                            feedback=feedback, feishu_url=target.destination)
+                kwargs = {}
+                if feedback.get("attachments"):
+                    def download(files):
+                        try:
+                            return ticket_feedback_media.download(target, record_id, target.attachment_id, files)
+                        except sync.SyncError as exc:
+                            raise ticket_feedback.AttachmentDownloadError(str(exc)) from None
+                    kwargs["download"] = download
+                result = ticket_feedback.ingest(cfg, ticket_id=key, record_id=record_id,
+                                                feedback=feedback, feishu_url=target.destination, **kwargs)
             imported += int(result.get("changed") is True)
             uncertain += int(result["status"] == "待核对七鱼回复")
             failed += int(result["status"] == "回传失败")
@@ -713,6 +745,7 @@ def _drain_exports(cfg, target, queue, state_dir, lane, detail_lane, review_lane
 def _archive_inactive(cfg, target, state, now):
     client = TicketClient(cfg.qiyu)
     cutoff = ticket_archive.six_month_cutoff(now)
+    attachment_column = getattr(target, "feedback_attachment", None)
 
     def eligible(key, fields):
         identifier = _id(key)
@@ -731,14 +764,18 @@ def _archive_inactive(cfg, target, state, now):
     def pending(fields):
         if sync._value(fields.get(_OUTPUT["status"])) in ("待回传", "回传失败", "待核对七鱼回复"):
             return True
-        feedback = _feedback(fields)
+        try:
+            feedback = _feedback(fields, attachment_column)
+        except sync.SyncError:
+            return True
         return (any(feedback.values()) and
                 not ticket_feedback.confirmed(cfg, sync._value(fields.get(_FIELDS["key"])), feedback))
 
     return ticket_archive.archive(
         target, now_ms=now, key_field=_FIELDS["key"], status_field=_FIELDS["status"],
         created_field=_FIELDS["created"], updated_field=_FIELDS["updated"], source_field=_FIELDS["source"],
-        feedback_fields=tuple(_INPUT.values()), writeback_field=_OUTPUT["status"],
+        feedback_fields=(*_INPUT.values(), *([attachment_column] if attachment_column else [])),
+        writeback_field=_OUTPUT["status"],
         is_pending=pending, eligible=eligible, cutoff_ms=cutoff, scan_cursor=state.get("archive_cursor"),
     )
 

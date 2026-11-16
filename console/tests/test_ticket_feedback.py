@@ -1,7 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from src import ticket_feedback
 from src.config import RuntimeConfig, Settings
@@ -97,6 +97,28 @@ class TestTicketFeedback(unittest.TestCase):
         self.assertEqual(verify.call_count, 3)
         self.assertEqual(verify.call_args.args, write.call_args.args)
         self.assertEqual(ticket_feedback.get(self.cfg, "9007199254740993")["writeback_status"], "succeeded")
+
+    def test_attachment_only_feedback_retries_download_then_confirms_without_resending(self):
+        feedback = {"attachments": [{"name": "复现.png", "file_token": "boxExample1", "size": 3}]}
+        download = Mock(side_effect=[ticket_feedback.AttachmentDownloadError("附件下载失败"), [("复现.png", b"png")]])
+        with (patch.object(ticket_feedback.TicketClient, "post_feedback",
+                           side_effect=TicketReplyUnconfirmed("附件待确认")) as write,
+              patch.object(ticket_feedback.TicketClient, "has_feedback", return_value=True) as verify):
+            def submit():
+                return ticket_feedback.ingest(self.cfg, ticket_id="42", record_id="recExample1",
+                                              feedback=feedback, download=download)
+            self.assertEqual(submit()["status"], "回传失败")
+            write.assert_not_called()
+            self.assertEqual(ticket_feedback.retry_records(self.cfg), {"42": "recExample1"})
+            self.assertEqual(submit()["status"], "待核对七鱼回复")
+            self.assertEqual(submit()["status"], "已回传")
+            self.assertFalse(submit()["changed"])
+        self.assertEqual(download.call_count, 2)
+        write.assert_called_once()
+        self.assertEqual(write.call_args.kwargs["attachments"], [("复现.png", b"png")])
+        self.assertIn("请查看随回复提交的附件。", write.call_args.args[1])
+        verify.assert_called_once_with(*write.call_args.args, attachment_names=("复现.png",))
+        self.assertTrue(ticket_feedback.confirmed(self.cfg, "42", feedback))
 
 
 if __name__ == "__main__":

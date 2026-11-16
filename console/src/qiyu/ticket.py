@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from base64 import b64encode
+from collections import Counter
+from collections.abc import Sequence
 import json
 import threading
 import time
@@ -19,6 +22,8 @@ REPLY = "/openapi/v2/ticket/reply"
 MODIFY = "/openapi/v2/ticket/modify"
 TEMPLATE_FIELDS = "/openapi/v2/ticket/template/fields"
 PAGE_SIZE = 50
+MAX_REPLY_ATTACHMENTS = 5
+MAX_REPLY_ATTACHMENT_BYTES = 5 * 1024 * 1024
 _request_lock = threading.Lock()
 _next_request = 0.0
 _REPLY_REJECTED = frozenset((14001, 14002, 14003, 14004, 14009, 14100, 14103, 14104, 14106, 14107))
@@ -156,19 +161,21 @@ class TicketClient:
         if accepted is not True:
             raise TicketModifyUnconfirmed("七鱼工单修改结果暂未确认，请刷新工单核对。", http_status=503)
 
-    def has_feedback(self, ticket_id: int, text: str) -> bool:
+    def has_feedback(self, ticket_id: int, text: str, *, attachment_names: Sequence[str] = ()) -> bool:
         """Look for the exact tagged reply in the native ticket history."""
         identifier = _id(ticket_id)
         if identifier is None or not isinstance(text, str) or not text.strip():
             raise ValueError("七鱼工单回复参数无效")
-        return _has_reply(self.history(identifier), text)
+        return _has_reply(self.history(identifier), text, attachment_names)
 
-    def post_feedback(self, ticket_id: int, text: str) -> bool:
+    def post_feedback(self, ticket_id: int, text: str, *, attachments: Sequence[tuple[str, bytes]] = ()) -> bool:
         """Append one native reply and confirm it in the ticket history."""
         identifier = _id(ticket_id)
         if identifier is None:
             raise ValueError("七鱼工单回复参数无效")
-        if self.has_feedback(identifier, text):
+        _validate_reply_attachments(attachments)
+        names = tuple(name for name, _ in attachments)
+        if self.has_feedback(identifier, text, attachment_names=names):
             return False
         detail = self.detail(identifier)
         holder = _id(detail.get("holderId"))
@@ -178,25 +185,54 @@ class TicketClient:
             raise TicketError("七鱼工单尚未受理或已完结，当前无法添加回复", http_status=409)
         try:
             self._post(REPLY, {
-                "ticketId": identifier, "staffId": holder, "comment": text, "attachments": [],
+                "ticketId": identifier, "staffId": holder, "comment": text,
+                "attachments": [{"fileName": name, "type": 1, "payload": b64encode(data).decode("ascii")}
+                                for name, data in attachments],
             }, "message")
         except TicketError as write_error:
             if write_error.upstream_code in _REPLY_REJECTED or write_error.upstream_code in _REPLY_HTTP_REJECTED:
                 raise
         # An accepted reply may be written before the response or log becomes available.
         try:
-            if self.has_feedback(identifier, text):
+            if self.has_feedback(identifier, text, attachment_names=names):
                 return True
-        except TicketReplyVisible:
+        except TicketReplyUnconfirmed:
             raise
         except TicketError:
             pass
         raise TicketReplyUnconfirmed("七鱼回复尚未在工单日志中确认，等待回读", http_status=503)
 
 
-def _has_reply(history: list[dict], text: str) -> bool:
+def _validate_reply_attachments(attachments: Sequence[tuple[str, bytes]]) -> None:
+    if len(attachments) > MAX_REPLY_ATTACHMENTS:
+        raise TicketError("七鱼单次回复最多支持 5 个附件", http_status=422)
+    total_size = 0
+    for name, data in attachments:
+        if (not isinstance(name, str) or name.strip() in ("", ".", "..") or len(name) > 128
+                or any(not char.isprintable() or char in "/\\" for char in name)
+                or not isinstance(data, bytes) or not data):
+            raise TicketError("七鱼工单回复的附件名称或内容无效", http_status=422)
+        total_size += len(data)
+    if total_size > MAX_REPLY_ATTACHMENT_BYTES:
+        raise TicketError("七鱼单次回复的附件总大小上限为 5 MB", http_status=422)
+
+
+def _recorded_reply_attachments(event: dict) -> Counter[str]:
+    attachments = event.get("attachments")
+    if not isinstance(attachments, list):
+        return Counter()
+    return Counter(
+        item["name"].strip() for item in attachments
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+        and isinstance(item.get("url"), str) and item["url"].startswith("https://")
+    )
+
+
+def _has_reply(history: list[dict], text: str, attachment_names: Sequence[str] = ()) -> bool:
     expected = text.replace("\r\n", "\n").strip()
+    expected_attachments = Counter(name.strip() for name in attachment_names)
     matched = False
+    complete = False
     for event in history:
         fields = event.get("info")
         if _id(event.get("actionType")) not in (20, 101) or not isinstance(fields, list):
@@ -207,7 +243,12 @@ def _has_reply(history: list[dict], text: str) -> bool:
                 if event.get("customerSee") in (True, 1, "1", "true", "True"):
                     raise TicketReplyVisible("七鱼将该回复记录为客户可见，请核对工单", http_status=409)
                 matched = True
-    return matched
+                if not expected_attachments or expected_attachments <= _recorded_reply_attachments(event):
+                    complete = True
+                break
+    if matched and not complete:
+        raise TicketReplyUnconfirmed("七鱼已记录回复，附件仍待日志确认", http_status=503)
+    return complete
 
 
 def _id(value: Any) -> int | None:

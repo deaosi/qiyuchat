@@ -42,6 +42,10 @@ _STATES = {
 }
 
 
+class AttachmentDownloadError(Exception):
+    pass
+
+
 def _path(cfg: Settings) -> Path:
     source = Path(cfg.runtime.db_path).resolve()
     path = source.with_name(source.stem + ".ticket-feedback.db")
@@ -50,13 +54,24 @@ def _path(cfg: Settings) -> Path:
     return path
 
 
-def _normalized(feedback: dict) -> dict[str, str]:
+def _normalized(feedback: dict) -> dict:
     values = {}
     for key in ("status", "reply", "version"):
         value = feedback.get(key, "")
         if not isinstance(value, str):
             raise ValueError("飞书技术反馈字段格式无效。")
         values[key] = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    files = feedback.get("attachments") or []
+    if not isinstance(files, list) or any(
+        not isinstance(item, dict) or set(item) != {"file_token", "name", "size"}
+        or not isinstance(item["file_token"], str) or not item["file_token"]
+        or not isinstance(item["name"], str) or not item["name"]
+        or type(item["size"]) is not int or item["size"] < 0
+        for item in files
+    ):
+        raise ValueError("飞书技术回复附件格式无效。")
+    if files:
+        values["attachments"] = sorted(files, key=lambda item: item["file_token"])
     return values
 
 
@@ -73,23 +88,28 @@ def _origin_link(value: str) -> str:
     return ""
 
 
-def _reply_text(values: dict[str, str], token: str) -> str:
+def _reply_text(values: dict, token: str) -> str:
     parts = ["语海 Voc · 飞书技术反馈"]
     for key, label in (("status", "处理状态"), ("version", "解决版本"), ("reply", "技术回复")):
         if values[key]:
             parts.append(f"{label}：{values[key]}")
+    if len(parts) == 1 and values.get("attachments"):
+        parts.append("请查看随回复提交的附件。")
     parts.append(f"〔语海同步 {token}〕")
     return "\n".join(parts)
 
 
-def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool) -> tuple[str, int | None, str]:
+def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool, attachments=(),
+               attachment_names=()) -> tuple[str, int | None, str]:
     try:
         client = TicketClient(cfg.qiyu)
         if reconcile:
-            if not client.has_feedback(int(ticket_id), text):
+            options = {"attachment_names": attachment_names} if attachment_names else {}
+            if not client.has_feedback(int(ticket_id), text, **options):
                 return "uncertain", None, "等待七鱼回复记录确认。"
         else:
-            client.post_feedback(int(ticket_id), text)
+            options = {"attachments": attachments} if attachments else {}
+            client.post_feedback(int(ticket_id), text, **options)
     except TicketReplyVisible as exc:
         return "uncertain", None, str(exc)
     except TicketReplyUnconfirmed:
@@ -99,7 +119,7 @@ def _writeback(cfg: Settings, ticket_id: str, text: str, *, reconcile: bool) -> 
     return "succeeded", int(time.time() * 1000), ""
 
 
-def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, feishu_url: str = "") -> dict:
+def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, feishu_url: str = "", download=None) -> dict:
     """Run under the Feishu table's write lock and keep inbox data before external writes."""
     if (not re.fullmatch(r"[1-9][0-9]{0,18}", ticket_id) or int(ticket_id) > 2 ** 63 - 1
             or not re.fullmatch(r"rec[A-Za-z0-9]{4,60}", record_id)):
@@ -137,9 +157,23 @@ def ingest(cfg: Settings, *, ticket_id: str, record_id: str, feedback: dict, fei
             else:
                 token = same_ticket["reply_token"]
             reconcile = not changed and same_ticket["writeback_status"] == "uncertain"
+        files = values.get("attachments", [])
+        names = tuple(item["name"] for item in files)
+        attachments = ()
+        try:
+            if files and not reconcile:
+                if download is None:
+                    raise AttachmentDownloadError("飞书技术回复附件暂时无法下载。")
+                attachments = download(files)
+                if tuple(name for name, _ in attachments) != names:
+                    raise AttachmentDownloadError("飞书下载的附件与本次技术回复不一致。")
+        except AttachmentDownloadError as exc:
+            state, written_at, error = "failed", None, str(exc)
+        else:
             # Persist the intent before sending. After an interruption only read back the same token.
             conn.execute("UPDATE ticket_feedback SET writeback_status = 'uncertain' WHERE ticket_id = ?", (ticket_id,))
-        state, written_at, error = _writeback(cfg, ticket_id, _reply_text(values, token), reconcile=reconcile)
+            state, written_at, error = _writeback(cfg, ticket_id, _reply_text(values, token), reconcile=reconcile,
+                                                  attachments=attachments, attachment_names=names)
         conn.execute("""UPDATE ticket_feedback SET writeback_status = ?, written_at = ?, error = ?
                         WHERE ticket_id = ? AND reply_token = ?""", (state, written_at, error, ticket_id, token))
     return {"status": _STATES[state], "returned_at": written_at, "changed": changed, "error": error}

@@ -14,6 +14,8 @@ class Target(sync.Target):
     approved: dict[str, tuple[str, int]]
     primary: str
     skipped: tuple[str, ...]
+    feedback_attachment: str | None = None
+    attachment_id: str | None = None
 
 
 def schema(target):
@@ -42,17 +44,23 @@ def require(target, names, *, refresh=False):
     if not isinstance(target, Target):
         return
     names = set(names)
-    missing = sorted(names - target.approved.keys())
+    readable = target.approved
+    if target.feedback_attachment and target.attachment_id:
+        readable = {**readable, target.feedback_attachment: (target.attachment_id, 17)}
+    missing = sorted(names - readable.keys())
     if missing:
         raise sync.SyncError(f"原有工单列已变更，暂不能使用：{'、'.join(missing)}。", 409)
     if refresh:
         current = schema(target)
         for name in sorted(names | {target.primary}):
-            if current.get(name) != (target.approved[name], name == target.primary):
+            if current.get(name) != (readable[name], name == target.primary):
                 raise sync.SyncError(f"飞书同步期间原有工单列已变更：{name}。", 409)
 
 
 def batch(target, operation, records, *, required=()):
     if records:
-        require(target, {name for row in records for name in row["fields"]} | set(required), refresh=True)
+        names = {name for row in records for name in row["fields"]}
+        if isinstance(target, Target) and names - target.approved.keys():
+            raise sync.SyncError("飞书工单更新包含只读或未绑定的列。", 409)
+        require(target, names | set(required), refresh=True)
     sync._batch(target, operation, records)
