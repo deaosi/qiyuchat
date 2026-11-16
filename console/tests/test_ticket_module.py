@@ -399,6 +399,13 @@ class TicketModuleTests(LocalFixture):
         self.assertFalse(ticket_guest.matches_followup(self.cfg, "581002", followup))
         self.assertFalse(ticket_guest.matches(self.cfg, ticket_id, followup))
         self.assertFalse(ticket_guest.matches_followup(self.cfg, ticket_id, ordinary))
+        reply_url = ticket_guest.reply_url_for(self.cfg, ticket_id)
+        self.assertEqual(reply_url, ticket_guest.reply_url_for(self.cfg, ticket_id))
+        self.assertNotEqual(urlsplit(reply_url).path, urlsplit(followup).path)
+        self.assertTrue(ticket_guest.matches_reply(self.cfg, ticket_id, reply_url))
+        self.assertFalse(ticket_guest.matches_reply(self.cfg, "581002", reply_url))
+        self.assertFalse(ticket_guest.matches_reply(self.cfg, ticket_id, followup))
+        self.assertFalse(ticket_guest.matches_followup(self.cfg, ticket_id, reply_url))
         shot_path = "/01010101010101010101010101010101.png"
         doc_path = "/02020202020202020202020202020202.pdf"
         private_path = "/03030303030303030303030303030303.pdf"
@@ -417,6 +424,9 @@ class TicketModuleTests(LocalFixture):
             {"id": 1234568, "actionType": 20, "action": "内部备注", "attachments": [private]},
             {"id": 1234569, "actionType": 20, "action": "回复", "attachments": [other],
              "info": [{"title": "回复", "content": "〔语海同步 0123456789abcdef〕"}]},
+            {"id": 1234570, "actionType": 20, "action": "回复", "customerSee": False,
+             "time": 1794537100000, "info": [{"title": "", "titleLang": "", "content": "已重新检查，密码：testSecret"},
+                                              {"title": "内部备注", "content": "此备注不可见"}]},
         ]
         path = urlsplit(followup).path
         token = path.rsplit("/", 1)[1]
@@ -431,7 +441,10 @@ class TicketModuleTests(LocalFixture):
             self.assertEqual(entry["time"], 1794537200000)
             self.assertEqual(len(entry["images"]), 1)
             self.assertEqual(len(entry["attachments"]), 1)
-            self.assertNotIn("followup_attachments", ticket_guest.resolve_payload(self.cfg, ordinary_token))
+            ordinary_payload = ticket_guest.resolve_payload(self.cfg, ordinary_token)
+            self.assertNotIn("followup_attachments", ordinary_payload)
+            self.assertNotIn("followup_replies", ordinary_payload)
+            self.assertNotIn("followup_replies", payload)
             for hidden in ("仅限内部的回复", "私密回复人", "私密内容.pdf", "同步内容.pdf", "source-token"):
                 self.assertNotIn(hidden, str(payload))
             image_id = entry["images"][0]["url"].rsplit("/", 1)[1]
@@ -442,6 +455,17 @@ class TicketModuleTests(LocalFixture):
             forged_id = sha256(f"{ordinary_token}/shop.qiyukf.net{shot_path}".encode()).hexdigest()
             with self.assertRaises(case_media.ImageFetchError):
                 ticket_guest.fetch_image(self.cfg, ordinary_token, forged_id)
+            reply_path = urlsplit(reply_url).path
+            reply_token = reply_path.rsplit("/", 1)[1]
+            reply_payload = ticket_guest.resolve_payload(self.cfg, reply_token)
+            rows = reply_payload["followup_replies"]
+            self.assertEqual(len(rows), 2)
+            self.assertIn("已重新检查", rows[0]["text"])
+            self.assertEqual(rows[0]["images"], [])
+            self.assertEqual(rows[1]["text"], "仅限内部的回复")
+            self.assertTrue(rows[1]["images"][0]["url"].startswith(reply_path + "/images/"))
+            for hidden in ("此备注不可见", "testSecret", "私密内容.pdf", "语海同步", "source-token"):
+                self.assertNotIn(hidden, str(reply_payload))
 
     def test_guest_ticket_keeps_readable_overlapping_public_values(self):
         detail = {

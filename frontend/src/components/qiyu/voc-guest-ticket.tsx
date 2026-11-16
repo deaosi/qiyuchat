@@ -32,6 +32,7 @@ type GuestFollowup = {
   time: number | null
   images: TicketAttachment[]
   attachments: TicketAttachment[]
+  text?: string
 }
 
 export type GuestTicketPayload = {
@@ -42,20 +43,24 @@ export type GuestTicketPayload = {
   sessions?: GuestSession[]
   technical_feedback?: Omit<TechnicalFeedback, 'error' | 'feishu_url'> | null
   followup_attachments?: GuestFollowup[]
+  followup_replies?: GuestFollowup[]
 }
 
 const ticketPath = /^\/guest\/ticket\/[A-Za-z0-9_-]{43}$/
 const imageId = /^[a-f0-9]{64}$/
-const followupAnchor = 'ticket-followup-attachments'
+const attachmentAnchor = 'ticket-followup-attachments'
+const replyAnchor = 'ticket-followup-replies'
 
-export function VocGuestTicket({ ticket, history, history_available, sessions, technical_feedback, followup_attachments }: GuestTicketPayload) {
+export function VocGuestTicket({ ticket, history, history_available, sessions, technical_feedback, followup_attachments, followup_replies }: GuestTicketPayload) {
   const path = window.location.pathname
+  const followupAnchor = followup_replies ? replyAnchor : attachmentAnchor
+  const followupLabel = followup_replies ? '工单跟进' : '跟进附件'
   const followupHeading = useRef<HTMLHeadingElement>(null)
   useEffect(() => {
     if (window.location.hash === `#${followupAnchor}`) {
       followupHeading.current?.focus()
     }
-  }, [])
+  }, [followupAnchor])
   function isScoped(url: unknown, type: 'images' | 'attachments') {
     const prefix = `${path}/${type}/`
     return ticketPath.test(path) && typeof url === 'string' && url.startsWith(prefix)
@@ -75,9 +80,10 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
     ...event, details: scopedFields(event.details) ?? [],
     images: scopedMedia(event.images, 'images'), attachments: scopedMedia(event.attachments, 'attachments'),
   })) ?? []
-  const followups = followup_attachments?.map(({ time, images, attachments }) => ({
-    time, images: scopedMedia(images, 'images'), attachments: scopedMedia(attachments, 'attachments'),
-  })).filter(item => item.images.length || item.attachments.length)
+  const followups = (followup_replies ?? followup_attachments)?.map(({ time, text, images, attachments }) => ({
+    time, text: followup_replies ? text : undefined,
+    images: scopedMedia(images, 'images'), attachments: scopedMedia(attachments, 'attachments'),
+  })).filter(item => item.text || item.images.length || item.attachments.length)
 
   return <div className="min-h-screen bg-linear-to-b from-muted/50 via-background to-background">
     <header className="border-b bg-background">
@@ -111,13 +117,14 @@ export function VocGuestTicket({ ticket, history, history_available, sessions, t
             writeback_status: technical_feedback.writeback_status, written_at: technical_feedback.written_at,
           }} />}
           {followups && <section className="space-y-2" aria-labelledby={followupAnchor}>
-            <h2 id={followupAnchor} ref={followupHeading} tabIndex={-1} className="scroll-mt-4 text-sm font-semibold">跟进附件</h2>
+            <h2 id={followupAnchor} ref={followupHeading} tabIndex={-1} className="scroll-mt-4 text-sm font-semibold">{followupLabel}</h2>
             {followups.length ? <ul className="divide-y rounded-lg border">
               {followups.map((item, index) => <li className="space-y-2 p-4" key={`${item.time}-${index}`}>
                 <p className="text-xs tabular-nums text-muted-foreground">{ticketTime(item.time)}</p>
-                <TicketAttachments images={item.images} attachments={item.attachments} />
+                {item.text && <p className="whitespace-pre-wrap text-sm leading-6 [overflow-wrap:anywhere]">{item.text}</p>}
+                {!!(item.images.length || item.attachments.length) && <TicketAttachments images={item.images} attachments={item.attachments} />}
               </li>)}
-            </ul> : <p className="text-sm text-muted-foreground">{history_available ? '暂无可查看的跟进附件。' : '暂时无法读取跟进附件。'}</p>}
+            </ul> : <p className="text-sm text-muted-foreground">{history_available ? `暂无可查看的${followupLabel}。` : `暂时无法读取${followupLabel}。`}</p>}
           </section>}
           <section aria-label="处理记录" className="space-y-2">
             <h2 className="text-sm font-semibold">处理记录</h2>

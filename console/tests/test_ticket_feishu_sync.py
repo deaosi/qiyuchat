@@ -159,7 +159,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertIn("补充了现场截图", row["最新七鱼跟进"])
         self.assertLess(row["工单往来记录"].index("请提供截图"), row["工单往来记录"].index("补充了现场截图"))
         self.assertNotIn("语海同步", row["工单往来记录"])
-        self.assertTrue(tickets.ticket_guest.matches_followup(self.cfg, "42", row["跟进附件"]["link"]))
+        self.assertTrue(tickets.ticket_guest.matches_reply(self.cfg, "42", row["跟进附件"]["link"]))
         legacy = tickets._summary({"id": 42, "content": "原生工单描述"}, None, source_link=link)
         self.assertEqual(legacy["问题需求"], "原生工单描述")
         self.assertEqual(legacy["客户群名称"], "")

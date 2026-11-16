@@ -89,6 +89,7 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
     entries = []
     latest = ""
     has_attachments = False
+    has_native_reply = False
     history_length = 0
     omitted = False
     for entry in ordered:
@@ -117,12 +118,14 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
         marker = f"附件 {count} 个" if count else ""
         if not from_feishu:
             has_attachments |= bool(_attached_count(ticket_guest.followup_media(entry)))
+            if not has_native_reply and message:
+                has_native_reply = bool(ticket_guest.native_followup_text(entry))
             if not latest and role != "修改回复":
                 latest = "\n".join(part for part in (header, _shorten(message, _MAX_LATEST), marker) if part)
         summary = "\n".join(part for part in (header, _shorten(message, _MAX_REPLY), marker) if part)
         if omitted or len(entries) >= _MAX_REPLIES or history_length + len(summary) + 2 > _MAX_HISTORY:
             omitted = True
-            if latest and has_attachments:
+            if latest and has_attachments and has_native_reply:
                 break
             continue
         entries.append(summary)
@@ -131,9 +134,14 @@ def project(cfg, ticket_id: str, logs: list[dict], *, submitter_id=None) -> dict
     history = list(reversed(entries))
     if omitted:
         history.insert(0, f"以下为最近 {len(entries)} 条回复")
-    attachment_link = {"text": "查看跟进附件", "link": ticket_guest.followup_url_for(cfg, ticket_id)} if has_attachments else None
+    reply_link = None
+    if has_native_reply:
+        label = "查看回复和附件" if has_attachments else "查看跟进回复"
+        reply_link = {"text": label, "link": ticket_guest.reply_url_for(cfg, ticket_id)}
+    elif has_attachments:
+        reply_link = {"text": "查看跟进附件", "link": ticket_guest.followup_url_for(cfg, ticket_id)}
     return {
         COLUMNS["latest"]: latest,
         COLUMNS["history"]: "\n\n".join(history),
-        COLUMNS["attachments"]: attachment_link,
+        COLUMNS["attachments"]: reply_link,
     }

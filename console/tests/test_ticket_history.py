@@ -41,7 +41,8 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertNotIn("普通工单更新", timeline)
         self.assertNotIn("1234567890abcdef", timeline)
         self.assertNotIn(_FILE, repr(value))
-        self.assertTrue(ticket_guest.matches_followup(self.cfg, "56", value[_C["attachments"]]["link"]))
+        self.assertEqual(value[_C["attachments"]]["text"], "查看回复和附件")
+        self.assertTrue(ticket_guest.matches_reply(self.cfg, "56", value[_C["attachments"]]["link"]))
 
     def test_sanitizes_reply_but_preserves_marker_like_text_and_html_break(self):
         event = _event(901, 0, "<p>第一行<br>第二行</p><img src='" + _FILE + "'>\n密码：secretCode"
@@ -61,7 +62,10 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertTrue(timeline.startswith("以下为最近 12 条回复"))
         self.assertNotIn("旧回复7", timeline)
         self.assertEqual(timeline.count("重复回复"), 9)
-        self.assertIsNone(value[_C["attachments"]])
+        reply_link = value[_C["attachments"]]
+        self.assertEqual(reply_link["text"], "查看跟进回复")
+        self.assertTrue(ticket_guest.matches_reply(self.cfg, "56", reply_link["link"]))
+        self.assertFalse(ticket_guest.matches_followup(self.cfg, "56", reply_link["link"]))
         self.assertEqual(ticket_history.project(self.cfg, "56", []),
                          {_C["latest"]: "", _C["history"]: "", _C["attachments"]: None})
 
@@ -71,3 +75,4 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertEqual(value[_C["latest"]], "")
         self.assertIn("飞书 → 七鱼 · 技术反馈", value[_C["history"]])
         self.assertNotIn("1234567890abcdef", value[_C["history"]])
+        self.assertIsNone(value[_C["attachments"]])

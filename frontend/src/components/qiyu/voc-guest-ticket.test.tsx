@@ -94,3 +94,25 @@ it('focuses the follow-up attachment heading and displays only attachments for t
     window.history.replaceState(null, '', previousUrl)
   }
 })
+
+it('opens the dated reply text on its own guest link', () => {
+  const previousUrl = window.location.pathname + window.location.hash
+  const path = `/guest/ticket/${'a'.repeat(43)}`
+  window.history.replaceState(null, '', `${path}#ticket-followup-replies`)
+  try {
+    render(<VocGuestTicket kind="ticket" ticket={{
+      title: '打印故障', status: '处理中', priority: '一般', description: '',
+      created_at: null, updated_at: null,
+    }} followup_replies={[{
+      time: 1794537200000, text: '已重新检查打印机', images: [], attachments: [],
+    }]} />)
+    const heading = screen.getByRole('heading', { name: '工单跟进' })
+    expect(document.activeElement).toBe(heading)
+    const section = screen.getByRole('region', { name: '工单跟进' })
+    expect(within(section).getByText('已重新检查打印机')).toBeTruthy()
+    expect(within(section).queryByRole('link')).toBeNull()
+  } finally {
+    cleanup()
+    window.history.replaceState(null, '', previousUrl)
+  }
+})

@@ -28,6 +28,7 @@ MATCH_SIZE = 20
 DETAIL_LIMIT = 12
 DETAIL_BUDGET_SECONDS = 25
 _DETAIL_CACHE_LIMIT = 128
+_DETAIL_CACHE_VERSION = 2
 _MINUTE = 60_000
 _RECONCILE = 10 * _MINUTE
 _DAY = 24 * 60 * _MINUTE
@@ -337,9 +338,11 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         previous = cache.get(key)
         cached = previous.get("fields") if isinstance(previous, dict) else None
         followup = cached.get(ticket_history.COLUMNS["attachments"]) if isinstance(cached, dict) else None
-        if (isinstance(cached, dict) and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values())
-                and (followup is None or (isinstance(followup, dict)
-                     and ticket_guest.matches_followup(cfg, key, followup.get("link"))))):
+        valid_link = followup is None or (isinstance(followup, dict) and (
+            ticket_guest.matches_followup(cfg, key, followup.get("link"))
+            or ticket_guest.matches_reply(cfg, key, followup.get("link"))))
+        if (isinstance(cached, dict) and previous.get("version") == _DETAIL_CACHE_VERSION
+                and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values()) and valid_link):
             row.update(cached)
             if not incremental:
                 next_cache[key] = previous
@@ -362,7 +365,7 @@ def _enrich(cfg, desired, state_dir, *, incremental=False):
         columns.update(ticket_history.project(cfg, key, logs, submitter_id=source.get("staffId")))
         row.update(columns)
         next_cache.pop(key, None)
-        next_cache[key] = {"stamp": stamp, "fields": columns}
+        next_cache[key] = {"version": _DETAIL_CACHE_VERSION, "stamp": stamp, "fields": columns}
     if len(next_cache) > _DETAIL_CACHE_LIMIT:
         next_cache = dict(list(next_cache.items())[-_DETAIL_CACHE_LIMIT:])
     if next_cache != cache:

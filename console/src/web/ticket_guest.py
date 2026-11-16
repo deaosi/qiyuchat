@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from .. import ticket_feedback
 from ..config import Settings
+from ..extract.text import clean_visible_text
 from ..qiyu.ticket import TicketClient, TicketError, _id
 from ..voc_assets import connection, transaction
 from . import case_media, case_senders, guest_evidence, ticket_media, tickets
@@ -22,6 +23,7 @@ from . import case_media, case_senders, guest_evidence, ticket_media, tickets
 
 PUBLIC_PATH = "/guest/ticket/"
 FOLLOWUP_FRAGMENT = "ticket-followup-attachments"
+REPLY_FRAGMENT = "ticket-followup-replies"
 TOKEN_PATTERN = guest_evidence.TOKEN_PATTERN
 IMAGE_PATTERN = r"[a-f0-9]{64}"
 _TOKEN = re.compile(TOKEN_PATTERN)
@@ -38,6 +40,8 @@ _STAFF_FIELDS = {"后台负责人", "负责人", "处理人", "提报人", "提�
 _SYNC_MARKER = re.compile(r"〔语海同步\s+[0-9a-f]+〕", re.I)
 _REPLY_ACTION = re.compile(r"(?:(?:工单|追加|补充)?回复(?:了?工单)?|repl(?:y|ied)(?: to (?:the )?ticket)?)", re.I)
 _REPLY_FIELD = re.compile(r"(?:(?:工单)?回复(?:内容|工单)?|comment|reply)", re.I)
+_REPLY_TEXT_FIELD = re.compile(r"内容|备注(?:内容)?|描述|message|content|remarks?", re.I)
+_RICH_REPLY = re.compile(r"</?(?:p|div|br|li|ol|ul|span|strong|em|b|a|img|script|style)(?:\s|/?>)", re.I)
 _BEARER_TOKEN = re.compile(r"\b(Bearer)[ \t]+[A-Za-z0-9_./+~=-]{8,}", re.I)
 _DISPLAY_LABELS = {"客户群": "客户群名称", "客户群名称": "客户群名称", "店铺名": "店铺名",
                    "店铺名称": "店铺名", "商家名称": "商家名称"}
@@ -51,6 +55,8 @@ _LABELED_SECRET = re.compile(
 )
 _REDACTION = re.compile(r"\[(?:名称|链接|标识)已隐藏\]|\[(?:详细地址)?已脱敏\]")
 _MAX_MEDIA = 40
+_MAX_REPLY_COUNT = 12
+_MAX_REPLY_TEXT = 1200
 _MAX_LINKED_SESSIONS = 20
 _TICKET_TIMELINE_ACTIONS = frozenset({1, 2, 5, 6, 10, 15, 25, 40, 45, 50, 55, 60, 61, 65, 100})
 _CACHE_SECONDS = 30
@@ -67,7 +73,17 @@ CREATE TABLE IF NOT EXISTS ticket_followup_guest_link (
     ticket_id TEXT PRIMARY KEY,
     token TEXT NOT NULL UNIQUE
 );
+CREATE TABLE IF NOT EXISTS ticket_reply_guest_link (
+    ticket_id TEXT PRIMARY KEY,
+    token TEXT NOT NULL UNIQUE
+);
 """
+_SCOPE_TABLES = {
+    "detail": "ticket_guest_link",
+    "attachments": "ticket_followup_guest_link",
+    "replies": "ticket_reply_guest_link",
+}
+_SCOPE_FRAGMENTS = {"attachments": FOLLOWUP_FRAGMENT, "replies": REPLY_FRAGMENT}
 
 
 def _registry(cfg: Settings) -> Path:
@@ -76,15 +92,20 @@ def _registry(cfg: Settings) -> Path:
 
 def url_for(cfg: Settings, ticket_id: str) -> str:
     """Publish a stable capability URL for a ticket already selected by the caller."""
-    return _url_for(cfg, ticket_id, followup=False)
+    return _url_for(cfg, ticket_id, scope="detail")
 
 
 def followup_url_for(cfg: Settings, ticket_id: str) -> str:
     """Publish a distinct capability for the ticket's follow-up attachments."""
-    return _url_for(cfg, ticket_id, followup=True) + "#" + FOLLOWUP_FRAGMENT
+    return _url_for(cfg, ticket_id, scope="attachments")
 
 
-def _url_for(cfg: Settings, ticket_id: str, *, followup: bool) -> str:
+def reply_url_for(cfg: Settings, ticket_id: str) -> str:
+    """Publish a distinct capability for review of the ticket's native replies."""
+    return _url_for(cfg, ticket_id, scope="replies")
+
+
+def _url_for(cfg: Settings, ticket_id: str, *, scope: str) -> str:
     number = _id(ticket_id)
     if number is None or str(number) != ticket_id:
         raise ValueError("工单访客链接的工单 ID 无效。")
@@ -97,7 +118,7 @@ def _url_for(cfg: Settings, ticket_id: str, *, followup: bool) -> str:
         with connection(path, write=True) as db:
             db.executescript(_SCHEMA)
             with transaction(db):
-                table = "ticket_followup_guest_link" if followup else "ticket_guest_link"
+                table = _SCOPE_TABLES[scope]
                 db.execute(f"INSERT INTO {table} VALUES (?, ?) ON CONFLICT(ticket_id) DO NOTHING",
                            (ticket_id, token_urlsafe(32)))
                 token = db.execute(f"SELECT token FROM {table} WHERE ticket_id=?", (ticket_id,)).fetchone()[0]
@@ -105,43 +126,49 @@ def _url_for(cfg: Settings, ticket_id: str, *, followup: bool) -> str:
         raise ValueError("暂时无法生成工单访客链接。") from None
     if not _TOKEN.fullmatch(token):
         raise ValueError("已保存的工单访客链接格式无效。")
-    return guest_evidence.PUBLIC_ORIGIN + PUBLIC_PATH + token
+    url = guest_evidence.PUBLIC_ORIGIN + PUBLIC_PATH + token
+    anchor = _SCOPE_FRAGMENTS.get(scope)
+    return f"{url}#{anchor}" if anchor else url
 
 
-def _ticket_scope(cfg: Settings, token: str) -> tuple[int, bool] | None:
+def _ticket_scope(cfg: Settings, token: str) -> tuple[int, str] | None:
     if not _TOKEN.fullmatch(token):
         return None
     try:
         with connection(_registry(cfg)) as db:
-            row = db.execute("SELECT ticket_id FROM ticket_guest_link WHERE token=?", (token,)).fetchone()
-            followup = row is None
-            if followup:
-                row = db.execute("SELECT ticket_id FROM ticket_followup_guest_link WHERE token=?", (token,)).fetchone()
+            for scope, table in _SCOPE_TABLES.items():
+                row = db.execute(f"SELECT ticket_id FROM {table} WHERE token=?", (token,)).fetchone()
+                if row:
+                    identifier = _id(row[0])
+                    return (identifier, scope) if identifier else None
     except (sqlite3.Error, OSError):
         return None
-    identifier = _id(row[0]) if row else None
-    return (identifier, followup) if identifier else None
+    return None
 
 
 def matches(cfg: Settings, ticket_id: str, url: str) -> bool:
-    return _matches(cfg, ticket_id, url, followup=False)
+    return _matches(cfg, ticket_id, url, scope="detail")
 
 
 def matches_followup(cfg: Settings, ticket_id: str, url: str) -> bool:
-    return _matches(cfg, ticket_id, url, followup=True)
+    return _matches(cfg, ticket_id, url, scope="attachments")
 
 
-def _matches(cfg: Settings, ticket_id: str, url: str, *, followup: bool) -> bool:
+def matches_reply(cfg: Settings, ticket_id: str, url: str) -> bool:
+    return _matches(cfg, ticket_id, url, scope="replies")
+
+
+def _matches(cfg: Settings, ticket_id: str, url: str, *, scope: str) -> bool:
     prefix = guest_evidence.PUBLIC_ORIGIN + PUBLIC_PATH
     if not isinstance(url, str) or not url.startswith(prefix):
         return False
     token = url[len(prefix):]
-    if followup:
+    if expected_anchor := _SCOPE_FRAGMENTS.get(scope):
         token, fragment, anchor = token.partition("#")
-        if not fragment or anchor != FOLLOWUP_FRAGMENT:
+        if not fragment or anchor != expected_anchor:
             return False
-    scope = _ticket_scope(cfg, token)
-    return scope is not None and scope[1] == followup and str(scope[0]) == ticket_id
+    matched = _ticket_scope(cfg, token)
+    return matched is not None and matched[1] == scope and str(matched[0]) == ticket_id
 
 
 def invalidate(cfg: Settings, identifier: int | str) -> None:
@@ -239,23 +266,49 @@ def _sync_reply(fields: list[dict]) -> bool:
     return any(_SYNC_MARKER.search(content) for item in fields if isinstance(content := item.get("content"), str))
 
 
-def followup_media(entry: dict) -> list[dict]:
-    """Select media from native replies. The follow-up capability grants access to files only."""
+def _native_reply_fields(entry: dict) -> list[dict] | None:
     action_type = _id(entry.get("actionType"))
     if action_type not in (20, 101):
-        return []
+        return None
     fields = tickets._attachments(entry.get("info"))
     if _sync_reply(fields):
-        return []
+        return None
     public_fields = _public_raw_fields(fields, history=True)
     if action_type == 20:
         actions = (entry.get("action"), entry.get("actionLang"))
         labels = (field.get("title") or field.get("titleLang") for field in public_fields)
         if (not any(isinstance(action, str) and _REPLY_ACTION.fullmatch(action.strip()) for action in actions)
                 and not any(isinstance(label, str) and _REPLY_FIELD.fullmatch(label.strip()) for label in labels)):
-            return []
+            return None
+    return public_fields
+
+
+def native_followup_text(entry: dict) -> str:
+    """Select and redact native reply content suitable for the reply guest link."""
+    fields = _native_reply_fields(entry)
+    if fields is None:
+        return ""
+    parts = []
+    for field in fields:
+        label = tickets._text(field.get("title") or field.get("titleLang"), 100)
+        if label and not (_REPLY_FIELD.fullmatch(label) or _REPLY_TEXT_FIELD.fullmatch(label)):
+            continue
+        content = field.get("content")
+        if isinstance(content, str):
+            text, _ = tickets._field_value(content, _MAX_REPLY_TEXT * 2, rich=bool(_RICH_REPLY.search(content)))
+            if visible := _guest_text(clean_visible_text(text), None):
+                parts.append(visible)
+    text = "\n".join(parts)
+    return text if len(text) <= _MAX_REPLY_TEXT else text[:_MAX_REPLY_TEXT - 1].rstrip() + "…"
+
+
+def followup_media(entry: dict) -> list[dict]:
+    """Select media from native replies. The attachment capability grants access to files only."""
+    fields = _native_reply_fields(entry)
+    if fields is None:
+        return []
     attachments = tickets._attachments(entry.get("attachments"))
-    for field in public_fields:
+    for field in fields:
         _, media = tickets._field_value(field.get("content"), 0)
         attachments.extend(media)
     return attachments
@@ -325,7 +378,7 @@ def _shared_sessions(cfg: Settings, identifier: int, names, scoped_links) -> lis
 
 
 def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[dict] | None = None,
-             followup: bool = False) -> tuple[dict, dict[str, tuple[str, str, bool]]]:
+             scope: str = "detail") -> tuple[dict, dict[str, tuple[str, str, bool]]]:
     custom = tickets._attachments(raw.get("custom"))
     names, display_fields = _identities(raw, custom)
     records = []
@@ -378,11 +431,12 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
         return result
 
     source_logs = logs or []
-    followup_attachments = []
-    if followup:
+    followups = []
+    if scope in _SCOPE_FRAGMENTS:
         seen = set()
         ordered_logs = sorted(source_logs, key=lambda entry: tickets._millis(entry.get("time")) or 0, reverse=True)
         for entry in ordered_logs:
+            text = native_followup_text(entry) if scope == "replies" else ""
             images, attachments = scoped_links(followup_media(entry))
             fresh_images, fresh_attachments = [], []
             for items, fresh in ((images, fresh_images), (attachments, fresh_attachments)):
@@ -390,11 +444,16 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
                     if item["url"] not in seen:
                         seen.add(item["url"])
                         fresh.append(item)
-            if fresh_images or fresh_attachments:
-                followup_attachments.append({
+            if text or fresh_images or fresh_attachments:
+                item = {
                     "time": tickets._millis(entry.get("time")), "images": fresh_images, "attachments": fresh_attachments,
-                })
-            if len(media) >= _MAX_MEDIA:
+                }
+                if text:
+                    item["text"] = text
+                followups.append(item)
+            if scope == "attachments" and len(media) >= _MAX_MEDIA:
+                break
+            if scope == "replies" and len(followups) >= _MAX_REPLY_COUNT:
                 break
     history = [{**entry, "info": _public_raw_fields(entry.get("info"), history=True)}
                for entry in _visible_history(source_logs)]
@@ -421,8 +480,10 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
         records.append(event)
     payload = {"kind": "ticket", "ticket": data, "history": records, "history_available": logs is not None,
                "sessions": [], "technical_feedback": None}
-    if followup:
-        payload["followup_attachments"] = followup_attachments
+    if scope == "attachments":
+        payload["followup_attachments"] = followups
+    elif scope == "replies":
+        payload["followup_replies"] = list(reversed(followups))
     if cfg is not None and (identifier := _id(raw.get("id"))) is not None:
         payload["sessions"] = _shared_sessions(cfg, identifier, names, scoped_links)
         payload["technical_feedback"] = _shared_feedback(cfg, identifier, names)
@@ -430,10 +491,10 @@ def _project(raw: dict, token: str, *, cfg: Settings | None = None, logs: list[d
 
 
 def _snapshot(cfg: Settings, token: str) -> tuple[dict, dict[str, tuple[str, str, bool]]] | None:
-    scope = _ticket_scope(cfg, token)
-    if scope is None:
+    bound = _ticket_scope(cfg, token)
+    if bound is None:
         return None
-    identifier, followup = scope
+    identifier, scope = bound
     key = (_registry(cfg), token, identifier)
     now = monotonic()
     with _CACHE_LOCK:
@@ -451,7 +512,7 @@ def _snapshot(cfg: Settings, token: str) -> tuple[dict, dict[str, tuple[str, str
         logs = client.history(identifier)
     except TicketError:
         logs = None
-    result = _project(detail, token, cfg=cfg, logs=logs, followup=followup)
+    result = _project(detail, token, cfg=cfg, logs=logs, scope=scope)
     with _CACHE_LOCK:
         if generation == _cache_generation:
             _cache[key] = (now + _CACHE_SECONDS, result)
