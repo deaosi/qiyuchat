@@ -32,7 +32,7 @@ MATCH_SIZE = 20
 DETAIL_LIMIT = 12
 DETAIL_BUDGET_SECONDS = 25
 _DETAIL_CACHE_LIMIT = 128
-_DETAIL_CACHE_VERSION = 6
+_DETAIL_CACHE_VERSION = 7
 _DETAIL_CACHE_ENTRY_BYTES = support.MAX_JOURNAL // (_DETAIL_CACHE_LIMIT + 1)
 _DETAIL_BATCH = 4
 _RETRY_MS = 30_000
@@ -47,7 +47,8 @@ _FIELDS = {"key": "网易七鱼工单ID", "title": "工单标题", "status": "�
            "created": "创建时间", "updated": "更新时间", "sessions": "关联会话数", "source": "点击查看详情"}
 _TYPES = {"key": 1, "title": 1, "status": 1, "priority": 1, "created": 5, "updated": 5, "sessions": 2, "source": 15}
 _FORM = {"group": "客户群名称", "owner": "后台负责人", "platform_version": "平台&版本", "shop": "店铺名",
-         "software": "软件版本", "reported": "是否已点击报告问题", "request": "问题需求", "attachment": "附件/截图"}
+         "software": "软件版本", "reported": "是否已点击报告问题", "product_line": "缺陷类型",
+         "request": "问题需求", "attachment": "附件/截图"}
 _DETAIL = {"summary": "工单描述", "platform": "平台", **_FORM, **ticket_history.COLUMNS}
 _INPUT = {"status": "处理状态", "reply": "回复内容", "version": "解决版本"}
 INVESTIGATION_FIELD = "技术支持排查结果"
@@ -90,6 +91,14 @@ def _table(report: sync.Target, *, incremental=False, setup=None) -> ticket_fiel
     if bindings is not None:
         if not isinstance(bindings, dict):
             raise sync.SyncError("飞书工单表的原有列绑定无效。", 409)
+        product_line = _FORM["product_line"]
+        identity = matching.get(product_line)
+        bound_ids = {item[0] for item in bindings.values() if isinstance(item, list) and len(item) == 2}
+        if product_line not in bindings and identity and identity[0] not in bound_ids:
+            # This newly authorized column may join the saved schema. A renamed
+            # original field or a replacement of an existing binding stays protected.
+            bindings = {**bindings, product_line: list(identity)}
+            setup["field_bindings"] = bindings
         matching = {name: identity for name, identity in matching.items() if bindings.get(name) == list(identity)}
     required = (primary, _FIELDS["source"], *((ticket_archive.CLOSED_AT,) if incremental else ()))
     for name in required:
@@ -315,7 +324,9 @@ def _summary(row, names, *, source_link=None):
     request = fields.get("问题需求", original)
     platform = fields.get("平台&版本", fields.get("平台"))
     form = {label: ticket_guest._guest_text(fields.get(label), None) for role, label in _FORM.items()
-            if role not in {"platform_version", "request", "attachment"}}
+            if role not in {"platform_version", "product_line", "request", "attachment"}}
+    if product_line := ticket_guest._guest_text(fields.get("产品线"), None).strip():
+        form[_FORM["product_line"]] = product_line
     return {
         _DETAIL["summary"]: _public_text(request, redaction)[:1500],
         _DETAIL["platform"]: _public_text(platform, redaction)[:120],
@@ -396,11 +407,13 @@ def _enrich(cfg, desired, state_dir, *, incremental=False, refresh=False, minimu
     minimum_updates = minimum_updates or {}
     for key, row in desired.items():
         stamp = [row[_FIELDS["created"]], row[_FIELDS["updated"]], row[_FIELDS["title"]]]
+        row.pop(_FORM["product_line"], None)
         previous = cache.get(key)
         cached = previous.get("fields") if isinstance(previous, dict) else None
         followup = cached.get(ticket_history.COLUMNS["attachments"]) if isinstance(cached, dict) else None
         if (not refresh and isinstance(cached, dict) and previous.get("version") == _DETAIL_CACHE_VERSION
-                and previous.get("stamp") == stamp and set(cached) == set(_DETAIL.values())
+                and previous.get("stamp") == stamp
+                and set(cached) - {_FORM["product_line"]} == set(_DETAIL.values()) - {_FORM["product_line"]}
                 and (followup is None or (isinstance(followup, dict) and (
                     ticket_guest.matches_followup(cfg, key, followup.get("link"))
                     or ticket_guest.matches_reply(cfg, key, followup.get("link")))))):
@@ -794,7 +807,8 @@ def _drain_details(cfg, target, queue, state_dir, lane, batch, now, *, review_la
             details.update(_enrich(cfg, desired, state_dir, incremental=True, refresh=True,
                                    minimum_updates=minimum_updates))
             columns = set(_DETAIL.values())
-            ready = {key: fields for key, fields in desired.items() if columns <= fields.keys()}
+            required_columns = columns - {_FORM["product_line"]}
+            ready = {key: fields for key, fields in desired.items() if required_columns <= fields.keys()}
             postponed.update(desired.keys() - ready.keys())
             if ready:
                 if review_lane is not None:

@@ -45,7 +45,7 @@ TICKET_STATUSES = {1: "已提交", 5: "待申领", 10: "处理中", 20: "已完�
 TICKET_PRIORITIES = {5: "一般", 8: "紧急", 10: "非常紧急"}
 _EDIT_FIELDS = {
     "客户群名称": 300, "后台负责人": 300, "平台&版本": 300, "平台": 300, "店铺名": 300,
-    "软件版本": 300, "是否已点击报告问题": 300, "问题需求": 4000,
+    "软件版本": 300, "是否已点击报告问题": 300, "产品线": 300, "问题需求": 4000,
 }
 
 
@@ -429,6 +429,29 @@ def _editable_text(value, limit: int) -> bool:
     return True
 
 
+def _product_options(definition: dict) -> list[dict]:
+    if definition.get("name") != "产品线" or definition.get("type") != 1:
+        return []
+    raw = definition.get("description")
+    if not isinstance(raw, str) or len(raw) > 20_000:
+        return []
+    try:
+        entries = json.loads(raw)
+    except (ValueError, RecursionError):
+        return []
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 100:
+        return []
+    options = []
+    seen = set()
+    for entry in entries:
+        label = entry.get("text") if isinstance(entry, dict) else None
+        if not isinstance(label, str) or not label.strip() or not _editable_text(label, 300) or label in seen:
+            return []
+        seen.add(label)
+        options.append({"label": label, "value": label})
+    return options
+
+
 def _edit_form(row: dict, client: TicketClient) -> dict | None:
     holder, priority = _id(row.get("holderId")), _id(row.get("priority"))
     title = row.get("title")
@@ -437,11 +460,14 @@ def _edit_form(row: dict, client: TicketClient) -> dict | None:
     custom = _attachments(row.get("custom"))
     template_id = _id(row.get("templateId"))
     definitions = {}
-    if template_id and any(isinstance(item.get("name"), str) and item["name"] in _EDIT_FIELDS for item in custom):
+    if template_id:
         try:
             definitions = {_id(field.get("fieldId")): field for field in client.template_fields(template_id)}
         except TicketError:
             pass
+    product_definition = next((field for field in definitions.values() if field.get("name") == "产品线"), None)
+    if product_definition and not any(item.get("name") == "产品线" for item in custom):
+        custom = [*custom, {"name": "产品线", "fieldId": product_definition["fieldId"], "value": ""}]
     fields = {}
     duplicates = set()
     for item in custom:
@@ -449,8 +475,10 @@ def _edit_form(row: dict, client: TicketClient) -> dict | None:
         if key is None or not isinstance(label, str) or label not in _EDIT_FIELDS or not isinstance(value, str):
             continue
         definition = definitions.get(key)
-        if (not definition or definition.get("name") != label or definition.get("type") != 0
-                or definition.get("status") != 0):
+        if not definition or definition.get("name") != label or definition.get("status") != 0:
+            continue
+        options = _product_options(definition)
+        if (label == "产品线" and not options) or (label != "产品线" and definition.get("type") != 0):
             continue
         if not _editable_text(value, _EDIT_FIELDS[label]):
             continue
@@ -458,6 +486,8 @@ def _edit_form(row: dict, client: TicketClient) -> dict | None:
             duplicates.add(key)
         fields[key] = {"id": str(key), "label": label, "value": value, "multiline": label == "问题需求",
                        "required": definition.get("required") in (1, True)}
+        if options:
+            fields[key]["options"] = options
     eligible = [field for key, field in sorted(fields.items()) if key not in duplicates]
     result = {"title": title, "priority": priority, "fields": eligible}
     data = json.dumps([holder, row.get("status"), result], ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -500,7 +530,11 @@ def update_ticket(cfg: Settings, body: dict) -> dict:
             field = fields.get(key)
             if field is None or not _editable_text(value, _EDIT_FIELDS[field["label"]]):
                 raise ValueError("工单自定义字段不可编辑，或内容不符合文本格式和字数限制。")
-            value = value.strip()
+            if "options" in field:
+                if value != field["value"] and value not in {option["value"] for option in field["options"]}:
+                    raise ValueError("产品线已不在七鱼模板的可选范围内，请刷新工单重新选择。")
+            else:
+                value = value.strip()
             if not value and field["required"]:
                 raise ValueError(f'{field["label"]}为必填项。')
             if value != field["value"]:

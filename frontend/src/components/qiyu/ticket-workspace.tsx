@@ -33,7 +33,7 @@ type TicketEdit = {
   revision: string
   title: string
   priority: number
-  fields: { id: string; label: string; value: string; multiline: boolean; required?: boolean }[]
+  fields: { id: string; label: string; value: string; multiline: boolean; required?: boolean; options?: { label: string; value: string }[] }[]
 }
 type TicketUpdate = { revision: string; title?: string; priority?: number; fields?: Record<string, string> }
 type TicketDetail = {
@@ -74,17 +74,20 @@ function TicketEditor({ edit, saving, failure, conflict, onSave, onCancel, onRel
   const changedTitle = title.trim() !== edit.title.trim()
   const changedPriority = priority !== String(edit.priority)
   const changedFields = edit.fields.filter(field => fields[field.id] !== field.value)
+  const invalidFields = changedFields.some(field => (field.required && !fields[field.id].trim())
+    || (field.options && fields[field.id] !== '' && !field.options.some(option => option.value === fields[field.id])))
   const dirty = changedTitle || changedPriority || changedFields.length > 0
   useEffect(() => { titleInput.current?.focus({ preventScroll: true }) }, [])
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (saving || conflict || !dirty || !title.trim() || changedFields.some(field => field.required && !fields[field.id].trim())) return
+    if (saving || conflict || !dirty || !title.trim() || invalidFields) return
     onSave({
       revision: edit.revision,
       ...(changedTitle ? { title: title.trim() } : {}),
       ...(changedPriority ? { priority: Number(priority) } : {}),
-      ...(changedFields.length ? { fields: Object.fromEntries(changedFields.map(field => [field.id, fields[field.id].trim()])) } : {}),
+      ...(changedFields.length ? { fields: Object.fromEntries(changedFields.map(field =>
+        [field.id, field.options ? fields[field.id] : fields[field.id].trim()])) } : {}),
     })
   }
 
@@ -114,7 +117,16 @@ function TicketEditor({ edit, saving, failure, conflict, onSave, onCancel, onRel
       } }
       return <div className="space-y-2" key={field.id}>
         <Label htmlFor={inputId}>{field.label}</Label>
-        {field.multiline ? <textarea {...props} className={editTextarea} rows={4} maxLength={4000} /> : <Input {...props} maxLength={300} />}
+        {field.options ? <Select value={fields[field.id]} disabled={saving}
+          required={field.required && fields[field.id] !== field.value}
+          onValueChange={value => setFields(current => ({ ...current, [field.id]: value }))}>
+          <SelectTrigger id={inputId} className="w-full"><SelectValue placeholder="请选择" /></SelectTrigger>
+          <SelectContent>
+            {field.value && !field.options.some(option => option.value === field.value) &&
+              <SelectItem value={field.value} disabled>{field.value}（当前值）</SelectItem>}
+            {field.options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+          </SelectContent>
+        </Select> : field.multiline ? <textarea {...props} className={editTextarea} rows={4} maxLength={4000} /> : <Input {...props} maxLength={300} />}
       </div>
     })}
     {failure && <div role="alert" className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-sm text-destructive">
@@ -123,7 +135,7 @@ function TicketEditor({ edit, saving, failure, conflict, onSave, onCancel, onRel
     </div>}
     <div className="flex flex-wrap justify-end gap-2">
       <Button type="button" variant="outline" disabled={saving} onClick={onCancel}>取消</Button>
-      <Button type="submit" disabled={saving || conflict || !dirty || !title.trim()}>{saving ? '正在保存…' : '保存修改'}</Button>
+      <Button type="submit" disabled={saving || conflict || !dirty || !title.trim() || invalidFields}>{saving ? '正在保存…' : '保存修改'}</Button>
     </div>
   </form>
 }

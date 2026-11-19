@@ -7,9 +7,11 @@ const id = '9007199254740993'
 const feishuUrl = 'https://freecallai.feishu.cn/base/example?table=tblExample'
 const ticket = { id, title: '订单复核', status: '已完结', priority: '高', owner: '值班受理客服', submitter: '原工单提报客服',
   created_at: Date.UTC(2026, 0, 1, 1), updated_at: Date.UTC(2026, 0, 1, 3), linked_session_count: 1 }
+const productLine = { id: '13', label: '产品线', value: '福客ai', multiline: false, required: true,
+  options: [{ label: '福客ai', value: '福客ai' }, { label: '福爪', value: '福爪' }, { label: '福客工单', value: '福客工单' }] }
 const edit = { revision: 'ticket-revision', title: ticket.title, priority: 8,
   fields: [{ id: '11', label: '平台&版本', value: '抖音 · Windows', multiline: false },
-    { id: '12', label: '问题需求', value: '核对订单明细。', multiline: true }] }
+    { id: '12', label: '问题需求', value: '核对订单明细。', multiline: true }, productLine] }
 let followup: TicketEvent | undefined
 const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
   const url = new URL(path, location.origin)
@@ -21,6 +23,7 @@ const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
     ticket: { ...ticket, description: '', fields: [
       { label: '平台&版本', value: '抖音 · Windows' },
       { label: '问题需求', value: '核对订单明细。' },
+      { label: productLine.label, value: productLine.value },
       { label: '附件/截图', value: '', images: [{ url: '/api/tickets/media?token=example', name: '订单截图' }] },
     ], attachments: [{ url: '/api/tickets/media?token=document', name: '订单明细.pdf' }] },
     history: [
@@ -41,10 +44,18 @@ const fetchApi = vi.fn(async (path: string, init?: RequestInit) => {
     },
     edit,
   })
-  if (url.pathname === '/api/tickets/update' && init?.method === 'POST') return Response.json({
-    ticket: { ...ticket, title: '更新后的标题', description: '', fields: [{ label: '问题需求', value: '新的订单说明。' }] },
-    history: [], history_available: true, sessions: [], edit: { ...edit, revision: 'new-revision', title: '更新后的标题' },
-  })
+  if (url.pathname === '/api/tickets/update' && init?.method === 'POST') {
+    const body = JSON.parse(String(init.body))
+    if (body.fields?.[productLine.id]) return Response.json({
+      ticket: { ...ticket, description: '', fields: [{ label: productLine.label, value: body.fields[productLine.id] }] },
+      history: [], history_available: true, sessions: [], edit: { ...edit, revision: 'new-revision',
+        fields: edit.fields.map(field => field.id === productLine.id ? { ...field, value: body.fields[productLine.id] } : field) },
+    })
+    return Response.json({
+      ticket: { ...ticket, title: '更新后的标题', description: '', fields: [{ label: '问题需求', value: '新的订单说明。' }] },
+      history: [], history_available: true, sessions: [], edit: { ...edit, revision: 'new-revision', title: '更新后的标题' },
+    })
+  }
   if (url.pathname === '/api/detail') return Response.json({
     pair: { qa_id: 24, session_id: 'linked-session', question: '怎么核对？', answer: '请查看订单。' },
     messages: [{ role: 'staff', content: '请查看订单。', time: '2026-01-01 09:00:00' }],
@@ -66,6 +77,33 @@ afterEach(() => {
 })
 
 describe('七鱼工单', () => {
+  it('edits the product line using the native options and displays the confirmed value', async () => {
+    const scrollIntoView = HTMLElement.prototype.scrollIntoView
+    HTMLElement.prototype.scrollIntoView = vi.fn()
+    try {
+      history.replaceState(null, '', `#tickets?id=${id}`)
+      render(<QiyuApp />)
+      const popup = await screen.findByRole('dialog', { name: ticket.title })
+      const detail = within(popup)
+      expect(detail.getByText(productLine.value)).toBeTruthy()
+      fireEvent.click(detail.getByRole('button', { name: '编辑工单' }))
+      const editor = within(detail.getByRole('form', { name: '编辑工单' }))
+      const select = editor.getByRole('combobox', { name: '产品线' })
+      expect(select.textContent).toContain(productLine.value)
+      expect(editor.queryByRole('textbox', { name: '产品线' })).toBeNull()
+      fireEvent.keyDown(select, { key: 'ArrowDown' })
+      fireEvent.click(await screen.findByRole('option', { name: '福客工单' }))
+      fireEvent.click(editor.getByRole('button', { name: '保存修改' }))
+
+      expect(await detail.findByText('福客工单')).toBeTruthy()
+      expect(detail.queryByRole('form', { name: '编辑工单' })).toBeNull()
+      const call = fetchApi.mock.calls.find(([path]) => path.startsWith('/api/tickets/update?'))!
+      expect(JSON.parse(String(call[1]?.body))).toEqual({ id, revision: edit.revision, fields: { '13': '福客工单' } })
+    } finally {
+      HTMLElement.prototype.scrollIntoView = scrollIntoView
+    }
+  })
+
   it('edits only native supported fields and renders the confirmed ticket in the same dialog', async () => {
     history.replaceState(null, '', `#tickets?id=${id}`)
     render(<QiyuApp />)

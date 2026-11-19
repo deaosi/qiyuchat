@@ -12,6 +12,7 @@ it('renders the shared ticket with only images scoped to the open guest link', (
       title: '商品答复异常', status: '处理中', priority: '一般', description: '',
       created_at: 1794615600000, updated_at: null,
       fields: [
+        { label: '产品线', value: '福客工单' },
         { label: '问题需求', value: '机器人未按设置回复。' },
         { label: '附件/截图', value: '', images: [
           { name: '工单截图', url: imageUrl },
@@ -24,6 +25,8 @@ it('renders the shared ticket with only images scoped to the open guest link', (
 
     expect(screen.getByRole('heading', { name: '商品答复异常' })).toBeTruthy()
     expect(screen.getByText('当前状态 处理中')).toBeTruthy()
+    expect(screen.getByText('产品线')).toBeTruthy()
+    expect(screen.getByText('福客工单')).toBeTruthy()
     expect(screen.getByText('机器人未按设置回复。')).toBeTruthy()
     expect(screen.getAllByRole('img')).toHaveLength(1)
     expect(screen.queryByRole('link')).toBeNull()

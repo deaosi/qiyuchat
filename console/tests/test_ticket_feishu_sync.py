@@ -125,7 +125,7 @@ class TestTicketFeishuSync(unittest.TestCase):
                    "fields": {"工单描述": "旧摘要", "平台": "旧平台", "软件版本": "旧版本"}},
         })
         values = {"客户群名称": "门店答疑群", "后台负责人": "值班小陈", "平台&版本": "淘宝企业版",
-                  "店铺名": "测试工具店", "软件版本": "3.1", "是否已点击报告问题": "是",
+                  "店铺名": "测试工具店", "软件版本": "3.1", "是否已点击报告问题": "是", "产品线": "福客工单",
                   "问题需求": "机器人未回复。\n密码：privateSecret"}
         image = "https://shop.qiyukf.net/0123456789abcdef0123456789abcdef?signature=hidden"
         media = {"name": "现场截图.png", "url": image}
@@ -152,6 +152,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertEqual(row["店铺名"], values["店铺名"])
         self.assertEqual(row["平台&版本"], values["平台&版本"])
         self.assertEqual(row["软件版本"], values["软件版本"])
+        self.assertEqual(row["缺陷类型"], values["产品线"])
         self.assertIn("机器人未回复。\n", row["问题需求"])
         self.assertNotIn("privateSecret", row["问题需求"])
         self.assertEqual(row["附件/截图"]["text"], "现场截图.png")
@@ -165,6 +166,7 @@ class TestTicketFeishuSync(unittest.TestCase):
         self.assertEqual(legacy["问题需求"], "原生工单描述")
         self.assertEqual(legacy["客户群名称"], "")
         self.assertIsNone(legacy["附件/截图"])
+        self.assertNotIn("缺陷类型", legacy)
 
     def test_repeated_or_incomplete_source_pages_refuse_publication(self):
         first = {"items": [{"id": "42"}], "total": 2, "has_more": True, "source": "qiyu"}
@@ -176,6 +178,65 @@ class TestTicketFeishuSync(unittest.TestCase):
         with patch.object(tickets, "list_tickets", return_value=truncated):
             with self.assertRaisesRegex(ValueError, "数量不一致"):
                 tickets._pages(object())
+
+    def test_product_line_adds_only_its_explicit_column_binding_and_keeps_replacements_protected(self):
+        key, source = tickets._FIELDS["key"], tickets._FIELDS["source"]
+        column = tickets._FORM["product_line"]
+        header = {
+            key: ("fldTicket", 1), source: ("fldSource", 15),
+            column: ("fldProduct", 1), "人工补充": ("fldManual", 1),
+        }
+        state = Path(self.cfg.runtime.state_dir)
+        setup = {"table_id": self.target.table_id, "field_bindings": {
+            key: ["fldTicket", 1], source: ["fldSource", 15],
+        }}
+        tickets.support._write_state(state / "ticket-table-setup.json", setup)
+
+        def schema(target):
+            return {name: (identity, name == key) for name, identity in header.items()}
+
+        with patch.object(tickets.ticket_fields, "schema", side_effect=schema):
+            target, updated = tickets._configured_table(self.target, state)
+            self.assertEqual(target.fields["product_line"], column)
+            self.assertEqual(updated["field_bindings"], {
+                **setup["field_bindings"], column: ["fldProduct", 1],
+            })
+            self.assertEqual(tickets.support._read_state(state / "ticket-table-setup.json"), updated)
+            self.assertNotIn("人工补充", target.approved)
+            header[column] = ("fldReplacement", 1)
+            replaced = tickets._table(self.target, setup=updated)
+            self.assertNotIn(column, replaced.approved)
+            header[column] = ("fldProduct", 3)
+            changed_type = tickets._table(self.target, setup=updated)
+            self.assertNotIn(column, changed_type.approved)
+            header[column] = ("fldManual", 1)
+            renamed_setup = {**setup, "field_bindings": {**setup["field_bindings"], "原有列": ["fldManual", 1]}}
+            renamed = tickets._table(self.target, setup=renamed_setup)
+            self.assertNotIn(column, renamed.approved)
+
+    def test_product_line_maps_the_source_and_preserves_existing_values_without_source(self):
+        key, source = tickets._FIELDS["key"], tickets._FIELDS["source"]
+        column = tickets._FORM["product_line"]
+        header = {key: (("fldTicket", 1), True), source: (("fldSource", 15), False),
+                  column: (("fldProduct", 1), False)}
+        link = {"text": "查看工单", "link": "https://example.com/42"}
+        self.rows["42"] = {"record_id": "recFixture42",
+                           "fields": {key: "42", source: link, column: "人工历史分类", "人工补充": "保留"}}
+        with (patch.object(tickets.top, "_find_table", return_value=self.target.table_id),
+              patch.object(tickets.ticket_fields, "schema", return_value=header),
+              patch.object(sync, "_call", side_effect=self.fake_api)):
+            target = tickets._table(self.target)
+            for custom in ([], [{"name": "缺陷类型", "value": "其他来源"}], [{"name": "产品线", "value": ""}]):
+                fields = {key: "42", source: link, **tickets._summary({"custom": custom}, None)}
+                self.assertNotIn(column, fields)
+                self.assertEqual(tickets._upsert(target, {"42": fields}), (0, 0))
+            for product in ("福客ai", "福爪", "福客工单", "福脉", "会眼智查", "AI陪练"):
+                fields = {key: "42", source: link,
+                          **tickets._summary({"custom": [{"name": "产品线", "value": product}]}, None)}
+                self.assertEqual(fields[column], product)
+                self.assertEqual(tickets._upsert(target, {"42": fields}), (0, 1))
+                self.assertEqual(self.rows["42"]["fields"][column], product)
+                self.assertEqual(self.rows["42"]["fields"]["人工补充"], "保留")
 
     def test_imports_older_technical_reply_and_preserves_input_columns(self):
         source = {"id": "42", "title": "历史工单", "created_at": 1_734_500_000_000, "status_code": 10}

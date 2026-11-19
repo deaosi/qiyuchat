@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from src.app import get_db
 from src.qiyu import ticket
 from src.qiyu.sign import build_signature
-from src.web import case_media, ticket_guest
+from src.web import case_media, ticket_guest, tickets
 from src.web.server import DashboardServer
 from tests.test_local import LocalFixture
 
@@ -110,6 +110,44 @@ class TicketModuleTests(LocalFixture):
             self.assertNotIn("edit", public)
             self.assertEqual(submit(update)[0], 409)
             self.assertEqual(changes, [(1, 0, "新工单标题"), (0, 201, "新需求")])
+
+    def test_product_line_uses_current_template_choices_and_refreshes_guest_details(self):
+        raw = {"id": 58, "title": "产品线配置", "status": 10, "priority": 5, "holderId": 1234,
+               "templateId": 77, "custom": [{"name": "产品线", "fieldId": 203, "value": "福客ai"}]}
+        options = [{"opId": "1", "text": "福客ai"}, {"opId": "3", "text": "福客工单"}]
+        definition = {"name": "产品线", "fieldId": 203, "type": 1, "status": 0, "required": 1,
+                      "description": json.dumps(options)}
+
+        def save(identifier, holder, *, change_type, field_id, value):
+            self.assertEqual((identifier, holder, change_type, field_id), (58, 1234, 0, 203))
+            raw["custom"][0]["value"] = value
+
+        token = ticket_guest.url_for(self.cfg, "58").rsplit("/", 1)[-1]
+        with (patch.object(ticket.TicketClient, "detail", side_effect=lambda _: raw),
+              patch.object(ticket.TicketClient, "history", return_value=[]),
+              patch.object(ticket.TicketClient, "template_fields", return_value=[definition]),
+              patch.object(ticket.TicketClient, "modify", side_effect=save) as modify):
+            initial = tickets.ticket_detail(self.cfg, "58")
+            field = initial["edit"]["fields"][0]
+            self.assertEqual(field["options"], [{"label": "福客ai", "value": "福客ai"},
+                                                {"label": "福客工单", "value": "福客工单"}])
+            public = ticket_guest.resolve_payload(self.cfg, token)
+            self.assertIn({"label": "产品线", "value": "福客ai"}, public["ticket"]["fields"])
+            base = {"id": "58", "revision": initial["edit"]["revision"]}
+            with self.assertRaisesRegex(ValueError, "可选范围"):
+                tickets.update_ticket(self.cfg, {**base, "fields": {"203": "自行填写的产品"}})
+            modify.assert_not_called()
+            saved = tickets.update_ticket(self.cfg, {**base, "fields": {"203": "福客工单"}})
+            self.assertIn({"label": "产品线", "value": "福客工单"}, saved["ticket"]["fields"])
+            public = ticket_guest.resolve_payload(self.cfg, token)
+            self.assertIn({"label": "产品线", "value": "福客工单"}, public["ticket"]["fields"])
+            self.assertNotIn("edit", public)
+            modify.assert_called_once()
+            del raw["custom"][:]
+            missing = tickets._edit_form(raw, ticket.TicketClient(self.cfg.qiyu))
+            self.assertEqual((missing["fields"][0]["value"], missing["fields"][0]["id"]), ("", "203"))
+            definition["description"] = "malformed"
+            self.assertEqual(tickets._edit_form(raw, ticket.TicketClient(self.cfg.qiyu))["fields"], [])
 
     def test_authenticated_projection_keeps_ticket_links_and_drops_private_fields(self):
         self.seed()
