@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from itertools import islice, zip_longest
 from pathlib import Path
 import re
@@ -26,6 +27,8 @@ _LABELED_ID = re.compile(r"((?:会话|客户|客服|店铺|商家|商品|账号|
 _PHASES = {"diagnosis": "排查", "action": "处理", "retest": "复测", "escalation": "升级处理"}
 _TOPIC_LABELS = {"functional_anomaly": "功能异常", "configuration_guidance": "配置与使用", "unclear": "其他咨询"}
 _SOP_LABELS = {"anomaly": "异常与排障", "configuration": "配置与使用"}
+_KNOWLEDGE_LABELS = {"configuration_guide": "配置与使用", "troubleshooting_advice": "排查指引",
+                     "verified_workaround": "已验证处理方法"}
 _PLACEHOLDERS = {"匿名客户", "未分组", "未记录客服"}
 
 
@@ -432,7 +435,87 @@ def _topic_records(cfg: Settings, scope: dict, names: re.Pattern[str] | None) ->
     return records, coverage_text
 
 
+def _knowledge_key(item: dict) -> str:
+    # Keep the table journal's existing ID contract across content revisions.
+    identity = ((item["topic_id"], item.get("variant_key", ""))
+                if item.get("topic_id") else item["id"])
+    return "sop_" + voc_assets.digest(("knowledge-library", identity))[:24]
+
+
+def _knowledge_lines(value: object, names: re.Pattern[str] | None) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    # Guest sections limit each line to 3,000 characters. Split rather than
+    # truncate a full source reply, while retaining the existing sanitizer.
+    text = "\n".join(_public_text(line, names) for line in value.splitlines()).strip()
+    return [text[offset:offset + 3000] for offset in range(0, len(text), 3000)]
+
+
+def _reply_time(stamp: int) -> str:
+    return datetime.fromtimestamp(stamp / 1000, timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _knowledge_records(cfg: Settings, scope: dict, names: re.Pattern[str] | None) -> list[dict]:
+    records = []
+    for item in voc_engine.knowledge_library(cfg, scope)["items"]:
+        if item.get("type") != "knowledge" or item.get("status") not in ("guidance", "verified"):
+            continue
+        category = _KNOWLEDGE_LABELS.get(item.get("kind"))
+        if not category:
+            continue
+        label = "效果已验证" if item["status"] == "verified" else "客服来源指引 · 效果待验证"
+        sections = [
+            _section("适用范围", [item["scope"]], names),
+            {"title": "处理方法", "lines": _knowledge_lines(item["answer"], names)},
+            _section("处理步骤", item["steps"], names),
+            _section("注意事项", item.get("cautions", []), names),
+            _section("证据状态", [label], names),
+        ]
+        anchors, cases = [], []
+        for source in item["sources"]:
+            qa_id = source["qa_id"]
+            refs = [ref for ref in item["evidence"] if ref["qa_id"] == qa_id]
+            if not refs:
+                continue
+            anchor = next(iter(source["question_message_ids"] or source["answer_message_ids"]), "")
+            if not anchor:
+                continue
+            anchors.append((qa_id, anchor))
+            times = sorted({ref["ts"] for ref in refs})
+            reply_lines = _knowledge_lines(source["answer"], names)
+            reply_header = _public_text(source.get("staff_name"), names) or "人工客服"
+            stamp_lines = [f"引用回复时间：{_reply_time(stamp)}" for stamp in times]
+            case_sections = [{"title": "客服原始答复", "lines": [reply_header, *stamp_lines, *reply_lines]}]
+            sections.append({"title": f"客服原始答复 · {len(cases) + 1}",
+                             "lines": [reply_header, *stamp_lines, *reply_lines]})
+            cases.append({"qa_id": qa_id, "anchor_id": anchor,
+                          "title": _public_text(source["question"], names) or "会话依据",
+                          "category": label, "time": _reply_time(times[0]), "sections": case_sections})
+        if not cases:
+            continue
+        sections = [section for section in sections if section["lines"]]
+        title = _public_text(item["title"], names)[:800]
+        detail = "\n".join([label, f"知识来源范围 {scope['start']} 至 {scope['end']}（上海时间）。",
+                            *[line for section in sections[:5]
+                              for line in [section["title"], *section["lines"]]],
+                            "完整客服答复、实际回复时间和会话上下文见访客页。"])
+        if not title or not detail:
+            continue
+        if len(detail) > 16000:
+            detail = detail[:15950] + "\n完整内容见访客页。"
+        records.append({"key": _knowledge_key(item), "knowledge_source": True, "title": title,
+                        "summary": f"{category} · {label}", "detail": detail, "url": "",
+                        "_guest_anchors": anchors,
+                        "_guest_view": {"taxonomy": [{"primary": category, "secondary": ""}],
+                                        "metrics": [{"label": "来源会话", "value": len(cases)}],
+                                        "sections": sections, "cases": cases, "total_cases": len(cases)}})
+    return records
+
+
 def _sop_records(cfg: Settings, scope: dict, identity: str, names: re.Pattern[str] | None) -> tuple[list[dict], str]:
+    knowledge = _knowledge_records(cfg, scope, names)
+    if identity and (selected := next((item for item in knowledge if item["key"] == identity), None)):
+        return [selected], "当前来源有 1 条可复用知识。"
     data = voc_engine.sops(cfg, scope, identity)
     cases = [data["item"]] if identity else data["items"]
     topics = voc_engine._topic_definitions(cfg)
@@ -476,7 +559,9 @@ def _sop_records(cfg: Settings, scope: dict, identity: str, names: re.Pattern[st
         records.append({"key": key, "title": title, "summary": f"{category} · {label}", "detail": detail,
                         "url": "", "_guest_anchors": anchors,
                         "_guest_view": _sop_guest_view(item, topic, category, names, anchors)})
-    return records, f"当前范围有 {len(cases)} 份处理流程，其中 {len(records)} 份可用于本次整理。"
+    if not identity:
+        records = knowledge + records
+    return records, f"当前范围有 {len(cases)} 份处理流程及 {len(knowledge)} 条客服来源知识，其中 {len(records)} 项可用于本次整理。"
 
 
 def build_document(cfg: Settings, filters: dict, kind: str, identity: str = "") -> dict:
@@ -492,7 +577,7 @@ def build_document(cfg: Settings, filters: dict, kind: str, identity: str = "") 
         heading = "高频问题"
         records, coverage = _topic_records(cfg, scope, names)
     else:
-        heading = "可复用处理 SOP"
+        heading = "知识沉淀"
         records, coverage = _sop_records(cfg, scope, identity, names)
 
     start, end = scope["start"], scope["end"]

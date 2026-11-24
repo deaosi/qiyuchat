@@ -29,8 +29,9 @@ def _validate(snapshot):
     start, end = map(date.fromisoformat, (topics["start"], topics["end"]))
     if (snapshot["filters"] != {"days": 7} or not support._valid_marker(snapshot["marker"])
             or end - start != timedelta(days=6) or snapshot["marker"][:10] != end.isoformat()
-            or (sops["start"], sops["end"]) != (topics["start"], topics["end"])
-            or not topics["records"] or topics["total"] != topics["count"]):
+            or date.fromisoformat(sops["start"]) > start or sops["end"] != topics["end"]
+            or (not (topics["records"] or sops["records"]) and snapshot.get("knowledge_inventory_complete") is not True)
+            or topics["total"] != topics["count"]):
         raise ValueError("全量成果的统计范围无法核对。")
     seen_keys, seen_urls = set(), set()
     for kind, document in (("topics", topics), ("sops", sops)):
@@ -50,6 +51,13 @@ def _validate(snapshot):
                 if type(count) is not int or not 0 < count <= previous:
                     raise ValueError("全量高频榜的咨询次数或排序无效。")
                 previous = count
+    if "knowledge_inventory_complete" in snapshot:
+        keys = snapshot.get("knowledge_keys")
+        expected = {item["key"] for item in sops["records"] if item.get("knowledge_source") is True}
+        if (snapshot["knowledge_inventory_complete"] is not True or not isinstance(keys, list)
+                or any(not isinstance(key, str) or not sync._SOURCE_ID["sops"].fullmatch(key) for key in keys)
+                or len(keys) != len(set(keys)) or set(keys) != expected):
+            raise ValueError("累计知识清单无法完整核对。")
     return snapshot
 
 
@@ -85,7 +93,7 @@ def _read_rows(target, *, creation_times=None):
 
 
 def _display_link(key, url):
-    return {"text": "查看 SOP" if key.startswith("sop_") else "查看问题", "link": url}
+    return {"text": "查看知识" if key.startswith("sop_") else "查看问题", "link": url}
 
 
 def _project(target, snapshot, *, top=False, display_field=DISPLAY_LINK_FIELD):
@@ -213,7 +221,7 @@ def _register_plan(target, path, snapshot, current, times, known, incoming, merg
         if not owned <= current.keys():
             raise ValueError("登记表有已同步记录被移除，无法核对淘汰顺序。")
         manual = len(current) - len(owned)
-        protected = sum(not key.startswith("t_") for key in known)
+        protected = sum(not key.startswith("t_") and key not in merged for key in known)
         new = [key for key in incoming if key not in known and key not in retired and key.startswith("t_")]
         new_sops = sum(key.startswith("sop_") and key not in known for key in incoming)
         capacity = REGISTER_LIMIT - manual - protected - new_sops
@@ -233,7 +241,7 @@ def _register_plan(target, path, snapshot, current, times, known, incoming, merg
     for key, record_id in evict.items():
         if record_id in current and (not support._matches(target, known[key]["fields"], current[record_id])
                                      or set(current[record_id]) - set(known[key]["fields"])):
-            raise ValueError("最早登记的记录含手动修改或额外字段，已保留。")
+            raise ValueError("待移除的知识或最早登记的记录含手动修改或额外字段，已保留。")
     return desired, retired, evict, excluded, merged, intent_path
 
 
@@ -346,6 +354,13 @@ def _load_create_intent(path, target, marker, desired):
     return keys_seen, batches, False
 
 
+def _knowledge_keys(value):
+    if (not isinstance(value, list) or any(not isinstance(key, str) or not sync._SOURCE_ID["sops"].fullmatch(key)
+                                           for key in value) or len(set(value)) != len(value)):
+        raise ValueError("知识沉淀的完整登记清单无法核对。")
+    return set(value)
+
+
 def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=True, display_field=DISPLAY_LINK_FIELD):
     times = {} if not top else None
     current, links = _read_rows(target, creation_times=times) if not top else _read_rows(target)
@@ -375,12 +390,23 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
     current_members = _topic_members(snapshot)
     old_members = {**_topic_members(previous),
                    **{key: set(members) for key, members in previous_state.get("lineage", {}).items()}}
+    knowledge_keys = _knowledge_keys(previous_state.get("knowledge_keys", [])) if not top else set()
+    if not top and snapshot.get("knowledge_inventory_complete") is True:
+        current_knowledge = _knowledge_keys(snapshot.get("knowledge_keys"))
+        withdrawn = knowledge_keys - current_knowledge
+        knowledge_keys = current_knowledge
+    else:
+        withdrawn = set()
     if top:
         _reconcile_topics(known, old_members, current_members, desired, age=lambda key: known[key]["id"])
     else:
         candidates = desired.keys() - set(previous_state.get("retired", []))
         merged = _reconcile_topics(known, old_members, current_members, candidates,
                                    age=lambda key: (times.get(known[key]["id"], 0), known[key]["id"]))
+        # A complete cumulative inventory can withdraw knowledge whose exact
+        # source is no longer valid. Reuse the guarded removal journal without
+        # retiring its key: the same source may become valid again later.
+        merged.update(withdrawn & known.keys())
     evict = {}
     if not top:
         desired, retired, evict, excluded, merged, fifo_path = _register_plan(
@@ -449,7 +475,8 @@ def _sync_table(target, path, snapshot, previous, *, top=False, allow_writes=Tru
     committed = {"table": target.table_id, "records": state, "stable_keys": True, "lineage": lineage,
                  "display_links": bool(display_field)}
     if not top:
-        committed.update(fifo=True, retired=sorted(retired), marker=snapshot["marker"])
+        committed.update(fifo=True, retired=sorted(retired), marker=snapshot["marker"],
+                         knowledge_keys=sorted(knowledge_keys & state.keys()))
     support._write_state(path, committed)
     intent_path.unlink(missing_ok=True)
     if not top:
@@ -580,9 +607,14 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
     top_state = state_dir / "top-table.json"
 
     def update_dashboard(snapshot):
-        job = source.fetch({}, job_only=True)["job"]
-        timestamp = snapshot.get("published_at") or published.stat().st_mtime
-        return dashboard.update(target, top_table._cli, snapshot, timestamp, job)
+        try:
+            job = source.fetch({}, job_only=True)["job"]
+            timestamp = snapshot.get("published_at") or published.stat().st_mtime
+            url = dashboard.update(target, top_table._cli, snapshot, timestamp, job)
+            return {"dashboard_status": "updated", "dashboard_url": url}
+        except _SYNC_ERRORS:
+            print("飞书数据表已回读确认，仪表盘日志待下次调度重试。", file=sys.stderr)
+            return {"dashboard_status": "pending", "dashboard_url": ""}
 
     def previous_snapshot():
         if published.exists():
@@ -595,14 +627,16 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
             return preview
         document = preview["documents"]["topics"]
         return {"status": "ready", "period": [document["start"], document["end"]],
-                "topics": document["count"], "top": min(100, document["count"]), "source": preview["source_metrics"]}
+                "topics": document["count"], "top": min(100, document["count"]),
+                "sops": preview["documents"]["sops"]["count"], "source": preview["source_metrics"]}
 
     with sync._write_lock(target.lock_path):
         previous = previous_snapshot()
         if dashboard_only:
             if not published.exists():
                 raise ValueError("暂无已回读确认的飞书同步记录。")
-            return {"status": "dashboard_updated", "dashboard_url": update_dashboard(previous)}
+            result = update_dashboard(previous)
+            return {"status": "dashboard_updated" if result["dashboard_status"] == "updated" else "dashboard_pending", **result}
         _ensure_updated_field(target)
         ready = source.fetch({}, probe=True)
         if ready.get("status") != "ready":
@@ -611,9 +645,9 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
         if published.exists() and support._slot_checked(previous, marker, refresh) and not pending.exists():
             count = previous.get("register_count", previous["documents"]["topics"]["count"])
             return {"status": "already_checked", "all_topics": count,
-                    "top_topics": min(100, previous["documents"]["topics"]["count"]),
+                    "top_topics": previous.get("top_count", min(100, previous["documents"]["topics"]["count"])),
                     "sops": len(previous.get("published_sops", previous["documents"]["sops"]["records"])),
-                    "dashboard_url": update_dashboard(previous)}
+                    **update_dashboard(previous)}
         schema = support._schema(target)
         if not support._compact(target, schema) or any(target.fields[role] not in schema for role in original_roles):
             raise ValueError("原飞书表的四列同步结构已变化。")
@@ -629,15 +663,20 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
             top_field = None if old_intent else _ensure_display_field(top_target, top=True)
             original_result = _sync_table(target, full_state, stage, previous, allow_writes=allow_writes,
                                           display_field=original_field)
-            top_result = _sync_table(top_target, top_state, stage, previous, top=True,
-                                     allow_writes=allow_writes, display_field=top_field)
+            if stage["documents"]["topics"]["count"]:
+                top_result = _sync_table(top_target, top_state, stage, previous, top=True,
+                                         allow_writes=allow_writes, display_field=top_field)
+            else:
+                top_result = {"topics": len(_load_table_state(top_state, top_target)) if top_state.exists() else 0,
+                              "updated": 0, "created": 0, "removed": 0, "retained": True}
             stage = {**stage, "published_at": int(time.time()), "register_count": original_result["topics"],
-                     "published_sops": support._sop_inventory(previous, stage)}
+                     "published_sops": support._sop_inventory(previous, stage),
+                     "top_retained": bool(top_result.get("retained")), "top_count": top_result["topics"]}
             support._write_state(published, stage)
             pending.unlink()
             return {"status": "published", "period": list(support._period(stage)), "slot": stage["marker"],
                     "all": original_result, "top": top_result, "top_url": top_target.destination,
-                    "dashboard_url": update_dashboard(stage)}
+                    **update_dashboard(stage)}
 
         if pending.exists():
             staged = _validate(support._read_state(pending))
@@ -658,9 +697,10 @@ def run(state_dir, apply, *, refresh=False, dashboard_only=False):
         # All links are bound and checked against the guest registry at the source.
         # Also exercise the public guest projection across the full ranking.
         records = doc["records"]
-        sample = {index for index in range(0, len(records), max(1, len(records) // 20))}
-        sample.update((0, min(99, len(records) - 1), len(records) - 1))
-        support.verify_guest_links({**doc, "records": [records[index] for index in sorted(sample)]})
+        if records:
+            sample = {index for index in range(0, len(records), max(1, len(records) // 20))}
+            sample.update((0, min(99, len(records) - 1), len(records) - 1))
+            support.verify_guest_links({**doc, "records": [records[index] for index in sorted(sample)]})
         support._sop_links(stage["documents"]["sops"])
         support._write_state(pending, stage)
         return publish(stage)

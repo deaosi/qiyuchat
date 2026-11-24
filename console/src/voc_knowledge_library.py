@@ -56,6 +56,7 @@ def _answer(item: dict, current: dict[int, dict]) -> dict | None:
         return None
     return {
         "id": "knowledge_" + str(item["id"]), "type": "knowledge",
+        "topic_id": item["topic_id"], "variant_key": item.get("variant_key", ""),
         "title": item["question"], "question": item["question"],
         "answer": item["answer"], "scope": item["scope"], "kind": item["kind"], "status": level,
         "steps": item["steps"], "cautions": item.get("cautions", []),

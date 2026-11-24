@@ -39,7 +39,21 @@ def latest_job(cfg):
         return None
     return dict(row)
 
-def records_in_scope(cfg, scope):
+def _knowledge_scope(cfg, scope):
+    """Keep accumulated staff knowledge when the rolling ranking changes dates."""
+    start = scope['start']
+    path = Path(cfg.runtime.db_path).resolve()
+    if path.is_file():
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_pair'").fetchone():
+                earliest = db.execute('SELECT MIN(asked_at) FROM qa_pair WHERE asked_at > 0').fetchone()[0]
+                if isinstance(earliest, (int, float)) and earliest > 0:
+                    seconds = earliest / 1000 if earliest > 100_000_000_000 else earliest
+                    start = min(start, datetime.fromtimestamp(seconds, ZONE).date().isoformat())
+    return {**scope, 'start': start}
+
+
+def records_in_scope(cfg, scope, *, knowledge_scope=None):
     from src import voc_assets, voc_engine, voc_feishu_content as content
 
     names = content._private_names(cfg, scope)
@@ -69,10 +83,11 @@ def records_in_scope(cfg, scope):
     for topic in topics:
         topic['register_key'] = register_keys[topic['key']]
         topic['member_keys'] = register_members[topic['key']]
-    sops, _ = content._sop_records(cfg, scope, '', names)
-    return {'topics': (topics, len(topics)), 'sops': (sops[:original_limit], len(sops))}
+    knowledge_scope = knowledge_scope or _knowledge_scope(cfg, scope)
+    sops, _ = content._sop_records(cfg, knowledge_scope, '', names)
+    return {'topics': (topics, len(topics)), 'sops': (sops, len(sops))}
 
-def prepare(cfg, records, scope, registry, now, request):
+def prepare(cfg, records, scope, registry, now, request, *, knowledge_scope=None):
     from src.web import guest_evidence as guest
 
     documents = {}
@@ -80,7 +95,8 @@ def prepare(cfg, records, scope, registry, now, request):
     metrics = {}
     base_url = guest.PUBLIC_ORIGIN + guest.PUBLIC_PATH
     for kind, (items, total) in records.items():
-        document = {'start': scope['start'], 'end': scope['end'], 'count': len(items), 'total': total, 'records': []}
+        period = knowledge_scope if kind == 'sops' and knowledge_scope is not None else scope
+        document = {'start': period['start'], 'end': period['end'], 'count': len(items), 'total': total, 'records': []}
         seen = set()
         counts = {'with_case': 0, 'grouped': 0, 'reused': 0}
         previous = request['links'].get(kind, {})
@@ -90,7 +106,7 @@ def prepare(cfg, records, scope, registry, now, request):
                 raise ValueError('The ranking contains a duplicate publication key')
             seen.add(key)
             view = record['_guest_view']
-            entry = {'kind': kind, 'start': scope['start'], 'end': scope['end'],
+            entry = {'kind': kind, 'start': period['start'], 'end': period['end'],
                      **{field: record[field] for field in ('title', 'summary', 'detail')}}
             payload = None
             for qa, anchor in record.get('_guest_anchors', []):
@@ -113,6 +129,8 @@ def prepare(cfg, records, scope, registry, now, request):
                 url = ''
 
             exported = {field: record[field] for field in ('key', 'title', 'summary', 'detail')}
+            if record.get('knowledge_source') is True:
+                exported['knowledge_source'] = True
             if kind == 'topics':
                 exported['consultations'] = record['consultations']
                 exported['register_key'] = record['register_key']
@@ -152,17 +170,15 @@ def build_snapshot(request):
 
     end = started.date()
     scope = {'days': 0, 'start': (end - timedelta(days=6)).isoformat(), 'end': end.isoformat()}
-    records = records_in_scope(cfg, scope)
-    if not records['topics'][0]:
-        return {'status': 'topics_incomplete', 'marker': marker}
-
+    knowledge_scope = _knowledge_scope(cfg, scope)
+    records = records_in_scope(cfg, scope, knowledge_scope=knowledge_scope)
     path = guest._registry(cfg).resolve()
     now = int(started.timestamp())
     if path.is_file():
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=8)) as registry:
-            documents, prepared, metrics = prepare(cfg, records, scope, registry, now, request)
+            documents, prepared, metrics = prepare(cfg, records, scope, registry, now, request, knowledge_scope=knowledge_scope)
     else:
-        documents, prepared, metrics = prepare(cfg, records, scope, None, now, request)
+        documents, prepared, metrics = prepare(cfg, records, scope, None, now, request, knowledge_scope=knowledge_scope)
 
     if request['apply']:
         if maintenance(cfg):
@@ -176,7 +192,9 @@ def build_snapshot(request):
             exported['url'] = url
         if clock_slot(datetime.now(ZONE)) != marker:
             return {'status': 'slot_changed'}
-    return {'filters': FILTERS, 'documents': documents, 'marker': marker, 'source_metrics': metrics}
+    knowledge_keys = [item['key'] for item in documents['sops']['records'] if item.get('knowledge_source') is True]
+    return {'filters': FILTERS, 'documents': documents, 'marker': marker, 'source_metrics': metrics,
+            'knowledge_inventory_complete': True, 'knowledge_keys': knowledge_keys}
 
 def main() -> None:
     raw = sys.stdin.buffer.read(MAX_RESPONSE_BYTES + 1)

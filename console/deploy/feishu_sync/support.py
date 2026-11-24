@@ -167,6 +167,15 @@ def _sop_inventory(last, stage):
             inventory[item["records"][0]["key"]] = item
         for row in doc["records"]:
             inventory[row["key"]] = {"count": 1, "start": doc["start"], "end": doc["end"], "records": [row]}
+    if stage.get("knowledge_inventory_complete") is True:
+        current = set(stage["knowledge_keys"])
+        prior = set(last.get("knowledge_keys", []))
+        for publication in (last, stage):
+            documents = [publication["documents"]["sops"], *publication.get("published_sops", [])]
+            prior.update(row["key"] for document in documents for row in document["records"]
+                         if row.get("knowledge_source") is True)
+        for key in prior - current:
+            inventory.pop(key, None)
     return list(inventory.values())
 
 def _period(value):

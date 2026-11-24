@@ -11,7 +11,7 @@ _HISTORY_LIMIT = 24
 _MAX_RECEIPT_BYTES = 32 * 1024
 _LANES = {
     "tickets": ("工单双向同步", 30, 180, "增量拉取 · 双向回传"),
-    "voc": ("高频问题与知识 SOP", 1800, 2100, "定时整理 · 结果发布"),
+    "voc": ("高频问题与知识沉淀", 1800, 2100, "定时整理 · 结果发布"),
 }
 _COUNTERS = {
     "tickets": {
@@ -24,7 +24,7 @@ _COUNTERS = {
         "detail_pending": "待补全详情",
         "review_pending": "待核验回传",
     },
-    "voc": {"topics": "登记高频问题", "top": "榜单高频问题", "sops": "知识 SOP"},
+    "voc": {"topics": "登记高频问题", "top": "榜单高频问题", "sops": "知识沉淀"},
 }
 _RESULTS = {
     "failed": ("error", "同步失败，任务将在后续调度中重试。"),
@@ -34,8 +34,10 @@ _RESULTS = {
     "maintenance": ("info", "系统维护期间暂停工单同步。"),
     "partial": ("warning", "工单同步部分完成，请查看待处理任务和回传状态。"),
     "ticket_checked": ("success", "已核对七鱼工单和飞书技术回复。"),
-    "voc_published": ("success", "高频问题和知识 SOP 已同步并回读确认。"),
+    "voc_published": ("success", "高频问题和知识沉淀已同步并回读确认。"),
     "voc_checked": ("success", "已检查本期发布状态并核对飞书仪表盘。"),
+    "voc_published_dashboard_pending": ("warning", "高频问题和知识沉淀已同步，仪表盘日志待重试。"),
+    "voc_checked_dashboard_pending": ("warning", "已确认本期数据表同步，仪表盘日志待重试。"),
 }
 
 
@@ -107,13 +109,15 @@ def _result(lane, result):
             return "ticket_checked" if state == "published" else "partial", counters
     elif state == "published":
         register, ranked = result.get("all"), result.get("top")
-        return "voc_published", {
+        code = "voc_published_dashboard_pending" if result.get("dashboard_status") == "pending" else "voc_published"
+        return code, {
             "topics": register.get("topics") if isinstance(register, dict) else None,
             "top": ranked.get("topics") if isinstance(ranked, dict) else None,
             "sops": register.get("sops") if isinstance(register, dict) else None,
         }
     elif state == "already_checked":
-        return "voc_checked", {"topics": result.get("all_topics"), "top": result.get("top_topics"),
+        code = "voc_checked_dashboard_pending" if result.get("dashboard_status") == "pending" else "voc_checked"
+        return code, {"topics": result.get("all_topics"), "top": result.get("top_topics"),
                               "sops": result.get("sops")}
     return "failed", {}
 
@@ -137,8 +141,8 @@ def receipt(path, lane, result, *, timestamp=None):
     else:
         events = sorted([*events, event], key=lambda item: item["timestamp"])
 
-    successful = _RESULTS[code][0] == "success"
-    published = code == "voc_published" or (code in ("ticket_checked", "partial") and any(
+    successful = _RESULTS[code][0] == "success" or code in ("voc_published_dashboard_pending", "voc_checked_dashboard_pending")
+    published = code in ("voc_published", "voc_published_dashboard_pending") or (code in ("ticket_checked", "partial") and any(
         counters.get(key) for key in ("created", "updated")))
     return {"version": 1, "events": events[-_HISTORY_LIMIT:],
             "last_success_at": max(previous.get("last_success_at") or 0, timestamp if successful else 0) or None,

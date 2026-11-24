@@ -8,7 +8,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 ZONE = timezone(timedelta(hours=8))
 JOB_STATUS = {"queued": "等待整理", "running": "整理中", "completed": "已完成",
               "partial": "部分完成", "failed": "整理失败", "skipped": "已跳过"}
-NOTE = "语海 Voc 每半小时同步近 7 天的高频问题。实际同步时间与统计区间见右侧日志。下方表格是高频问题登记表预览。"
+NOTE = "语海 Voc 每半小时同步近 7 天的高频问题及累计知识沉淀。实际同步时间与统计区间见右侧日志。下方表格是高频问题登记表预览。"
 
 
 def _stamp(timestamp):
@@ -20,7 +20,9 @@ def _text(snapshot, synced_at, job):
     count = topics["count"]
     period = "–".join(datetime.fromisoformat(topics[key]).strftime("%m-%d") for key in ("start", "end"))
     registered = snapshot.get("register_count", count)
-    lines = [f"飞书同步 · **{_stamp(synced_at)}** · 成功 · 登记 {registered} / Top {min(100, count)} · 统计 {period}"]
+    knowledge = len(snapshot.get("published_sops", snapshot["documents"]["sops"]["records"]))
+    ranking = "榜单保留上期" if snapshot.get("top_retained") else f"Top {min(100, count)}"
+    lines = [f"飞书同步 · **{_stamp(synced_at)}** · 成功 · 登记 {registered} / {ranking} · 知识 {knowledge} · 统计 {period}"]
     if job:
         status = JOB_STATUS.get(job["status"], "状态未知")
         lines.append(f"语海整理 · **{_stamp(job['updated_at'])}** · {status} · "
