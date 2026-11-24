@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import { apiGet, type VocPlaybookResultsData } from '@/lib/api'
+import { apiGet, type VocKnowledgeLibraryData } from '@/lib/api'
 import { VocKnowledgeLibrary } from './voc-sop-workspace'
 
 vi.mock('@/lib/api', async importOriginal => ({ ...await importOriginal<typeof import('@/lib/api')>(), apiGet: vi.fn() }))
@@ -8,8 +8,9 @@ vi.mock('@/lib/api', async importOriginal => ({ ...await importOriginal<typeof i
 const filters = { source: 'local', days: 7 } as const
 const calls = (name: string) => vi.mocked(apiGet).mock.calls.filter(([route]) => route === name).map(([, params]) => params)
 const source = { qa_id: 1, message_id: 'fixture-message', quote: '买家确认重新测试后已恢复。', ts: 1794441600000 }
-const sops: VocPlaybookResultsData = {
+const sops: VocKnowledgeLibraryData = {
   items: Array.from({ length: 10 }, (_, index) => ({
+    type: 'sop', source_count: 1, updated_at: '2026-11-10 12:00',
     id: `playbook-${index + 1}`, issue_id: `issue-${index + 1}`, title: `退款流程 ${index + 1}`,
     family: 'configuration', platform: '抖音', module: '退款', condition: '主账号',
     status: 'verified', checked_cases: 1, triage: [], missing: [], evidence: [],
@@ -26,25 +27,25 @@ afterEach(() => {
 })
 
 it('keeps the selected SOP page when the full scoped list arrives', async () => {
-  let finish!: (data: VocPlaybookResultsData) => void
-  const full = new Promise<VocPlaybookResultsData>(resolve => { finish = resolve })
+  let finish!: (data: VocKnowledgeLibraryData) => void
+  const full = new Promise<VocKnowledgeLibraryData>(resolve => { finish = resolve })
   vi.mocked(apiGet).mockImplementation(async (_name, params) => params.first_page
     ? { ...sops, items: sops.items.slice(0, 8), first_page_total: 10 } : full)
   render(<VocKnowledgeLibrary filters={filters} onOpenPair={vi.fn()} />)
 
   expect(await screen.findByRole('button', { name: '查看 SOP · 退款流程 1' })).toBeTruthy()
-  expect(calls('voc2/complete-sops')).toEqual([{ ...filters, first_page: 1 }])
-  const pager = within(screen.getByRole('navigation', { name: 'SOP 分页' }))
+  expect(calls('voc2/knowledge-library')).toEqual([{ ...filters, first_page: 1 }])
+  const pager = within(screen.getByRole('navigation', { name: '知识分页' }))
   fireEvent.click(pager.getByRole('button', { name: '下一页' }))
   expect(pager.getByRole('button', { name: '第 2 页' }).getAttribute('aria-current')).toBe('page')
-  expect(calls('voc2/complete-sops')).toEqual([{ ...filters, first_page: 1 }, filters])
+  expect(calls('voc2/knowledge-library')).toEqual([{ ...filters, first_page: 1 }, filters])
   await act(async () => { finish(sops) })
 
   expect(screen.getByRole('button', { name: '查看 SOP · 退款流程 9' })).toBeTruthy()
   expect(screen.queryByRole('button', { name: '查看 SOP · 退款流程 1' })).toBeNull()
   fireEvent.click(pager.getByRole('button', { name: '上一页' }))
   expect(screen.getByRole('button', { name: '查看 SOP · 退款流程 1' })).toBeTruthy()
-  expect(calls('voc2/complete-sops')).toHaveLength(2)
+  expect(calls('voc2/knowledge-library')).toHaveLength(2)
 })
 
 it('searches the first SOP response locally if it already includes the complete list', async () => {
@@ -53,8 +54,8 @@ it('searches the first SOP response locally if it already includes the complete 
   render(<VocKnowledgeLibrary filters={{ ...filters, group: '全部在首页' }} onOpenPair={vi.fn()} />)
 
   await screen.findByRole('button', { name: '查看 SOP · 退款流程 1' })
-  fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理 SOP' }), { target: { value: '退款流程 4' } })
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索沉淀知识' }), { target: { value: '退款流程 4' } })
   expect(screen.getByRole('button', { name: '查看 SOP · 退款流程 4' })).toBeTruthy()
   expect(screen.queryByRole('button', { name: '查看 SOP · 退款流程 1' })).toBeNull()
-  expect(calls('voc2/complete-sops')).toEqual([{ ...filters, group: '全部在首页', first_page: 1 }])
+  expect(calls('voc2/knowledge-library')).toEqual([{ ...filters, group: '全部在首页', first_page: 1 }])
 })

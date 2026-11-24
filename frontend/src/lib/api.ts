@@ -286,6 +286,35 @@ export type VocCasePath = {
   outcome: 'not_recorded'
 }
 export type VocPlaybookResultsData = { items: VocPlaybook[]; total: number; case_paths?: VocCasePath[]; first_page_total?: number }
+type VocLibraryBase = {
+  source_count: number
+  updated_at: string
+  evidence: VocPilotEvidence[]
+}
+export type VocLibraryKnowledge = VocLibraryBase & {
+  type: 'knowledge'
+  id: string
+  title: string
+  status: 'guidance' | 'verified'
+  question: string
+  answer: string
+  scope: string
+  kind: 'configuration_guide' | 'troubleshooting_advice' | 'verified_workaround'
+  steps: string[]
+  cautions: string[]
+  sources: {
+    qa_id: number
+    question: string
+    answer: string
+    staff_name: string
+    customer_name: string
+    asked_at: number
+    question_message_ids: string[]
+    answer_message_ids: string[]
+  }[]
+}
+export type VocLibrarySop = VocPlaybook & VocLibraryBase & { type: 'sop'; status: 'verified' }
+export type VocKnowledgeLibraryData = { items: (VocLibraryKnowledge | VocLibrarySop)[]; total: number; first_page_total?: number }
 
 function validateVoc2Response(name: string, data: unknown, workbench = false): void {
   if (!name.startsWith('voc2/')) return
@@ -416,6 +445,21 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     && isStringArray(v.missing) && pilotEvidenceList(v.evidence)
     && (v.cases === undefined || pilotCases(v.cases)) && (v.impact === undefined || pilotImpact(v.impact))
     && (v.counterevidence === undefined || pilotEvidenceList(v.counterevidence))
+  const libraryItem = (v: unknown) => isRecord(v) && typeof v.id === 'string' && Boolean(v.id)
+    && typeof v.title === 'string' && Boolean(v.title.trim()) && typeof v.updated_at === 'string'
+    && isCount(v.source_count) && v.source_count > 0 && pilotEvidenceList(v.evidence)
+    && Array.isArray(v.evidence) && v.evidence.length > 0
+    && (v.type === 'sop' ? v.status === 'verified' && playbook(v)
+      : v.type === 'knowledge' && (v.status === 'guidance' || v.status === 'verified')
+        && ['question', 'answer', 'scope'].every(key => typeof v[key] === 'string' && Boolean(String(v[key]).trim()))
+        && ['configuration_guide', 'troubleshooting_advice', 'verified_workaround'].includes(String(v.kind))
+        && isStringArray(v.steps) && isStringArray(v.cautions)
+        && Array.isArray(v.sources) && v.sources.length > 0 && v.sources.every(source => isRecord(source)
+          && isCount(source.qa_id) && source.qa_id > 0 && isCount(source.asked_at)
+          && ['question', 'answer', 'staff_name', 'customer_name'].every(key => typeof source[key] === 'string')
+          && Boolean(String(source.answer).trim())
+          && isStringArray(source.question_message_ids) && isStringArray(source.answer_message_ids)
+          && source.answer_message_ids.length > 0))
   const job = (v: unknown) => isRecord(v) && typeof v.id === 'string'
     && ['queued', 'running', 'completed', 'partial', 'failed', 'skipped'].includes(String(v.status))
     && hasCounts(v, ['total', 'processed', 'failed', 'skipped', 'usage_tokens'])
@@ -459,6 +503,7 @@ function validateVoc2Response(name: string, data: unknown, workbench = false): v
     case 'voc2/complete-sops': valid = isCount(data.total) && data.case_paths === undefined && Array.isArray(data.items)
       && data.items.every(item => playbook(item) && item.status === 'verified' && Array.isArray(item.branches)
         && item.branches.length > 0 && item.branches.every((branch: unknown) => isRecord(branch) && branch.status === 'verified')); break
+    case 'voc2/knowledge-library': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(libraryItem); break
     case 'voc2/exceptions': valid = isCount(data.total) && Array.isArray(data.items) && data.items.every(item => isRecord(item)
       && ['id', 'kind', 'question', 'reason', 'created_at'].every(key => typeof item[key] === 'string')); break
     case 'voc2/topic': valid = (workbench ? enrichedTopic(data.topic) : topic(data.topic))
@@ -754,7 +799,7 @@ export async function apiGet<T>(name: string, filters: ApiFilters, signal?: Abor
     validateTicketResponse(name, data, filters)
     validateVocResponse(name, data)
     validateVoc2Response(name, data, filters.workbench === 1)
-    if (filters.first_page && (name === 'voc2/issue-pilot' || name === 'voc2/playbooks' || name === 'voc2/complete-sops')) {
+    if (filters.first_page && (name === 'voc2/issue-pilot' || name === 'voc2/playbooks' || name === 'voc2/complete-sops' || name === 'voc2/knowledge-library')) {
       const page = data as VocIssuePilot & Pick<VocPlaybookResultsData, 'case_paths'>
       const rows = page.items.length + (page.case_paths?.length ?? 0)
       const limit = name === 'voc2/issue-pilot' ? 6 : 8

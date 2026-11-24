@@ -15,6 +15,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from typing import Any, Iterable, Iterator
 
 from .log import get
@@ -24,9 +25,8 @@ log = get("db")
 
 EXTRACT_VERSION = "local-rules-v2"
 
-SOURCE_ARCHIVE_TRIGGERS = """
-DROP TRIGGER IF EXISTS push_sync_forget_message_source;
-DROP TRIGGER IF EXISTS push_sync_forget_session_source;
+_SOURCE_ARCHIVE_DEFINITIONS = {
+    "push_sync_forget_message_source": """\
 CREATE TRIGGER push_sync_forget_message_source AFTER DELETE ON raw_message
 WHEN NOT EXISTS(SELECT 1 FROM source_write_guard WHERE session_id=OLD.session_id) BEGIN
  UPDATE push_sync_state SET source_json='',source_version='',
@@ -34,15 +34,20 @@ WHEN NOT EXISTS(SELECT 1 FROM source_write_guard WHERE session_id=OLD.session_id
  archive_reason=CASE WHEN archive_reason='retention' THEN archive_reason ELSE 'raw_message_deleted' END,
  archived_at=CAST(strftime('%s','now') AS REAL),updated_at=CAST(strftime('%s','now') AS REAL)
  WHERE session_id=OLD.session_id;
-END;
+END""",
+    "push_sync_forget_session_source": """\
 CREATE TRIGGER push_sync_forget_session_source AFTER DELETE ON raw_session BEGIN
  UPDATE push_sync_state SET source_json='',source_version='',
  status=CASE WHEN status IN ('completed','failed') THEN 'archived' ELSE status END,
  archive_reason=CASE WHEN archive_reason='retention' THEN archive_reason ELSE 'raw_session_deleted' END,
  archived_at=CAST(strftime('%s','now') AS REAL),updated_at=CAST(strftime('%s','now') AS REAL)
  WHERE session_id=OLD.session_id;
-END;
-"""
+END""",
+}
+SOURCE_ARCHIVE_TRIGGERS = "\n" + "\n".join(
+    f"DROP TRIGGER IF EXISTS {name};\n{definition};"
+    for name, definition in _SOURCE_ARCHIVE_DEFINITIONS.items()
+) + "\n"
 
 # 滑动窗口裁剪时「这条消息该删了」的判定。
 # 两条路：自己有可信时间戳且过期；或者所属会话已经过期（连带清理，覆盖 ts 缺失的旧数据）。
@@ -217,6 +222,7 @@ CREATE TABLE IF NOT EXISTS q_cluster (
 class DB:
     def __init__(self, path: str):
         self.path = path
+        self._tx_lock = RLock()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         # timeout=30：receiver 和看板是两个进程共享同一个库，
         # 默认 5 秒在批量写时容易撞 "database is locked"。
@@ -230,7 +236,14 @@ class DB:
             for name, definition in (("archive_reason", "TEXT NOT NULL DEFAULT ''"), ("archived_at", "REAL NOT NULL DEFAULT 0")):
                 if name not in columns:
                     self._conn.execute(f"ALTER TABLE push_sync_state ADD COLUMN {name} {definition}")
-            self._conn.executescript(SOURCE_ARCHIVE_TRIGGERS)
+            definitions = dict(self._conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?)",
+                tuple(_SOURCE_ARCHIVE_DEFINITIONS),
+            ))
+            # Opening the callback database must not acquire a write lock merely
+            # to recreate archive triggers while another process imports messages.
+            if definitions != _SOURCE_ARCHIVE_DEFINITIONS:
+                self._conn.executescript("BEGIN IMMEDIATE;\n" + SOURCE_ARCHIVE_TRIGGERS + "COMMIT;")
         self._conn.commit()
 
     # ---------- 基础 ----------
@@ -238,23 +251,26 @@ class DB:
     @contextmanager
     def tx(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         # 导入整批数据时复用同一事务；内部 upsert 用 SAVEPOINT，不能提前提交。
-        nested = self._conn.in_transaction
-        name = f"sp_{time.monotonic_ns()}"
-        begin = "BEGIN IMMEDIATE" if immediate else "BEGIN"
-        self._conn.execute(f"SAVEPOINT {name}" if nested else begin)
-        try:
-            yield self._conn
-            if nested:
-                self._conn.execute(f"RELEASE SAVEPOINT {name}")
-            else:
-                self._conn.commit()
-        except Exception:
-            if nested:
-                self._conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-                self._conn.execute(f"RELEASE SAVEPOINT {name}")
-            else:
-                self._conn.rollback()
-            raise
+        # A shared SQLite connection's in_transaction flag belongs to the
+        # connection. Only the owning thread may nest a transaction within it.
+        with self._tx_lock:
+            nested = self._conn.in_transaction
+            name = f"sp_{time.monotonic_ns()}"
+            begin = "BEGIN IMMEDIATE" if immediate else "BEGIN"
+            self._conn.execute(f"SAVEPOINT {name}" if nested else begin)
+            try:
+                yield self._conn
+                if nested:
+                    self._conn.execute(f"RELEASE SAVEPOINT {name}")
+                else:
+                    self._conn.commit()
+            except Exception:
+                if nested:
+                    self._conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                    self._conn.execute(f"RELEASE SAVEPOINT {name}")
+                else:
+                    self._conn.rollback()
+                raise
 
     def close(self) -> None:
         self._conn.close()

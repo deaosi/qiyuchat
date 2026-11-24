@@ -15,6 +15,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from typing import Any, Iterable, Iterator
 
 from .log import get
@@ -221,6 +222,7 @@ CREATE TABLE IF NOT EXISTS q_cluster (
 class DB:
     def __init__(self, path: str):
         self.path = path
+        self._tx_lock = RLock()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         # timeout=30：receiver 和看板是两个进程共享同一个库，
         # 默认 5 秒在批量写时容易撞 "database is locked"。
@@ -249,23 +251,26 @@ class DB:
     @contextmanager
     def tx(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         # 导入整批数据时复用同一事务；内部 upsert 用 SAVEPOINT，不能提前提交。
-        nested = self._conn.in_transaction
-        name = f"sp_{time.monotonic_ns()}"
-        begin = "BEGIN IMMEDIATE" if immediate else "BEGIN"
-        self._conn.execute(f"SAVEPOINT {name}" if nested else begin)
-        try:
-            yield self._conn
-            if nested:
-                self._conn.execute(f"RELEASE SAVEPOINT {name}")
-            else:
-                self._conn.commit()
-        except Exception:
-            if nested:
-                self._conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-                self._conn.execute(f"RELEASE SAVEPOINT {name}")
-            else:
-                self._conn.rollback()
-            raise
+        # A shared SQLite connection's in_transaction flag belongs to the
+        # connection. Only the owning thread may nest a transaction within it.
+        with self._tx_lock:
+            nested = self._conn.in_transaction
+            name = f"sp_{time.monotonic_ns()}"
+            begin = "BEGIN IMMEDIATE" if immediate else "BEGIN"
+            self._conn.execute(f"SAVEPOINT {name}" if nested else begin)
+            try:
+                yield self._conn
+                if nested:
+                    self._conn.execute(f"RELEASE SAVEPOINT {name}")
+                else:
+                    self._conn.commit()
+            except Exception:
+                if nested:
+                    self._conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                    self._conn.execute(f"RELEASE SAVEPOINT {name}")
+                else:
+                    self._conn.rollback()
+                raise
 
     def close(self) -> None:
         self._conn.close()

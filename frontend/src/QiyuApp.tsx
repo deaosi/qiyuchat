@@ -67,13 +67,14 @@ type AppSidebarProps = {
   onImport: () => void
   showFeishuRobot: boolean
   filters: ApiFilters
+  knowledgeFilters: ApiFilters
   refreshKey: number
   pausePreload: boolean
 }
 
-const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport, showFeishuRobot, filters, refreshKey, pausePreload }: AppSidebarProps) {
+const AppSidebar = memo(function AppSidebar({ view, total, navigate, onImport, showFeishuRobot, filters, knowledgeFilters, refreshKey, pausePreload }: AppSidebarProps) {
   const { setOpenMobile } = useSidebar()
-  const preload = useSidebarPreload(view, filters, refreshKey, pausePreload)
+  const preload = useSidebarPreload(view, filters, refreshKey, pausePreload, knowledgeFilters)
   const activePage = view === 'clusters' ? 'cleaning' : view
   return <Sidebar collapsible="offcanvas" variant="inset">
     <SidebarHeader className="border-b px-4 py-4"><div className="flex h-7 items-center justify-between gap-2"><span className="text-base font-semibold tracking-tight">语海Voc</span><Badge variant="outline" className="text-[10px] font-normal">工作台</Badge></div></SidebarHeader>
@@ -144,6 +145,10 @@ function Workspace() {
   const [range, setRange] = useState(() => filters.start || filters.end ? 'custom' : String(filters.days ?? 7))
   const [customStart, setCustomStart] = useState(filters.start || '')
   const [customEnd, setCustomEnd] = useState(filters.end || '')
+  const [knowledgeDates, setKnowledgeDates] = useState({
+    days: 0, start: undefined as string | undefined, end: undefined as string | undefined,
+    range: '0', draftStart: '', draftEnd: '',
+  })
   const [motion, setMotion] = useState(true)
   const [compact, setCompact] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => { try { return localStorage.getItem('qiyu-theme') === 'dark' ? 'dark' : 'light' } catch { return 'light' } })
@@ -151,6 +156,12 @@ function Workspace() {
   const busy = cleaning
   const { days, start, end, group, staff } = filters
   const sharedScope = useMemo<ApiFilters>(() => ({ source, days, start, end, group, staff }), [days, start, end, group, staff])
+  const knowledgeScope = useMemo<ApiFilters>(() => ({ ...sharedScope, days: knowledgeDates.days,
+    start: knowledgeDates.start, end: knowledgeDates.end }), [sharedScope, knowledgeDates.days, knowledgeDates.start, knowledgeDates.end])
+  const visibleScope = view === 'voc-next' ? knowledgeScope : filters
+  const visibleRange = view === 'voc-next' ? knowledgeDates.range : range
+  const visibleStart = view === 'voc-next' ? knowledgeDates.draftStart : customStart
+  const visibleEnd = view === 'voc-next' ? knowledgeDates.draftEnd : customEnd
   const effectiveFilters = useMemo<ApiFilters>(() => ({ ...sharedScope, ...drillFilters }), [sharedScope, drillFilters])
   const audienceScope = useMemo<ApiFilters>(() => customerGroup ? { ...sharedScope, group: customerGroup } : sharedScope, [sharedScope, customerGroup])
   const activeGroup = view === 'customers' ? audienceScope.group : group
@@ -165,8 +176,8 @@ function Workspace() {
   const recent = useMemo(() => summary.data?.recent?.map(normalizePair) ?? [], [summary.data])
   const page = navigation.find(item => item.id === view)!
   const showQaExport = view !== 'questions' && view !== 'voc-next'
-  const rangeLabel = filters.start || filters.end ? '自定义日期' : filters.days ? `近 ${filters.days} 天` : '全部时间'
-  const scopeLabel = trend.data?.series.length ? `${trend.data.series[0].date} — ${trend.data.series.at(-1)!.date}` : rangeLabel
+  const rangeLabel = visibleScope.start || visibleScope.end ? '自定义日期' : visibleScope.days ? `近 ${visibleScope.days} 天` : '全部时间'
+  const scopeLabel = view === 'overview' && trend.data?.series.length ? `${trend.data.series[0].date} — ${trend.data.series.at(-1)!.date}` : rangeLabel
 
   const clearDrill = useCallback(() => {
     setDrillFilters(current => Object.keys(current).length ? {} : current)
@@ -244,9 +255,31 @@ function Workspace() {
   const drillAudience = (next: Partial<ApiFilters>, reply: Reply = 'all', customerName?: string) =>
     drill({ ...(view === 'customers' && customerGroup ? { group: customerGroup } : {}), ...next }, reply, customerName)
   const openImport = useCallback(() => { if (!busy) setImportOpen(true) }, [busy])
-  const changeDays = (days: number) => { setRange(String(days)); setFilters(current => ({ ...current, days, start: undefined, end: undefined })); setDrillFilters({}) }
-  const reset = () => { clearCustomerGroup(); setFilters({ source, days: 7 }); setRange('7'); setCustomStart(''); setCustomEnd(''); setDrillFilters({}); setInitialReply('all') }
-  const applyCustom = () => { if (!customStart && !customEnd) { toast.error('请至少填写一个日期边界'); return } if (customStart && customEnd && customStart > customEnd) { toast.error('开始日期不能晚于结束日期'); return } setFilters(current => ({ ...current, days: 0, start: customStart, end: customEnd })); setDrillFilters({}) }
+  const changeDays = (days: number) => {
+    if (view === 'voc-next') setKnowledgeDates(current => ({ ...current, days, start: undefined, end: undefined, range: String(days) }))
+    else { setRange(String(days)); setFilters(current => ({ ...current, days, start: undefined, end: undefined })) }
+    setDrillFilters({})
+  }
+  const changeRange = (value: string) => {
+    if (view === 'voc-next') setKnowledgeDates(current => ({ ...current, range: value }))
+    else setRange(value)
+    if (value !== 'custom') changeDays(Number(value))
+  }
+  const reset = () => {
+    clearCustomerGroup()
+    if (view === 'voc-next') {
+      setKnowledgeDates({ days: 0, start: undefined, end: undefined, range: '0', draftStart: '', draftEnd: '' })
+      setFilters(current => ({ ...current, group: '', staff: '' }))
+    } else { setFilters({ source, days: 7 }); setRange('7'); setCustomStart(''); setCustomEnd('') }
+    setDrillFilters({}); setInitialReply('all')
+  }
+  const applyCustom = () => {
+    if (!visibleStart && !visibleEnd) { toast.error('请至少填写一个日期边界'); return }
+    if (visibleStart && visibleEnd && visibleStart > visibleEnd) { toast.error('开始日期不能晚于结束日期'); return }
+    if (view === 'voc-next') setKnowledgeDates(current => ({ ...current, days: 0, start: visibleStart, end: visibleEnd }))
+    else setFilters(current => ({ ...current, days: 0, start: visibleStart, end: visibleEnd }))
+    setDrillFilters({})
+  }
   const cardNavigate = (next: string) => next === 'unanswered' ? drill({}, 'unanswered') : next === 'pairs' ? drill() : sideNavigate(next as View)
   const clean = async () => { setCleanOpen(false); setCleaning(true); try { const result = await apiPost<{ sessions_scanned: number; qa_pairs: number; clusters: number }>('clean', { source }); setDrillFilters({}); setSelected(null); setRefreshKey(key => key + 1); toast.success(`规则清洗完成：处理 ${result.sessions_scanned} 个会话，${result.qa_pairs} 条问答，${result.clusters} 个问题簇。`) } catch (error) { toast.error(error instanceof Error ? error.message : '清洗失败，请重试。') } finally { setCleaning(false) } }
   const exportCsv = async () => {
@@ -261,7 +294,7 @@ function Workspace() {
 
   return <SidebarProvider style={{ '--sidebar-width': 'calc(var(--spacing) * 64)', '--header-height': 'calc(var(--spacing) * 14)' } as CSSProperties}>
     <AppSidebar view={view} total={meta.data?.total} navigate={sideNavigate} onImport={openImport} showFeishuRobot={feishuAccess.data?.allowed === true}
-      filters={sharedScope} refreshKey={refreshKey} pausePreload={busy || importOpen || cleanOpen || Boolean(selected)} />
+      filters={sharedScope} knowledgeFilters={knowledgeScope} refreshKey={refreshKey} pausePreload={busy || importOpen || cleanOpen || Boolean(selected)} />
     <SidebarInset data-density={compact ? 'compact' : 'normal'} data-motion={motion ? 'on' : 'off'}>
       <header className="relative flex h-(--header-height) shrink-0 items-center gap-2 border-b"><PageActivity /><div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6"><SidebarTrigger className="-ml-1" /><Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" /><h1 key={view} className="qiyu-page-title text-base font-medium">{page.title}</h1><div className="ml-auto flex items-center gap-2">
         <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="显示设置"><Settings2 className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-48"><DropdownMenuLabel>显示设置</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuCheckboxItem checked={motion} onCheckedChange={setMotion}>切换动画</DropdownMenuCheckboxItem><DropdownMenuCheckboxItem checked={compact} onCheckedChange={setCompact}>紧凑表格</DropdownMenuCheckboxItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun /> : <Moon />}切换{theme === 'dark' ? '浅色' : '深色'}外观</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
@@ -277,11 +310,11 @@ function Workspace() {
           <div className="mr-auto hidden items-center gap-2 text-sm text-muted-foreground xl:flex"><CalendarDays className="size-4" />{scopeLabel}</div>
           <Select value={activeGroup || 'all'} onValueChange={changeGroup}><SelectTrigger size="sm" className="w-[156px]" aria-label="客户群筛选"><UsersRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客户群</SelectItem>{activeGroup && !meta.data?.groups.includes(activeGroup) && <SelectItem value={activeGroup}>{activeGroup}</SelectItem>}{meta.data?.groups.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}</SelectContent></Select>
           <Select value={filters.staff || 'all'} onValueChange={value => { setFilters(current => ({ ...current, staff: value === 'all' ? '' : value })); setDrillFilters({}) }}><SelectTrigger size="sm" className="w-[134px]" aria-label="客服筛选"><ContactRound className="size-3.5" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部客服</SelectItem>{meta.data?.staff.map(staff => <SelectItem key={staff} value={staff}>{staff}</SelectItem>)}</SelectContent></Select>
-          <Select value={range} onValueChange={value => { setRange(value); if (value !== 'custom') changeDays(Number(value)) }}><SelectTrigger size="sm" className="w-[128px]" aria-label="时间筛选"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="7">最近 7 天</SelectItem><SelectItem value="30">最近 30 天</SelectItem><SelectItem value="90">最近 90 天</SelectItem><SelectItem value="0">全部时间</SelectItem><SelectItem value="custom">自定义日期</SelectItem></SelectContent></Select>
+          <Select value={visibleRange} onValueChange={changeRange}><SelectTrigger size="sm" className="w-[128px]" aria-label="时间筛选"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="7">最近 7 天</SelectItem><SelectItem value="30">最近 30 天</SelectItem><SelectItem value="90">最近 90 天</SelectItem><SelectItem value="0">全部时间</SelectItem><SelectItem value="custom">自定义日期</SelectItem></SelectContent></Select>
           <Button variant="ghost" size="sm" onClick={reset}>重置</Button>{view !== 'voc-chat' && <><RefreshDataButton onRefresh={() => setRefreshKey(key => key + 1)} />{showQaExport && <Button variant="outline" size="sm" onClick={exportCsv} disabled={exporting} aria-busy={exporting}>{exporting ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowDownToLine className="size-3.5" />}<span className="hidden sm:inline">导出脱敏问答</span></Button>}</>}
-          {(view === 'questions' || view === 'voc-next') && <VocBriefingDialog open={briefingOpen} onOpenChange={setBriefingOpen} filters={sharedScope} defaultKind={view === 'voc-next' ? 'sops' : 'topics'} trigger={<Button variant="outline" size="sm"><FileText />飞书成果预览</Button>} />}
+          {(view === 'questions' || view === 'voc-next') && <VocBriefingDialog open={briefingOpen} onOpenChange={setBriefingOpen} filters={view === 'voc-next' ? knowledgeScope : sharedScope} defaultKind={view === 'voc-next' ? 'sops' : 'topics'} trigger={<Button variant="outline" size="sm"><FileText />飞书成果预览</Button>} />}
         </div>}
-        {range === 'custom' && view !== 'cleaning' && view !== 'settings' && view !== 'tickets' && <form className="flex flex-wrap items-center gap-3 px-4 text-sm lg:px-6" onSubmit={event => { event.preventDefault(); applyCustom() }}><label className="flex items-center gap-2">开始日期<Input type="date" value={customStart} onChange={event => setCustomStart(event.target.value)} min="2000-01-01" max="2100-12-31" className="w-40" /></label><label className="flex items-center gap-2">结束日期<Input type="date" value={customEnd} onChange={event => setCustomEnd(event.target.value)} min="2000-01-01" max="2100-12-31" className="w-40" /></label><Button size="sm" type="submit">应用日期</Button></form>}
+        {visibleRange === 'custom' && view !== 'cleaning' && view !== 'settings' && view !== 'tickets' && <form className="flex flex-wrap items-center gap-3 px-4 text-sm lg:px-6" onSubmit={event => { event.preventDefault(); applyCustom() }}><label className="flex items-center gap-2">开始日期<Input type="date" value={visibleStart} onChange={event => { const value = event.target.value; if (view === 'voc-next') setKnowledgeDates(current => ({ ...current, draftStart: value })); else setCustomStart(value) }} min="2000-01-01" max="2100-12-31" className="w-40" /></label><label className="flex items-center gap-2">结束日期<Input type="date" value={visibleEnd} onChange={event => { const value = event.target.value; if (view === 'voc-next') setKnowledgeDates(current => ({ ...current, draftEnd: value })); else setCustomEnd(value) }} min="2000-01-01" max="2100-12-31" className="w-40" /></label><Button size="sm" type="submit">应用日期</Button></form>}
         {view === 'tickets' && <div className="px-4 lg:px-6"><TicketWorkspace selected={linkedTicket} onSelect={selectTicket} refreshKey={refreshKey} /></div>}
         {view === 'overview' && <>
           <QiyuSectionCards summary={summary.data} rangeLabel={rangeLabel} loading={summary.loading} onNavigate={cardNavigate} />
@@ -292,7 +325,7 @@ function Workspace() {
         {view === 'pairs' && <div className="space-y-4 px-4 lg:px-6">{Object.values(drillFilters).some(value => value !== undefined && value !== '') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-muted-foreground">限定条件</span>{drillFilters.cluster && <Badge variant="secondary">问题簇 {drillFilters.cluster}</Badge>}{drillFilters.customer && <Badge variant="secondary">{drillCustomerName || customerLabel(undefined, drillFilters.customer)}</Badge>}{drillFilters.group && <Badge variant="secondary">{drillFilters.group}</Badge>}{drillFilters.start && <Badge variant="secondary">{drillFilters.start}{drillFilters.end !== drillFilters.start ? ` 至 ${drillFilters.end || '不限'}` : ''}</Badge>}<Button variant="ghost" size="xs" onClick={clearDrill}>清除限定条件</Button></div>}<QATable key={`${source}-${JSON.stringify(drillFilters)}-${initialReply}`} data={[]} remote={{ filters: effectiveFilters, refreshKey }} onSelect={openPair} initialReply={initialReply} onFiltersChange={captureTableFilters} /></div>}
         {view === 'settings' && <div className="px-4 lg:px-6"><GatewaySettings onSaved={() => setRefreshKey(key => key + 1)} /></div>}
         {view === 'questions' && <div className="px-4 lg:px-6"><VocFrequencyWorkspace key={linkedTopic ?? 'ranking'} initialTopic={linkedTopic} onCloseLinkedTopic={clearLinkedTopic} filters={sharedScope} refreshKey={refreshKey} onOpenPair={(pair, anchorMessageId) => openPair(pair, anchorMessageId, true)} onOpenChat={openChat} /></div>}
-        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeLibrary filters={sharedScope} refreshKey={refreshKey} onOpenPair={openPair} /></div>}
+        {view === 'voc-next' && <div className="px-4 lg:px-6"><VocKnowledgeLibrary filters={knowledgeScope} refreshKey={refreshKey} onOpenPair={(pair, anchor) => openPair(pair, anchor, true)} /></div>}
         {view === 'voc-chat' && <VocChatWorkspace filters={filters} refreshKey={refreshKey} onScopeChange={setChatScope} />}
         {view === 'clusters' && <div className="px-4 lg:px-6">
           <RuleClusterWorkspace filters={sharedScope} refreshKey={refreshKey} onDrill={drill} />

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import QiyuApp from './QiyuApp'
 import type { Evidence } from '@/components/qiyu/voc-next-workspace'
-import { downloadExport, type VocPlaybook } from '@/lib/api'
+import { downloadExport, type VocPlaybook, type VocLibraryKnowledge } from '@/lib/api'
 import { readTopicLink, topicHref } from '@/lib/voc-topic-link'
 
 const query = vi.hoisted(() => vi.fn())
@@ -29,10 +29,12 @@ const completeSop: VocPlaybook = {
     result_evidence: [sopRef('result', '重新测试后，场景成功触发。')], escalation: '' }],
 }
 let completeSops: VocPlaybook[]
+let libraryKnowledge: VocLibraryKnowledge[]
 let feishuAllowed: boolean
 
 beforeEach(() => {
   completeSops = [completeSop]
+  libraryKnowledge = []
   feishuAllowed = false
   vi.stubGlobal('matchMedia', vi.fn(() => ({ addEventListener: vi.fn(), removeEventListener: vi.fn(), matches: false })))
   query.mockImplementation((endpoint: string, _filters: unknown, _key: number, enabled = true) => ({
@@ -49,7 +51,11 @@ beforeEach(() => {
         total: 1, offset: 0, limit: 20, totals: { questions: 3, unanswered: 1 } },
       'voc2/topics': { items: [topic], total: 1, event_count: 5, status: { latest_job: null, worker_ready: true } },
       'voc2/topic': { topic, events: [evidence] },
-      'voc2/complete-sops': { items: completeSops, total: completeSops.length, first_page_total: completeSops.length },
+      'voc2/knowledge-library': {
+        items: [...completeSops.map(item => ({ ...item, type: 'sop', source_count: item.checked_cases, updated_at: '2026-11-10 12:00' })), ...libraryKnowledge],
+        total: completeSops.length + libraryKnowledge.length,
+        first_page_total: completeSops.length + libraryKnowledge.length,
+      },
       'voc2/issue-pilot': { items: [], total: 0, coverage: { source_events: 0, matched_consultations: 0, classified_consultations: 0, needs_context: 0 } },
     }[endpoint] ?? null,
     loading: false, refreshing: false, error: null, retry: vi.fn(),
@@ -155,9 +161,65 @@ describe('VOC navigation', () => {
     window.history.replaceState(null, '', '#voc-next')
     render(<QiyuApp />)
     expect(screen.getByRole('heading', { name: '沉淀知识库' })).toBeTruthy()
-    expect(screen.getByText('当前范围暂无已验证的完整 SOP')).toBeTruthy()
+    expect(screen.getByText('当前范围暂无可复用的客服知识')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /^查看 SOP/ })).toBeNull()
     expect(query.mock.calls.some(([endpoint]) => endpoint === 'voc2/topics')).toBe(false)
+  })
+
+  it('shows source-backed staff guidance without claiming an observed fix and opens its full context', async () => {
+    completeSops = []
+    const staffReply = '在商品管理中点击同步商品，然后填写在售商品数量。'
+    libraryKnowledge = [{
+      type: 'knowledge', id: 'knowledge_1', title: '新增商品后如何同步', question: '新增商品后如何同步',
+      answer: staffReply, scope: '新增商品同步', kind: 'configuration_guide', status: 'guidance',
+      steps: [staffReply], cautions: [], source_count: 1, updated_at: '2026-11-10 12:00',
+      evidence: [sopRef('staff-source', staffReply)],
+      sources: [{ qa_id: 24, question: '刚上新的商品怎么更新？', answer: staffReply, asked_at: 1794441600000,
+        staff_name: '接待客服', customer_name: '测试店铺', question_message_ids: ['source-question'], answer_message_ids: ['staff-source'] }],
+    }]
+    const read = vi.fn(async (_url: string) => Response.json({
+      pair: { qa_id: 24, session_id: 'knowledge-source', question: '刚上新的商品怎么更新？', answer: staffReply },
+      messages: [{ role: 'staff', content: staffReply, time: '2026-11-10 12:00', source_message_id: 'staff-source' }],
+      archived: false, availability: 'available', context_scope: 'source_session', can_lookup_replies: false,
+    }))
+    vi.stubGlobal('fetch', read)
+    window.history.replaceState(null, '', '#voc-next')
+    render(<QiyuApp />)
+
+    fireEvent.click(screen.getByRole('button', { name: '查看知识 · 新增商品后如何同步' }))
+    const detail = within(screen.getByRole('dialog', { name: '新增商品后如何同步' }))
+    expect(detail.getByText(staffReply)).toBeTruthy()
+    expect(detail.getByText('客服来源指引')).toBeTruthy()
+    expect(detail.queryByText('效果已验证')).toBeNull()
+    expect(detail.getByText('测试店铺 · 接待客服')).toBeTruthy()
+    fireEvent.click(detail.getByRole('button', { name: '查看来源会话 24' }))
+    const context = within(await screen.findByRole('dialog', { name: '问答与相关会话上下文' }))
+    const transcript = within(await context.findByRole('list', { name: '会话消息' }))
+    expect(transcript.getByText(staffReply)).toBeTruthy()
+    expect(read.mock.calls).toHaveLength(1)
+    expect(String(read.mock.calls[0][0])).toBe('/api/detail?source=local&id=24&context=session')
+  })
+
+  it('keeps cumulative knowledge dates independent and applies the chosen library range', async () => {
+    const scrollIntoView = HTMLElement.prototype.scrollIntoView
+    HTMLElement.prototype.scrollIntoView = vi.fn()
+    try {
+      window.history.replaceState(null, '', '#voc-next')
+      render(<QiyuApp />)
+      const range = screen.getByRole('combobox', { name: '时间筛选' })
+      expect(range.textContent).toBe('全部时间')
+      fireEvent.keyDown(range, { key: 'ArrowDown' })
+      fireEvent.click(await screen.findByRole('option', { name: '最近 30 天' }))
+      expect(query.mock.calls.filter(([name, , , enabled]) => name === 'voc2/knowledge-library' && enabled).at(-1)?.[1])
+        .toMatchObject({ days: 30, first_page: 1 })
+
+      fireEvent.click(screen.getByRole('button', { name: 'VOC高频问题' }))
+      expect(screen.getByRole('combobox', { name: '时间筛选' }).textContent).toBe('最近 7 天')
+      fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
+      expect(screen.getByRole('combobox', { name: '时间筛选' }).textContent).toBe('最近 30 天')
+    } finally {
+      HTMLElement.prototype.scrollIntoView = scrollIntoView
+    }
   })
 
   it('keeps the visible scope and exports only the current overview table filters', async () => {
@@ -170,8 +232,9 @@ describe('VOC navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '沉淀知识库' }))
     expect(screen.getByRole('combobox', { name: '客服筛选' })).toBe(staffFilter)
-    const request = query.mock.calls.find(([endpoint, , , enabled]) => endpoint === 'voc2/complete-sops' && enabled)
-    expect(request?.[1]).toMatchObject({ source: 'local', days: 30, staff: '测试客服', first_page: 1 })
+    const request = query.mock.calls.find(([endpoint, , , enabled]) => endpoint === 'voc2/knowledge-library' && enabled)
+    expect(request?.[1]).toMatchObject({ source: 'local', days: 0, staff: '测试客服', first_page: 1 })
+    expect(screen.getByRole('combobox', { name: '时间筛选' }).textContent).toBe('全部时间')
     expect(request?.[1]).not.toHaveProperty('q')
     expect(request?.[1]).not.toHaveProperty('support_intent')
 

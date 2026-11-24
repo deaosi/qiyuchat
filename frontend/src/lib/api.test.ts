@@ -82,6 +82,23 @@ describe('VOC product evidence responses', () => {
   const anchor = { qa_id: 17, message_id: 'msg-7', quote: '平台侧出现授权提示。', ts: 1794358801000 }
   const shared = { id: 'item-1', title: '授权校验', family: 'other', platform: '', module: '', condition: '' }
 
+  it('accepts grounded knowledge guidance and rejects unsupported status or missing source context', async () => {
+    const item = { type: 'knowledge', id: 'knowledge_1', title: '如何同步商品', question: '如何同步商品',
+      answer: '在商品管理中点击同步商品。', scope: '新增商品', kind: 'configuration_guide', status: 'guidance',
+      steps: ['点击同步商品。'], cautions: [], source_count: 1, updated_at: '2026-11-10 12:00',
+      evidence: [anchor], sources: [{ qa_id: 17, question: '新增的商品在哪里？', answer: '在商品管理中点击同步商品。',
+        asked_at: 1794358801000, staff_name: '接待客服', customer_name: '测试店铺',
+        question_message_ids: ['question'], answer_message_ids: ['msg-7'] }] }
+    const data = { items: [item], total: 1, first_page_total: 1 }
+    const fetch = vi.fn().mockResolvedValueOnce(json(data))
+    for (const invalid of [{ ...item, status: 'reference' }, { ...item, sources: [] }, { ...item, evidence: [] }]) {
+      fetch.mockResolvedValueOnce(json({ ...data, items: [invalid] }))
+    }
+    vi.stubGlobal('fetch', fetch)
+    await expect(apiGet('voc2/knowledge-library', { ...filters, first_page: 1 })).resolves.toEqual(data)
+    for (let index = 0; index < 3; index++) await expect(apiGet('voc2/knowledge-library', filters)).rejects.toMatchObject({ status: 502 })
+  })
+
   it('accepts a case without a message anchor but rejects it when declared anchored', async () => {
     const item = { ...shared, scope_status: 'needs_context', evidence_status: 'reported',
       impact: { consultations: 1, sessions: 1, merchants: 0, unidentified_sessions: 1 },

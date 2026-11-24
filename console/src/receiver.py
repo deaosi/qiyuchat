@@ -132,7 +132,8 @@ class EventRouter:
             return 400, "bad json"
 
         try:
-            self._dispatch(event_type, ts, payload)
+            with self.db.tx(immediate=True):
+                self._dispatch(event_type, ts, payload)
         except Exception as e:  # 数据库异常 → 让七鱼重发，避免丢消息
             log.exception("处理事件失败 event=%s: %s", event_type, e)
             return 500, "internal error"
@@ -266,18 +267,19 @@ class EventRouter:
         if not uid or not content:
             return 400, "uid and content required"
 
-        session_id = str(_pick(payload, "sessionId", "sessionid"))             or self.db.current_session_for_uid(uid)
-        if not session_id and self.auto_session:
-            session_id = f"live-{uid}"
-            self.db.bind_uid_session(uid, session_id, ts=stamp)
-        if not session_id:
-            return 400, "no session for uid"
+        with self.db.tx(immediate=True):
+            session_id = str(_pick(payload, "sessionId", "sessionid")) or self.db.current_session_for_uid(uid)
+            if not session_id and self.auto_session:
+                session_id = f"live-{uid}"
+                self.db.bind_uid_session(uid, session_id, ts=stamp)
+            if not session_id:
+                return 400, "no session for uid"
 
-        key = f"CUSTOMER:{msg_id}" if msg_id else f"CUSTOMER:{uid}:{stamp}:{hash(content)}"
-        if not self.db.record_push(key, "CUSTOMER", uid, session_id, stamp,
-                                   json.dumps(payload, ensure_ascii=False)):
-            return 200, ACK_BODY
-        self.db.append_message(session_id, "user", content, stamp)
+            key = f"CUSTOMER:{msg_id}" if msg_id else f"CUSTOMER:{uid}:{stamp}:{hash(content)}"
+            if not self.db.record_push(key, "CUSTOMER", uid, session_id, stamp,
+                                       json.dumps(payload, ensure_ascii=False)):
+                return 200, ACK_BODY
+            self.db.append_message(session_id, "user", content, stamp)
         log.info("CUSTOMER uid=%s session=%s len=%d", uid, session_id, len(content))
         return 200, ACK_BODY
 

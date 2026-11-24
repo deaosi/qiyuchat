@@ -13,7 +13,7 @@ const responses: Record<string, unknown> = {
   pairs: { items: [], total: 0 },
   'feishu-robot/access': { allowed: false },
   'voc2/topics': { items: [], total: 0, event_count: 0 },
-  'voc2/complete-sops': { items: [], total: 0, first_page_total: 0 },
+  'voc2/knowledge-library': { items: [], total: 0, first_page_total: 0 },
 }
 
 const queryCalls = (name: string) => vi.mocked(apiGet).mock.calls.filter(([endpoint]) => endpoint === name)
@@ -63,7 +63,7 @@ it('starts the hovered VOC first page and joins it on click, then reuses overvie
   expect(queryCalls('trend')).toHaveLength(1)
 })
 
-it('cancels a brief hover and warms the verified SOP first page when focused after foreground work', async () => {
+it('cancels a brief hover and warms the cumulative knowledge page after foreground work', async () => {
   const finish = requestActivity.begin('当前页面正在读取')
   try {
     render(<QiyuApp />)
@@ -72,20 +72,20 @@ it('cancels a brief hover and warms the verified SOP first page when focused aft
     await advance(50)
     fireEvent.mouseLeave(destination)
     await advance(250)
-    expect(queryCalls('voc2/complete-sops')).toHaveLength(0)
+    expect(queryCalls('voc2/knowledge-library')).toHaveLength(0)
 
     fireEvent.focus(destination)
     await advance(200)
-    expect(queryCalls('voc2/complete-sops')).toHaveLength(0)
+    expect(queryCalls('voc2/knowledge-library')).toHaveLength(0)
     await act(async () => { finish() })
-    expect(queryCalls('voc2/complete-sops')).toHaveLength(1)
-    expect(queryCalls('voc2/complete-sops')[0][1]).toMatchObject({ days: 7, first_page: 1 })
-    expect(queryCalls('voc2/complete-sops')[0][3]).toEqual({ prefetch: true })
+    expect(queryCalls('voc2/knowledge-library')).toHaveLength(1)
+    expect(queryCalls('voc2/knowledge-library')[0][1]).toMatchObject({ days: 0, first_page: 1 })
+    expect(queryCalls('voc2/knowledge-library')[0][3]).toEqual({ prefetch: true })
 
     fireEvent.click(destination)
-    expect(screen.getByText('当前范围暂无已验证的完整 SOP')).toBeTruthy()
+    expect(screen.getByText('当前范围暂无可复用的客服知识')).toBeTruthy()
     await advance(0)
-    expect(queryCalls('voc2/complete-sops')).toHaveLength(1)
+    expect(queryCalls('voc2/knowledge-library')).toHaveLength(1)
   } finally {
     finish()
   }

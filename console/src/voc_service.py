@@ -414,6 +414,8 @@ def get(cfg: Settings, name: str, filters: dict, identity: str = '', *,
         return engine.topic_detail(cfg, filters, identity, workbench=True)
     if name == 'complete-sops':
         return _snapshot_view(cfg, name, filters, lambda: engine.complete_sops(cfg, filters))
+    if name == 'knowledge-library':
+        return _snapshot_view(cfg, name, filters, lambda: engine.knowledge_library(cfg, filters))
     if name=='summary':
         result=engine.summary(cfg,filters)
         all_jobs=jobs(cfg)['items']

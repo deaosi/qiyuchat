@@ -4,26 +4,26 @@ import { prefetchApi } from '@/lib/api-prefetch'
 import { requestActivity } from '@/lib/request-activity'
 import { vocTopicPageFilters } from '@/lib/voc-first-page'
 
-function firstPageRequests(view: string, filters: ApiFilters) {
+function firstPageRequests(view: string, filters: ApiFilters, knowledgeFilters: ApiFilters) {
   switch (view) {
     case 'overview':
       return [{ name: 'summary', filters }, { name: 'trend', filters }]
     case 'questions':
       return [{ name: 'voc2/topics', filters: vocTopicPageFilters({ ...filters, support_intent: 'all', diagnosis_status: 'all' }, 'all', 0) }]
     case 'voc-next':
-      return [{ name: 'voc2/complete-sops', filters: { ...filters, first_page: 1 as const } }]
+      return [{ name: 'voc2/knowledge-library', filters: { ...knowledgeFilters, first_page: 1 as const } }]
     default:
       return []
   }
 }
 
-export function useSidebarPreload(view: string, filters: ApiFilters, refreshKey: number, paused: boolean) {
+export function useSidebarPreload(view: string, filters: ApiFilters, refreshKey: number, paused: boolean, knowledgeFilters: ApiFilters) {
   const [target, setTarget] = useState<string | null>(null)
   const active = useRef<Promise<unknown> | null>(null)
 
   useEffect(() => {
     if (!target || target === view || paused) return
-    const requests = firstPageRequests(target, filters)
+    const requests = firstPageRequests(target, filters, knowledgeFilters)
     if (!requests.length) return
 
     let cancelled = false
@@ -54,7 +54,7 @@ export function useSidebarPreload(view: string, filters: ApiFilters, refreshKey:
       unsubscribe()
       document.removeEventListener('visibilitychange', next)
     }
-  }, [target, view, filters, refreshKey, paused])
+  }, [target, view, filters, knowledgeFilters, refreshKey, paused])
 
   return {
     prepare: setTarget,

@@ -23,9 +23,10 @@ function playbook(id: string, title: string, branches: VocPlaybookBranch[]): Voc
 }
 
 function mockList(items: VocPlaybook[]) {
+  const records = items.map(item => ({ ...item, type: 'sop', source_count: item.checked_cases, updated_at: '2026-11-10 12:00' }))
   vi.mocked(useApi).mockImplementation((_name, filters, _key, enabled = true) => ({
-    data: enabled ? filters.first_page ? { items: items.slice(0, 8), total: items.length, first_page_total: items.length }
-      : { items, total: items.length } : null,
+    data: enabled ? filters.first_page ? { items: records.slice(0, 8), total: records.length, first_page_total: records.length }
+      : { items: records, total: records.length } : null,
     loading: false, refreshing: false, error: null, retry: vi.fn(),
   }) as ReturnType<typeof useApi>)
 }
@@ -67,18 +68,18 @@ it('loads later SOP pages on demand and applies search across the complete list'
   mockList(items)
   render(<VocKnowledgeLibrary filters={{ source: 'local', days: 7 }} onOpenPair={vi.fn()} />)
 
-  const list = () => within(screen.getByRole('list', { name: 'SOP 案例' }))
+  const list = () => within(screen.getByRole('list', { name: '沉淀知识' }))
   expect(list().getAllByRole('listitem')).toHaveLength(8)
   expect(vi.mocked(useApi).mock.calls.some(([, filters, , enabled]) => !filters.first_page && enabled)).toBe(false)
   fireEvent.click(screen.getByRole('button', { name: '下一页' }))
   expect(list().getAllByRole('listitem')).toHaveLength(8)
   expect(screen.getByRole('button', { name: '第 2 页' }).getAttribute('aria-current')).toBe('page')
   expect(screen.getByText('9–16 / 共 18 项')).toBeTruthy()
-  fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理 SOP' }), { target: { value: '18' } })
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索沉淀知识' }), { target: { value: '18' } })
   expect(list().getAllByRole('listitem')).toHaveLength(1)
   expect(list().getByRole('button', { name: '查看 SOP · 场景案例 18' })).toBeTruthy()
-  fireEvent.change(screen.getByRole('searchbox', { name: '搜索处理 SOP' }), { target: { value: '不存在的处理方法' } })
-  expect(screen.getByText('未找到匹配的 SOP')).toBeTruthy()
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索沉淀知识' }), { target: { value: '不存在的处理方法' } })
+  expect(screen.getByText('未找到匹配的知识')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '清除搜索' }))
   expect(list().getAllByRole('listitem')).toHaveLength(8)
 })

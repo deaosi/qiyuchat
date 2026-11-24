@@ -791,8 +791,8 @@ def _knowledge_for_events(cfg: Settings, candidates: list[dict], rows: list[dict
     return _with_conversation_verification(cfg, items, rows, events=all_events)
 
 
-def knowledge(cfg: Settings, filters: dict, knowledge_id: str = "") -> dict:
-    current = _sources(cfg, {})
+def knowledge(cfg: Settings, filters: dict, knowledge_id: str = "", *, _current: dict | None = None) -> dict:
+    current = _sources(cfg, {}) if _current is None else _current
     all_events = _events(cfg, {}, _current=current)
     focus = filters.get("focus_topic", "")
     if focus and variants.mode(cfg) == "zhihuige":
@@ -982,6 +982,15 @@ def complete_sops(cfg: Settings, filters: dict) -> dict:
                      | {"status": "verified", "checked_cases": len(checked), "branches": branches,
                         "triage": [], "missing": [], "evidence": []})
     return {"items": items, "total": len(items)}
+
+
+def knowledge_library(cfg: Settings, filters: dict) -> dict:
+    from . import voc_knowledge_library
+
+    current = _sources(cfg, {})
+    answers = knowledge(cfg, filters, _current=current)["items"]
+    sops = complete_sops(cfg, filters)["items"]
+    return voc_knowledge_library.build(answers, current, sops, _when)
 
 
 def exceptions(cfg: Settings, filters: dict) -> dict:
